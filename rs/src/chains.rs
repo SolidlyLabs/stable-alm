@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 pub const BASE: u64 = 8453;
+/// Chains Solidly no longer runs on (Fantom, retired 4 Oct 2026).
+pub const RETIRED: [u64; 1] = [250];
 
 #[derive(Clone, Debug)]
 pub struct Chain {
@@ -22,32 +24,41 @@ pub struct Chain {
     pub usd: String,
     pub solid: String,
     pub solid_lp_pool: String,
+    pub wnative: String,
 }
 
 fn defaults() -> Value {
+    // The chains Solidly V3 runs on (Fantom was retired on 4 Oct 2026). SOLID has the same address
+    // everywhere except Ethereum. `wnative` is the wrapped gas token, used to price gas in USD.
     json!({
         "8453": {"name": "Base", "enabled": true, "rpc": "https://solidly.com/api/rpc/8453/",
                  "send_rpc": "https://mainnet.base.org", "explorer": "https://basescan.org/",
                  "block_time_s": 2, "genesis_ts": 1686789347, "gas_symbol": "ETH", "min_gas": 0.0002,
                  "usd": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                 "wnative": "0x4200000000000000000000000000000000000006",
                  "solid": "0x777cf5ba9c291a1a8f57ff14836f6f9dc5c0f9dd",
                  "solid_lp_pool": "0xd09f2ebaf365fc97a5bbdefc15703312165638e4"},
         "42161": {"name": "Arbitrum", "enabled": false, "rpc": "https://solidly.com/api/rpc/42161/",
                   "send_rpc": "https://arb1.arbitrum.io/rpc", "explorer": "https://arbiscan.io/", "gas_symbol": "ETH",
-                  "min_gas": 0.0002, "usd": "0xaf88d065e77c8cc2239327c5edb3a432268e5831"},
+                  "min_gas": 0.0002, "usd": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+                  "wnative": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+                  "solid": "0x777cf5ba9c291a1a8f57ff14836f6f9dc5c0f9dd"},
         "10": {"name": "Optimism", "enabled": false, "rpc": "https://solidly.com/api/rpc/10/",
                "send_rpc": "https://mainnet.optimism.io", "explorer": "https://optimistic.etherscan.io/",
                "block_time_s": 2, "gas_symbol": "ETH", "min_gas": 0.0002,
-               "usd": "0x0b2c639c533813f4aa9d7837caf62653d097ff85"},
+               "usd": "0x0b2c639c533813f4aa9d7837caf62653d097ff85",
+               "wnative": "0x4200000000000000000000000000000000000006",
+               "solid": "0x777cf5ba9c291a1a8f57ff14836f6f9dc5c0f9dd"},
         "1": {"name": "Ethereum", "enabled": false, "rpc": "https://solidly.com/api/rpc/1/",
               "send_rpc": "https://ethereum-rpc.publicnode.com", "explorer": "https://etherscan.io/", "block_time_s": 12,
-              "gas_symbol": "ETH", "min_gas": 0.003, "usd": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},
+              "gas_symbol": "ETH", "min_gas": 0.003, "usd": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+              "wnative": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+              "solid": "0x777172d858dc1599914a1c4c6c9fc48c99a60990"},
         "146": {"name": "Sonic", "enabled": false, "rpc": "https://solidly.com/api/rpc/146/",
                 "send_rpc": "https://rpc.soniclabs.com", "explorer": "https://sonicscan.org/", "gas_symbol": "S",
-                "min_gas": 0.5, "usd": "0x29219dd400f2bf60e5a23d13be72b486d4038894"},
-        "250": {"name": "Fantom", "enabled": false, "rpc": "https://solidly.com/api/rpc/250/",
-                "send_rpc": "https://rpcapi.fantom.network", "explorer": "https://ftmscan.com/", "gas_symbol": "FTM",
-                "min_gas": 0.5, "usd": "0x2f733095b80a04b38b0d10cc884524a3d09b836a"}
+                "min_gas": 0.5, "usd": "0x29219dd400f2bf60e5a23d13be72b486d4038894",
+                "wnative": "0x039e2fb66102314ce7b64ce5ce3e5183bc94ad38",
+                "solid": "0x777cf5ba9c291a1a8f57ff14836f6f9dc5c0f9dd"}
     })
 }
 
@@ -62,6 +73,9 @@ fn load_all() -> HashMap<u64, Chain> {
     let mut out = HashMap::new();
     for (k, v) in merged.as_object().unwrap() {
         let Ok(id) = k.parse::<u64>() else { continue };
+        if RETIRED.contains(&id) {
+            continue;
+        }
         let s = |f: &str| v[f].as_str().unwrap_or("").to_lowercase();
         out.insert(
             id,
@@ -84,6 +98,7 @@ fn load_all() -> HashMap<u64, Chain> {
                 usd: s("usd"),
                 solid: s("solid"),
                 solid_lp_pool: s("solid_lp_pool"),
+                wnative: s("wnative"),
             },
         );
     }
@@ -107,6 +122,7 @@ pub fn get(id: u64) -> Chain {
         usd: String::new(),
         solid: String::new(),
         solid_lp_pool: String::new(),
+        wnative: String::new(),
     })
 }
 
@@ -117,13 +133,33 @@ pub fn all() -> Vec<Chain> {
     v
 }
 
+/// Turn a chain on or off (config/chains.json). Enabled chains are listed in the pools table and
+/// get the all-pools fee vs arbitrage figure; a chain with configured pools is managed either way.
+pub fn set_enabled(id: u64, on: bool) -> Result<(), String> {
+    if RETIRED.contains(&id) || !defaults().as_object().unwrap().contains_key(&id.to_string()) {
+        return Err(format!("chain {id} is not supported"));
+    }
+    let p = crate::paths::config().join("chains.json");
+    let mut user: Value = std::fs::read_to_string(&p).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!({}));
+    if !user.is_object() {
+        user = json!({});
+    }
+    if !user[id.to_string()].is_object() {
+        user[id.to_string()] = json!({});
+    }
+    user[id.to_string()]["enabled"] = json!(on);
+    crate::settings::write_atomic(&p, &user).map_err(|e| e.to_string())?;
+    *CACHE.lock().unwrap() = None;
+    Ok(())
+}
+
 /// Registry for the UI.
 pub fn as_json() -> Value {
     Value::Array(
         all()
             .into_iter()
             .map(|c| json!({"id": c.id, "name": c.name, "enabled": c.enabled, "explorer": c.explorer,
-                            "gas_symbol": c.gas_symbol, "usd": c.usd, "solid": c.solid}))
+                            "gas_symbol": c.gas_symbol, "min_gas": c.min_gas_wei / 1e18, "usd": c.usd, "solid": c.solid}))
             .collect(),
     )
 }

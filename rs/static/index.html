@@ -3,66 +3,177 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>stable-alm</title>
+<title>Stable ALM</title>
 <style>
-:root{--bg:#0d0f13;--card:#151820;--card2:#1b1f29;--line:#252a36;--fg:#e7e9ef;--mute:#8a92a6;--acc:#5b9cff;--acc2:#7c5cff;--ok:#3fbf7f;--warn:#e0a63a;--bad:#e5534b;
-  --c1:#5b9cff;--c2:#3fbf7f;--c3:#e0a63a;--c4:#c065e8;--c5:#e5534b;--c6:#41c6c6}
-@media (prefers-color-scheme: light){:root{--bg:#f4f5f8;--card:#fff;--card2:#f7f8fa;--line:#e3e6ec;--fg:#191d26;--mute:#667085;--acc:#2f6fe0}}
-*{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
-a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
-header{position:sticky;top:0;z-index:5;background:color-mix(in srgb,var(--bg) 92%,transparent);backdrop-filter:blur(6px);border-bottom:1px solid var(--line)}
-.bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:12px 20px}
-.brand{font-weight:700;font-size:16px;letter-spacing:.2px;margin-right:6px}.brand span{color:var(--acc)}
-nav{display:flex;gap:2px;padding:0 14px;overflow-x:auto}nav button{background:none;border:0;border-bottom:2px solid transparent;color:var(--mute);padding:9px 12px;border-radius:0;font-weight:500}
-nav button.on{color:var(--fg);border-color:var(--acc)}
-main{max-width:1280px;margin:0 auto;padding:18px 20px 60px}
-.grid{display:grid;gap:14px}.g2{grid-template-columns:repeat(auto-fit,minmax(min(100%,460px),1fr))}.kpis{grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
-.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;min-width:0}
-.card h2{font-size:14px;margin:0 0 10px;color:var(--mute);font-weight:600;text-transform:uppercase;letter-spacing:.5px}
-.kpi .v{font-size:22px;font-weight:650;font-variant-numeric:tabular-nums}.kpi .l{color:var(--mute);font-size:12px}
-.badge{padding:3px 10px;border-radius:99px;font-weight:700;font-size:11px;letter-spacing:.4px}
-.b-live{background:var(--bad);color:#fff}.b-dry{background:var(--acc);color:#fff}.b-paused{background:var(--warn);color:#111}
-table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
-th{color:var(--mute);font-weight:500;font-size:12px;white-space:nowrap}tr:last-child td{border-bottom:0}
-.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.mute{color:var(--mute)}.small{font-size:12px}
-.ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}
-button{background:var(--acc);color:#fff;border:0;border-radius:8px;padding:7px 12px;font:inherit;cursor:pointer;white-space:nowrap}
-button:disabled{opacity:.45;cursor:default}button.sec{background:transparent;color:var(--fg);border:1px solid var(--line)}button.danger{background:var(--bad)}button.sm{padding:4px 9px;font-size:12px}
-input,select{background:var(--card2);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:7px 9px;font:inherit;width:100%}
-input[type=checkbox]{width:auto;accent-color:var(--acc)}label.f{font-size:12px;color:var(--mute);display:block;margin-bottom:3px}
-.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.sp{flex:1}.fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px 14px}
-.scroll{overflow:auto}.tall{max-height:520px}pre{white-space:pre-wrap;font:12px/1.45 ui-monospace,Consolas,monospace;margin:0}
-details summary{cursor:pointer;color:var(--acc)}
-.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}.d-ok{background:var(--ok)}.d-off{background:var(--mute)}.d-bad{background:var(--bad)}
-.pair{display:flex;align-items:center;gap:8px}.logos{display:flex}.logo{width:22px;height:22px;border-radius:50%;background:var(--card2);border:1px solid var(--line);object-fit:cover;flex:none}
-.logos .logo+.logo{margin-left:-7px}.ph{display:inline-flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:var(--mute)}
-.alloc-bar{display:flex;height:12px;border-radius:99px;overflow:hidden;background:var(--card2);border:1px solid var(--line);margin:6px 0 4px}
-.alloc-bar div{height:100%}.legend{display:flex;flex-wrap:wrap;gap:12px;font-size:12px;color:var(--mute)}.sw{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:middle}
-.apr{font-weight:600}.apr.hi{color:var(--ok)}.chip{font-size:11px;padding:2px 7px;border-radius:99px;border:1px solid var(--line);color:var(--mute);white-space:nowrap}
-.picker{position:relative}.picker .sel{display:flex;align-items:center;gap:8px;width:100%;background:var(--card2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;color:var(--fg);cursor:pointer}
-.picker .menu{position:absolute;z-index:20;top:calc(100% + 4px);left:0;right:0;min-width:300px;background:var(--card);border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 30px rgba(0,0,0,.35);padding:8px;display:none}
+:root{
+  --bg:#0b0d10;--bg2:#0f1216;--card:#13171c;--card2:#191e25;--line:#232a33;--line2:#2e3743;
+  --fg:#e9edf2;--fg2:#c3cad4;--mute:#7d8794;--acc:#38e0a6;--acc-ink:#04140e;--acc-soft:rgba(56,224,166,.12);
+  --ok:#38e0a6;--warn:#f2b544;--bad:#ff6b6b;--info:#6aa8ff;
+  --c1:#6aa8ff;--c2:#38e0a6;--c3:#f2b544;--c4:#c48bff;--c5:#ff6b6b;--c6:#4fd1d9;
+  --sans:"Segoe UI Variable Text","Segoe UI Variable","SF Pro Text",-apple-system,"Segoe UI",system-ui,sans-serif;
+  --display:"Segoe UI Variable Display","SF Pro Display",-apple-system,"Segoe UI",system-ui,sans-serif;
+  --mono:"Cascadia Mono","Cascadia Code","SF Mono",ui-monospace,Menlo,Consolas,monospace;
+  --r:14px;--shadow:0 1px 0 rgba(255,255,255,.03) inset,0 12px 40px -18px rgba(0,0,0,.6)}
+@media (prefers-color-scheme: light){:root{
+  --bg:#f3f5f7;--bg2:#eceff3;--card:#ffffff;--card2:#f6f8fa;--line:#e2e6eb;--line2:#d3d9e0;--fg:#121820;--fg2:#33404d;--mute:#6b7683;
+  --acc:#0b9e6f;--acc-ink:#ffffff;--acc-soft:rgba(11,158,111,.10);--ok:#0b9e6f;--warn:#b7791f;--bad:#d64545;--info:#2f6fe0;
+  --shadow:0 1px 2px rgba(16,24,40,.04),0 8px 24px -12px rgba(16,24,40,.12)}}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 var(--sans);-webkit-font-smoothing:antialiased}
+body{background:radial-gradient(1200px 500px at 85% -10%,color-mix(in srgb,var(--acc) 7%,transparent),transparent 60%),var(--bg);min-height:100vh}
+a{color:var(--info);text-decoration:none}a:hover{text-decoration:underline}
+.num,.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+/* header */
+header{position:sticky;top:0;z-index:10;background:color-mix(in srgb,var(--bg) 86%,transparent);backdrop-filter:saturate(1.4) blur(10px);border-bottom:1px solid var(--line)}
+.bar{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:12px 24px;max-width:1400px;margin:0 auto}
+.brand{display:flex;align-items:center;gap:10px;font:650 16px/1 var(--display);letter-spacing:.1px}
+.brand i{width:22px;height:22px;border-radius:7px;background:conic-gradient(from 210deg,var(--acc),var(--info),var(--acc));box-shadow:0 0 18px -4px var(--acc)}
+.badge{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:99px;font:700 11px/1 var(--sans);letter-spacing:.6px;text-transform:uppercase}
+.badge::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.b-live{background:color-mix(in srgb,var(--bad) 16%,transparent);color:var(--bad)}.b-live::before{animation:pulse 1.6s infinite}
+.b-dry{background:color-mix(in srgb,var(--info) 16%,transparent);color:var(--info)}.b-paused{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 color-mix(in srgb,var(--bad) 60%,transparent)}50%{box-shadow:0 0 0 5px transparent}}
+#cycle{font-size:12px;color:var(--mute)}
+nav{display:flex;gap:4px;padding:0 20px;max-width:1400px;margin:0 auto;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}nav::-webkit-scrollbar{display:none}
+nav button{background:none;border:0;color:var(--mute);padding:10px 12px 11px;border-radius:0;font:550 13px var(--sans);position:relative}
+nav button:hover{color:var(--fg)}nav button.on{color:var(--fg)}
+nav button.on::after{content:"";position:absolute;left:10px;right:10px;bottom:0;height:2px;border-radius:2px;background:var(--acc)}
+main{max-width:1400px;margin:0 auto;padding:22px 24px 80px}
+section{animation:rise .35s ease both}@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.grid{display:grid;gap:14px}.g2{grid-template-columns:repeat(auto-fit,minmax(min(100%,480px),1fr))}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px;min-width:0;box-shadow:var(--shadow)}
+.card h2,.h{font:650 11px/1.2 var(--sans);letter-spacing:1px;text-transform:uppercase;color:var(--mute);margin:0 0 12px}
+/* hero */
+.hero{display:grid;grid-template-columns:minmax(0,1.3fr) repeat(auto-fit,minmax(150px,1fr));gap:14px}
+.kpi .l{color:var(--mute);font-size:12px}.kpi .v{font:600 26px/1.15 var(--mono);letter-spacing:-.5px;margin:4px 0 2px;font-variant-numeric:tabular-nums}
+.kpi .s{font-size:12px;color:var(--mute)}
+.kpi.main{background:linear-gradient(160deg,color-mix(in srgb,var(--acc) 9%,var(--card)),var(--card) 60%);border-color:color-mix(in srgb,var(--acc) 25%,var(--line))}
+.kpi.main .v{font-size:34px}
+.pos{color:var(--ok)}.neg{color:var(--bad)}
+/* chain strip */
+.chains{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:14px}
+.chaincard{position:relative;overflow:hidden}
+.chaincard::before{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:var(--cc)}
+.chaincard .top{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.chaincard .bal{font:600 22px/1.1 var(--mono);font-variant-numeric:tabular-nums}
+.kv{display:grid;grid-template-columns:1fr auto;gap:3px 12px;font-size:12px;margin-top:10px}
+.kv>span:nth-of-type(odd){color:var(--mute)}.kv>span:nth-of-type(even){font-family:var(--mono);text-align:right}
+.kv .sep{grid-column:1/-1;border-top:1px dashed var(--line);margin:4px 0}
+.cdot{width:9px;height:9px;border-radius:50%;background:var(--cc);box-shadow:0 0 0 3px color-mix(in srgb,var(--cc) 22%,transparent);flex:none}
+.ctag{display:inline-flex;align-items:center;gap:5px;font:600 10.5px/1 var(--sans);letter-spacing:.3px;padding:3px 7px 3px 6px;border-radius:99px;background:color-mix(in srgb,var(--cc) 14%,transparent);color:color-mix(in srgb,var(--cc) 80%,var(--fg));white-space:nowrap}
+.ctag::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--cc)}
+/* tables */
+table{width:100%;border-collapse:separate;border-spacing:0}
+th,td{text-align:left;padding:10px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
+th{color:var(--mute);font:600 11px/1.2 var(--sans);letter-spacing:.4px;text-transform:uppercase;white-space:nowrap;position:sticky;top:0;background:var(--card);z-index:1}
+tbody tr{transition:background .12s}tbody tr:hover{background:color-mix(in srgb,var(--card2) 70%,transparent)}
+tr:last-child td{border-bottom:0}
+th.num,td.num{text-align:right;white-space:nowrap}
+th.sort{cursor:pointer;user-select:none}th.sort:hover{color:var(--fg)}
+th.sort .ar{display:inline-block;width:10px;margin-left:3px;opacity:.35}th.sort.on{color:var(--fg)}th.sort.on .ar{opacity:1;color:var(--acc)}
+tr.mine td:first-child{box-shadow:inset 3px 0 0 var(--acc)}
+tr.mine{background:color-mix(in srgb,var(--acc) 4%,transparent)}
+.mute{color:var(--mute)}.small{font-size:12px}.ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}
+/* controls */
+button{background:var(--acc);color:var(--acc-ink);border:0;border-radius:9px;padding:8px 13px;font:600 13px var(--sans);cursor:pointer;white-space:nowrap;transition:transform .08s,filter .15s,background .15s}
+button:hover{filter:brightness(1.08)}button:active{transform:translateY(1px)}button:disabled{opacity:.45;cursor:default}
+button.sec{background:transparent;color:var(--fg);border:1px solid var(--line2)}button.sec:hover{background:var(--card2)}
+button.danger{background:var(--bad);color:#fff}button.sm{padding:5px 10px;font-size:12px;border-radius:8px}button.ghost{background:none;color:var(--mute);border:0;padding:4px 6px}
+input,select{background:var(--card2);color:var(--fg);border:1px solid var(--line);border-radius:9px;padding:8px 10px;font:inherit;width:100%;transition:border-color .15s,box-shadow .15s}
+input:focus,select:focus{outline:0;border-color:color-mix(in srgb,var(--acc) 60%,var(--line));box-shadow:0 0 0 3px var(--acc-soft)}
+input[type=checkbox]{width:auto;accent-color:var(--acc)}input[type=range]{padding:0;accent-color:var(--acc);background:none;border:0;box-shadow:none}
+label.f{font-size:12px;color:var(--mute);display:block;margin-bottom:4px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.sp{flex:1}
+.fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px 16px}
+.scroll{overflow:auto}.tall{max-height:560px}pre{white-space:pre-wrap;font:12px/1.5 var(--mono);margin:0}
+details summary{cursor:pointer;color:var(--info);list-style:none}details summary::-webkit-details-marker{display:none}
+/* switch + segmented chips */
+.sw{position:relative;display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--fg2);user-select:none}
+.sw input{position:absolute;opacity:0;pointer-events:none}
+.sw .t{width:32px;height:18px;border-radius:99px;background:var(--line2);position:relative;transition:background .15s;flex:none}
+.sw .t::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#fff;transition:transform .15s}
+.sw input:checked+.t{background:var(--acc)}.sw input:checked+.t::after{transform:translateX(14px)}
+.sw input:focus-visible+.t{box-shadow:0 0 0 3px var(--acc-soft)}
+.chipbtn{display:inline-flex;align-items:center;gap:7px;padding:7px 12px 7px 10px;border-radius:99px;border:1px solid var(--line2);background:var(--card);color:var(--mute);font:600 12.5px var(--sans)}
+.chipbtn .cdot{box-shadow:none;opacity:.35}
+.chipbtn.on{color:var(--fg);border-color:color-mix(in srgb,var(--cc) 55%,var(--line2));background:color-mix(in srgb,var(--cc) 10%,var(--card))}
+.chipbtn.on .cdot{opacity:1;box-shadow:0 0 0 3px color-mix(in srgb,var(--cc) 25%,transparent)}
+.chipbtn .n{font:500 11px var(--mono);color:var(--mute)}
+.chipbtn:hover{filter:none;background:var(--card2)}
+.toolbar{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center}
+.search{position:relative;flex:1;min-width:200px;max-width:340px}.search input{padding-left:32px}
+.search::before{content:"⌕";position:absolute;left:11px;top:50%;transform:translateY(-52%);color:var(--mute);font-size:16px}
+.mini{width:120px}.mini input{padding:6px 8px}
+/* pairs */
+.pair{display:flex;align-items:center;gap:10px}.logos{display:flex}.logo{width:24px;height:24px;border-radius:50%;background:var(--card2);border:1.5px solid var(--card);object-fit:cover;flex:none}
+.logos .logo+.logo{margin-left:-8px}.ph{display:inline-flex;align-items:center;justify-content:center;font:700 8.5px var(--sans);color:var(--mute)}
+.chip{font-size:11px;padding:2px 8px;border-radius:99px;border:1px solid var(--line2);color:var(--mute);white-space:nowrap}
+.chip.volatile{border-color:color-mix(in srgb,var(--warn) 45%,var(--line));color:var(--warn)}
+.chip.mine{border-color:color-mix(in srgb,var(--acc) 45%,var(--line));color:var(--acc)}
+.apr{font-weight:600}.apr.hi{color:var(--ok)}
+.alloc{display:flex;align-items:center;gap:7px;margin-bottom:2px}.alloc input[type=number]{width:58px;padding:4px 6px;text-align:right}
+/* pools table: fixed layout that fits the card; low-priority columns drop out as it narrows */
+.poolwrap{container-type:inline-size;overflow-x:auto}
+#pools{table-layout:fixed}#pools th,#pools td{padding:9px 8px}#pools td{overflow:hidden}
+#pools th{white-space:normal;line-height:1.25}#pools td .small{white-space:nowrap}
+#pools th.c-fee{width:72px}#pools th:nth-child(3){width:116px}#pools th.c-vol{width:86px}#pools th:nth-child(5){width:142px}#pools th:nth-child(6){width:92px}#pools th:nth-child(7){width:130px}#pools th:nth-child(8){width:64px}
+#pools .pn{min-width:0}#pools .pn b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#pools .sub{display:flex;flex-wrap:wrap;gap:4px 6px;align-items:center;margin-top:2px}
+#pools th .sk{cursor:pointer}#pools th .sk:hover,#pools th .sk.on{color:var(--fg)}#pools th .sk .ar{color:var(--acc);margin-left:2px}
+#pools tr.opened td{border-bottom-color:transparent}#pools tr.expand td{background:color-mix(in srgb,var(--card2) 60%,transparent);padding:12px 14px 14px}
+#pools tr.expand:hover{background:none}button.icon{width:32px;padding:5px 0}button.icon.on{background:var(--card2)}
+@container (max-width:900px){#pools .c-vol{display:none}}
+@container (max-width:800px){#pools .c-fee{display:none}}
+@container (max-width:620px){#pools th:nth-child(3),#pools td:nth-child(3),#pools th:nth-child(6),#pools td:nth-child(6){display:none}}
+@container (max-width:480px){#pools th:nth-child(5){width:78px}#pools td:nth-child(5) .small{display:none}#pools th:nth-child(7){width:104px}#pools th:nth-child(8){width:46px}
+  #pools .logos,#pools .chip.mine{display:none}#pools .pn b{white-space:normal}#pools th,#pools td{padding:8px 5px}#pools .alloc{gap:4px}#pools .alloc input[type=number]{width:46px}
+  #pools td button.sm{padding:5px 6px}}
+.alloc-bar{display:flex;height:8px;border-radius:99px;overflow:hidden;background:var(--card2);border:1px solid var(--line);margin:8px 0 6px}.alloc-bar div{height:100%}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;color:var(--mute)}.swc{display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:5px;vertical-align:middle}
+.allocs{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:7px;vertical-align:middle}.d-ok{background:var(--ok)}.d-bad{background:var(--bad)}
+/* positions */
+.poscard .head{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.poscard .stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:12px}
+.poscard .stats div div:first-child{color:var(--mute);font-size:11.5px}.poscard .stats b{font:600 14px var(--mono)}
+.ladder{display:flex;flex-direction:column;gap:4px;font-size:12px}
+.ladder .r{display:grid;grid-template-columns:96px 1fr 90px;gap:10px;align-items:center}
+.ladder .b{height:7px;border-radius:99px;background:var(--card2);overflow:hidden}.ladder .b i{display:block;height:100%;border-radius:99px;background:var(--line2)}
+.ladder .r.in .b i{background:var(--acc)}.ladder .r.in{color:var(--fg)}.ladder .r:not(.in){color:var(--mute)}
+@media (max-width:720px){.poscard .stats{grid-template-columns:repeat(2,minmax(0,1fr))}.hero{grid-template-columns:1fr 1fr}.kpi.main{grid-column:1/-1}}
+/* chart */
+svg.chart{width:100%;height:210px;display:block}
+.chartwrap{position:relative;padding-left:62px;padding-bottom:20px}
+.chartwrap .yl{position:absolute;left:0;width:54px;text-align:right;font:11px var(--mono);color:var(--mute);transform:translateY(-50%)}
+.chartwrap .xl{position:absolute;bottom:0;font-size:11px;color:var(--mute);transform:translateX(-50%);white-space:nowrap}
+.chartwrap .cross{position:absolute;top:0;bottom:20px;width:1px;background:var(--mute);opacity:.5;pointer-events:none;display:none}
+.chartwrap .tip{position:absolute;top:6px;z-index:5;background:var(--card);border:1px solid var(--line2);border-radius:10px;padding:9px 11px;font-size:12px;pointer-events:none;display:none;min-width:210px;box-shadow:0 14px 34px -10px rgba(0,0,0,.5)}
+.chartwrap .tip div{display:flex;justify-content:space-between;gap:14px}.chartwrap .tip .t{color:var(--mute);margin-bottom:5px}.chartwrap .tip span:last-child,.chartwrap .tip b:last-child{font-family:var(--mono)}
+/* picker */
+.picker{position:relative}.picker .sel{display:flex;align-items:center;gap:8px;width:100%;background:var(--card2);border:1px solid var(--line);border-radius:9px;padding:6px 9px;color:var(--fg);cursor:pointer}
+.picker .menu{position:absolute;z-index:20;top:calc(100% + 4px);left:0;right:0;min-width:300px;background:var(--card);border:1px solid var(--line2);border-radius:12px;box-shadow:0 18px 40px -12px rgba(0,0,0,.5);padding:8px;display:none}
 .picker.open .menu{display:block}.picker .list{max-height:300px;overflow:auto;margin-top:6px}
 .opt{display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:8px;cursor:pointer}.opt:hover,.opt.cur{background:var(--card2)}
-.opt .ck{width:14px;color:var(--ok, #3ecf8e);font-weight:700;text-align:center}.picker .chips{display:flex;flex-wrap:wrap;gap:6px;min-width:0}.picker .chip{display:inline-flex;align-items:center;gap:6px;background:var(--card);border:1px solid var(--line);border-radius:999px;padding:2px 8px 2px 3px;font-size:12px}.picker .chip .logo{width:18px;height:18px}.picker .chip .x{cursor:pointer;color:var(--mute);padding:0 2px}.picker .chip .x:hover{color:var(--fg)}
+.opt .ck{width:14px;color:var(--ok);font-weight:700;text-align:center}.picker .chips{display:flex;flex-wrap:wrap;gap:6px;min-width:0}
+.picker .chip{display:inline-flex;align-items:center;gap:6px;background:var(--card);border:1px solid var(--line);border-radius:999px;padding:2px 8px 2px 3px;font-size:12px}.picker .chip .logo{width:18px;height:18px}
+.picker .chip .x{cursor:pointer;color:var(--mute);padding:0 2px}.picker .chip .x:hover{color:var(--fg)}
 .opt .nm{flex:1;min-width:0}.opt .nm div:last-child{font-size:11px;color:var(--mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-svg.chart{width:100%;height:190px;display:block}
-.chartwrap{position:relative;padding-left:58px;padding-bottom:18px}
-.chartwrap .yl{position:absolute;left:0;width:52px;text-align:right;font-size:11px;color:var(--mute);transform:translateY(-50%)}
-.chartwrap .xl{position:absolute;bottom:0;font-size:11px;color:var(--mute);transform:translateX(-50%);white-space:nowrap}
-.chartwrap .cross{position:absolute;top:0;bottom:18px;width:1px;background:var(--mute);opacity:.6;pointer-events:none;display:none}
-.chartwrap .tip{position:absolute;top:6px;z-index:5;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;pointer-events:none;display:none;min-width:190px;box-shadow:0 8px 20px rgba(0,0,0,.35)}
-.chartwrap .tip div{display:flex;justify-content:space-between;gap:12px}.chartwrap .tip .t{color:var(--mute);margin-bottom:4px}
-#toast{position:fixed;bottom:18px;right:18px;background:var(--card);border:1px solid var(--line);padding:10px 14px;border-radius:10px;display:none;max-width:440px;z-index:30;box-shadow:0 10px 30px rgba(0,0,0,.3)}
-.hide{display:none}.pos-list{font-size:12px;line-height:1.6}
-@media (max-width:640px){main{padding:12px}.bar{padding:10px 12px}th,td{padding:6px 5px}}
+/* misc */
+#toast{position:fixed;bottom:20px;right:20px;background:var(--card);border:1px solid var(--line2);padding:11px 15px;border-radius:12px;display:none;max-width:440px;z-index:30;box-shadow:0 18px 40px -12px rgba(0,0,0,.5)}
+.savebar{position:sticky;bottom:16px;z-index:6;display:none;align-items:center;gap:12px;margin-top:14px;padding:10px 12px 10px 16px;border-radius:12px;background:color-mix(in srgb,var(--card) 92%,transparent);backdrop-filter:blur(8px);border:1px solid color-mix(in srgb,var(--warn) 45%,var(--line2));box-shadow:0 18px 40px -16px rgba(0,0,0,.6)}
+.savebar.show{display:flex}
+.hide{display:none!important}.empty{padding:28px;text-align:center;color:var(--mute)}
+.skel{display:inline-block;height:10px;width:60px;border-radius:6px;background:linear-gradient(90deg,var(--card2),var(--line),var(--card2));background-size:200% 100%;animation:sh 1.2s infinite}
+@keyframes sh{to{background-position:-200% 0}}
+@media (max-width:640px){main{padding:14px}.bar{padding:10px 14px}th,td{padding:8px 6px}}
+@media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
 <body>
 <header>
   <div class="bar">
-    <div class="brand">stable<span>-alm</span></div>
+    <div class="brand"><i></i>Stable ALM</div>
     <span id="mode" class="badge">…</span>
-    <span id="cycle" class="mute small"></span>
+    <span id="cycle"></span>
     <span class="sp"></span>
     <button onclick="ctl('run_now')">Run now</button>
     <button class="sec" onclick="ctl('claim_now')">Claim now</button>
@@ -70,87 +181,79 @@ svg.chart{width:100%;height:190px;display:block}
     <button id="liveBtn" class="danger" onclick="toggleLive()">Go live</button>
   </div>
   <nav id="tabs">
-    <button data-t="overview" class="on">Overview</button><button data-t="pools">Pools &amp; allocation</button>
-    <button data-t="discover">Discover pairs</button><button data-t="settings">Settings</button><button data-t="activity">Activity</button>
+    <button data-t="overview" class="on">Overview</button><button data-t="pools">Pools</button>
+    <button data-t="settings">Settings</button><button data-t="activity">Activity</button>
   </nav>
 </header>
 <main>
   <!-- OVERVIEW -->
   <section data-tab="overview" class="grid">
-    <div class="grid kpis">
-      <div class="card kpi"><div class="l">Managed value</div><div class="v" id="kTotal">–</div><div class="l" id="kChange"></div></div>
-      <div class="card kpi"><div class="l">Deployed in pools</div><div class="v" id="kDeployed">–</div><div class="l" id="kDeployedPct"></div></div>
-      <div class="card kpi"><div class="l">Idle in wallet</div><div class="v" id="kIdle">–</div><div class="l">free pool &amp; funding tokens</div></div>
-      <div class="card kpi"><div class="l">Claimable rewards</div><div class="v" id="kRewards">–</div><div class="l" id="kClaim"></div></div>
-      <div class="card kpi"><div class="l">ETH for gas</div><div class="v" id="kGas">–</div><div class="l" id="kGasNote"></div></div>
+    <div class="hero">
+      <div class="card kpi main" id="kTotalCard"><div class="l">Managed value · all chains</div><div class="v" id="kTotal">–</div><div class="s" id="kChange"></div></div>
+      <div class="card kpi" id="kProfitCard"><div class="l">Profit</div><div class="v" id="kProfit">–</div><div class="s" id="kProfitNote">earned − gas − swap costs</div></div>
+      <div class="card kpi" id="kEarnedCard"><div class="l">Earned</div><div class="v" id="kEarned">–</div><div class="s" id="kEarnedNote"></div></div>
+      <div class="card kpi"><div class="l">Deployed in pools</div><div class="v" id="kDeployed">–</div><div class="s" id="kDeployedPct"></div></div>
+      <div class="card kpi"><div class="l">Idle in wallet</div><div class="v" id="kIdle">–</div><div class="s">free pool &amp; funding tokens</div></div>
     </div>
-    <div class="card"><h2>Value history</h2><div class="chartwrap" id="chartWrap"><svg class="chart" id="chart" viewBox="0 0 800 190" preserveAspectRatio="none"></svg><div id="chartAxes"></div>
-      <div class="cross" id="chartCross"></div><div class="tip" id="chartTip"></div></div><div class="mute small" id="chartInfo"></div></div>
+    <div class="chains" id="chainCards"></div>
+    <div class="card"><div class="row" style="margin-bottom:6px"><h2 style="margin:0">Value history</h2><span class="sp"></span><span class="mute small" id="chartInfo"></span></div>
+      <div class="chartwrap" id="chartWrap"><svg class="chart" id="chart" viewBox="0 0 800 210" preserveAspectRatio="none"></svg><div id="chartAxes"></div>
+      <div class="cross" id="chartCross"></div><div class="tip" id="chartTip"></div></div></div>
     <div class="grid g2" id="poolCards"></div>
     <div class="grid g2">
-      <div class="card"><h2>Wallet (managed tokens)</h2><table id="tokens"></table></div>
-      <div class="card"><h2>Rewards</h2><table id="rewards"></table>
-        <div id="solidModeBox" style="margin-top:10px"><label class="f">Claimed SOLID</label><select id="solidMode" onchange="setSolidMode(this.value)" style="max-width:100%"><option value="keep">Keep in the wallet</option><option value="sell">Sell into the pool at the next rebalance</option><option value="lp">LP full range, paired with the same $ of the other token</option></select></div>
-        <div id="solidLpBox" style="margin-top:8px"><label class="f">SOLID LP pool</label><select id="solidLpPool" onchange="setSolidLpPool(this.value)" style="max-width:100%"></select>
+      <div class="card"><h2>Wallet · managed tokens</h2><div class="scroll"><table id="tokens"></table></div></div>
+      <div class="card"><h2>Rewards</h2><div class="scroll"><table id="rewards"></table></div>
+        <div id="solidModeBox" style="margin-top:12px"><label class="f">Claimed SOLID</label><select id="solidMode" onchange="setSolidMode(this.value)"><option value="keep">Keep in the wallet</option><option value="sell">Sell into the pool at the next rebalance</option><option value="lp">LP full range, paired with the same $ of the other token</option></select></div>
+        <div id="solidLpBox" style="margin-top:10px"><label class="f">SOLID LP pool</label><select id="solidLpPool" onchange="setSolidLpPool(this.value)"></select>
           <div class="mute small" id="solidLpInfo" style="margin-top:6px"></div></div>
-        <p class="mute small" id="claimInfo"></p></div>
+        <p class="mute small" id="claimInfo" style="margin-bottom:0"></p></div>
     </div>
   </section>
 
   <!-- POOLS -->
   <section data-tab="pools" class="grid hide">
     <div class="card">
-      <h2>Allocation of the managed value</h2>
-      <div class="alloc-bar" id="allocBar"></div><div class="legend" id="allocLegend"></div>
-      <p id="blendApr" class="small" style="margin:10px 0 0"></p>
-      <p class="mute small">Each enabled pool gets its % of everything managed (all positions + free tokens). Unallocated stays idle. A pool at 0% or
-        disabled is withdrawn on the next cycle. If a pool's share needs tokens the wallet does not hold, they are bought with the funding tokens.
-        APRs are estimates at each pool's target size (fees + emissions + bribes over the window, annualised, shared with the other in-range LPs); a pool at 0% shows
-        the APR for a 10% slice. Raw figures, before the backtest's haircuts.</p>
-    </div>
-    <div class="card"><div class="scroll"><table id="pools"></table></div>
-      <div class="row" style="margin-top:12px"><span id="allocSum" class="mute"></span><span class="sp"></span>
-        <button class="sec" onclick="resetPools()">Discard changes</button><button onclick="savePools()">Save pools &amp; allocation</button></div></div>
-  </section>
-
-  <!-- DISCOVER -->
-  <section data-tab="discover" class="grid hide">
-    <div class="card">
-      <div class="row">
-        <div style="width:170px"><label class="f">Deposit size for the estimate ($)</label><input id="depSize" type="number" min="0" step="100"></div>
-        <div style="width:170px"><label class="f">Min TVL ($)</label><input id="minTvl" type="number" min="0" step="10" value="50"></div>
-        <label class="row small mute" style="margin-top:16px"><input type="checkbox" id="onlySupported" checked> only pegged pairs (what the strategy was backtested on)</label>
-        <span class="sp"></span><button class="sec" onclick="loadMarket(true)">Refresh</button>
+      <div class="toolbar" id="chainBar"></div>
+      <div class="toolbar" style="margin-top:14px">
+        <div class="search"><input id="q" placeholder="Search pair, token or address" autocomplete="off"></div>
+        <label class="sw" id="onlySupportedLbl"><input type="checkbox" id="onlySupported" checked><span class="t"></span>Pegged pairs only</label>
+        <label class="sw"><input type="checkbox" id="onlyMine"><span class="t"></span>My pools</label>
+        <span class="sp"></span>
+        <div class="mini"><label class="f">Deposit for APR ($)</label><input id="depSize" type="number" min="0" step="100" placeholder="your total"></div>
+        <div class="mini"><label class="f">Min TVL ($)</label><input id="minTvl" type="number" min="0" step="10" value="50"></div>
+        <button class="sec" onclick="loadMarket(true)" style="align-self:flex-end">Refresh</button>
       </div>
-      <p class="mute small" style="margin-bottom:0">Estimated APR if deposited = (fees + emissions + bribes over the window, annualised) ÷ (average in-range TVL + your deposit),
-        i.e. sharing like the average in-range LP. Data: Solidly UI pool list + data-processor hourly history. Raw figures, before the backtest's haircuts
-        (fees ×0.82, SOLID ×0.5); the ladder's single ticks usually earn more than the average in-range LP, wide ranges less.</p>
     </div>
-    <div class="card"><div class="scroll"><table id="market"><tr><td class="mute">Loading pools…</td></tr></table></div></div>
+    <div class="allocs" id="allocs"></div>
+    <div class="card poolwrap" style="padding:4px 6px">
+      <table id="pools"></table>
+    </div>
+    <div class="savebar" id="saveBar"><span id="allocSum"></span><span class="sp"></span>
+      <button class="sec" onclick="resetPools()">Discard changes</button><button onclick="savePools()">Save pools &amp; allocation</button></div>
     <div class="card"><h2>Add by address</h2>
-      <div class="row"><input id="newPool" placeholder="Solidly V3 pool address 0x…" style="flex:2;min-width:260px"><input id="newName" placeholder="name (optional)" style="flex:1;min-width:140px">
-        <button onclick="addPool($('newPool').value,$('newName').value)">Add (disabled, 0%)</button></div>
-      <p class="mute small">Tokens, decimals and tick spacing are read on-chain. Equal-decimal pairs only for now. Backtest a pair before giving it a large share.</p></div>
+      <div class="row"><select id="newChain" style="width:150px"></select><input id="newPool" placeholder="Solidly V3 pool address 0x…" style="flex:2;min-width:260px"><input id="newName" placeholder="name (optional)" style="flex:1;min-width:140px">
+        <button onclick="addPool($('newPool').value,$('newName').value,+$('newChain').value)">Add (disabled, 0%)</button></div>
+      <p class="mute small" style="margin-bottom:0">Tokens, decimals and tick spacing are read on-chain. Backtest a pair before giving it a large share.</p></div>
   </section>
 
   <!-- SETTINGS -->
   <section data-tab="settings" class="grid g2 hide">
     <div class="card"><h2>Options</h2>
       <div class="fields" id="settings"></div>
-      <div style="margin-top:12px"><label class="f">Funding tokens (buy allocation shortfalls, largest balance first; tick several, "None" disables)</label><div id="fundingPicker"></div></div>
-      <div class="row" style="margin-top:14px"><span class="sp"></span><button onclick="saveSettings()">Save settings</button></div>
+      <div style="margin-top:14px"><label class="f">Funding tokens (buy allocation shortfalls, largest balance first; tick several, "None" disables)</label><div id="fundingPicker"></div></div>
+      <div class="row" style="margin-top:16px"><span class="sp"></span><button onclick="saveSettings()">Save settings</button></div>
     </div>
     <div class="grid">
       <div class="card"><h2>Private key</h2><p id="keyStatus" class="mute"></p>
         <div class="row"><input id="pk" type="password" autocomplete="off" placeholder="0x… private key" style="flex:1;min-width:220px">
           <button onclick="setKey()">Save key</button><button class="sec" onclick="delKey()">Remove</button></div>
         <p class="mute small"><span id="keyStore">Stored as a plain file (secrets/private_key)</span>, so restarts resume on their own. Never shown again,
-          only its address. The managed wallet becomes the key's address.</p></div>
+          only its address. The managed wallet becomes the key's address, the same on every chain.</p></div>
       <div class="card"><h2>Interface</h2>
-        <label class="row" style="gap:8px"><input type="checkbox" id="helpVisible" checked onchange="window.almHelp && almHelp.setVisible(this.checked)">
+        <label class="sw"><input type="checkbox" id="helpVisible" checked onchange="window.almHelp && almHelp.setVisible(this.checked)"><span class="t"></span>
           <span><b>Show explanations panel</b> <span class="mute small">(explains whatever you hover; remembered in this browser)</span></span></label></div>
       <div class="card"><h2>Safety</h2><ul class="mute small" style="margin:0;padding-left:18px">
-        <li>Depeg guard, 1h-median spot check, daily rebalance cap and gas check run before every action.</li>
+        <li>Depeg guard, 1h-median spot check, daily rebalance cap and gas check run before every action, on every chain.</li>
         <li>Every transaction is simulated first; swaps only through the Solidly UI aggregator, capped vs the pool price.</li>
         <li>Pause stops all actions immediately (persists across restarts).</li></ul></div>
     </div>
@@ -166,26 +269,38 @@ svg.chart{width:100%;height:190px;display:block}
 <script>
 const $ = id => document.getElementById(id);
 const COLORS = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)", "var(--c5)", "var(--c6)"];
+// One colour and short label per chain, so a chain reads the same everywhere on the page.
+const CHAIN_STYLE = {1: ["#8ea2ff", "ETH"], 10: ["#ff5a6a", "OP"], 8453: ["#4d8dff", "BASE"], 42161: ["#2fc6f0", "ARB"], 146: ["#f5a524", "SONIC"]};
+const cc = id => (CHAIN_STYLE[id] || ["#8a93a3"])[0];
 let S = null, poolsEdit = null, dirtyPools = false, MARKET = null, TOKENS = null, fundingSel = undefined, tab = "overview";
+let SORT = {key: "default", dir: -1};
 const fmt = (x, d = 2) => x == null || isNaN(x) ? "–" : Number(x).toLocaleString(undefined, {minimumFractionDigits: d, maximumFractionDigits: d});
-const usd = (x, d = 0) => x == null || isNaN(x) ? "–" : "$" + fmt(x, d);
+const usd = (x, d = 0) => x == null || isNaN(x) ? "–" : (x < 0 ? "−$" : "$") + fmt(Math.abs(x), d);
+const sgn = (x, d = 2) => x == null || isNaN(x) ? "–" : `<span class="${x >= 0 ? "pos" : "neg"}">${x >= 0 ? "+" : "−"}$${fmt(Math.abs(x), d)}</span>`;
 const compact = x => x == null ? "–" : x >= 1e6 ? "$" + fmt(x / 1e6, 2) + "M" : x >= 1e3 ? "$" + fmt(x / 1e3, 1) + "k" : "$" + fmt(x, 0);
 const ago = ts => { if (!ts) return "never"; const s = Math.round(Date.now() / 1000 - ts); return s < 90 ? s + "s ago" : s < 5400 ? Math.round(s / 60) + "m ago" : Math.round(s / 3600) + "h ago"; };
+const CHAIN_ORDER = [1, 10, 8453, 42161, 146];
+const chains = () => ((S && S.chains) || []).slice().sort((a, b) => (CHAIN_ORDER.indexOf(a.id) + 1 || 99) - (CHAIN_ORDER.indexOf(b.id) + 1 || 99));
+const chainOf = id => chains().find(c => c.id === id) || {id, name: "chain " + id, explorer: "https://basescan.org/", gas_symbol: "ETH"};
+const pchain = p => p.chain_id || 8453;
+const ctag = id => `<span class="ctag" style="--cc:${cc(id)}">${esc(chainOf(id).name)}</span>`;
+const explorer = (id, kind, x) => `${chainOf(id).explorer || "https://basescan.org/"}${kind}/${x}`;
 // Fee vs loss to arbitrage per unit of at-the-money liquidity, trailing 7 days (reports/VOLATILE.md).
-// Below 2 the pool's flow is mostly arbitrage: a warning, not acted on by the worker.
 const flvrTip = v => v ? `F ${(v.f ?? 0).toExponential(3)} ÷ LVR ${(v.lvr ?? 0).toExponential(3)} over ${v.swaps ?? 0} swaps, ${v.hours ?? 0} hours` +
   (v.basis ? ` (fees at the pool's ${v.basis})` : "") +
   (v.error ? ` (${v.error})` : "") + ". Fee income vs loss to arbitrage for at-the-money liquidity; below 2 the flow is mostly arbitrage." : "not computed yet";
+const flvrVal = v => !v || v.swaps == null || (v.ratio == null && !v.swaps) ? null : v.ratio == null ? Infinity : v.ratio;
 function flvrFig(v) {
-  if (!v || v.swaps == null || (v.ratio == null && !v.swaps)) return `<span class=mute title="${esc(flvrTip(v))}">–</span>`;
-  const r = v.ratio, txt = r == null ? "∞" : r >= 1000 ? fmt(r, 0) : fmt(r, r < 10 ? 2 : 1);
-  return `<span class="${r != null && r < 2 ? "warn" : "ok"}" title="${esc(flvrTip(v))}"><b>${txt}</b></span>`;
+  const r = flvrVal(v);
+  if (r == null) return `<span class=mute title="${esc(flvrTip(v))}">–</span>`;
+  const txt = r === Infinity ? "∞" : r >= 1000 ? fmt(r, 0) : fmt(r, r < 10 ? 2 : 1);
+  return `<span class="${r < 2 ? "warn" : r < 10 ? "" : "ok"}" title="${esc(flvrTip(v))}"><b>${txt}</b></span>`;
 }
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 const logoUrl = u => !u ? "" : u.startsWith("http") ? u : "https://solidly.com" + u;
 const logo = t => t && t.logo ? `<img class="logo" src="${esc(logoUrl(t.logo))}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'logo ph',textContent:'${esc((t.symbol || '?').slice(0, 3))}'}))">`
   : `<span class="logo ph">${esc(((t && t.symbol) || "?").slice(0, 3))}</span>`;
-function toast(msg, bad) { const t = $("toast"); t.textContent = msg; t.style.display = "block"; t.style.borderColor = bad ? "var(--bad)" : "var(--line)"; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = "none", 5500); }
+function toast(msg, bad) { const t = $("toast"); t.textContent = msg; t.style.display = "block"; t.style.borderColor = bad ? "var(--bad)" : "var(--line2)"; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = "none", 5500); }
 function signedOut() {
   if (document.getElementById("signedOut")) return;
   const d = document.createElement("div");
@@ -203,11 +318,12 @@ async function api(path, body) {
 }
 // ---------- tabs ----------
 function show(t) {
+  if (!document.querySelector(`main > section[data-tab="${t}"]`)) t = "overview";
   tab = t;
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.t === t));
   document.querySelectorAll("main > section").forEach(s => s.classList.toggle("hide", s.dataset.tab !== t));
   try { localStorage.setItem("alm.tab", t); } catch (e) {}
-  if ((t === "discover" || t === "pools") && !MARKET) loadMarket();
+  if (t === "pools" && !MARKET) loadMarket();
   if (t === "settings" && !TOKENS) loadTokens();
 }
 document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => show(b.dataset.t));
@@ -218,7 +334,7 @@ function render() {
   const mode = S.paused ? "paused" : (w.mode || "dry run");
   // w.mode is what the last cycle ran as; a switch made since then applies from the next cycle
   const want = S.settings.execute ? "LIVE" : "dry run", pending = !S.paused && mode !== want && !(w.mode || "").startsWith("paused");
-  $("mode").textContent = pending ? `${want.toUpperCase()} (from next cycle)` : mode.toUpperCase();
+  $("mode").textContent = pending ? `${want} (from next cycle)` : mode;
   $("mode").className = "badge " + ((pending ? want : mode) === "LIVE" ? "b-live" : S.paused ? "b-paused" : "b-dry");
   $("mode").title = pending ? `The last cycle ran as ${mode}; the switch applies when the next cycle starts.` : "";
   const next = w.next_cycle ? Math.max(0, Math.round(w.next_cycle - Date.now() / 1000)) : null;
@@ -227,55 +343,92 @@ function render() {
   $("pauseBtn").textContent = S.paused ? "Resume" : "Pause";
   $("liveBtn").textContent = S.settings.execute ? "Switch to dry run" : "Go live";
   $("liveBtn").className = S.settings.execute ? "sec" : "danger";
+  $("newChain").innerHTML = chains().map(c => `<option value="${c.id}" ${c.id === (+$("newChain").value || 8453) ? "selected" : ""}>${esc(c.name)}</option>`).join("");
   renderOverview(acct, w);
   if (!dirtyPools) poolsEdit = JSON.parse(JSON.stringify(S.pools));
+  renderChainBar();
   if (!$("pools").contains(document.activeElement)) renderPools();
   renderSettings();
   renderActivity();
-  if (MARKET) renderMarket();
+}
+// Per-chain figures: balances from the last cycle's account, profit from the ledger.
+function chainStats(acct, w) {
+  const led = w.ledger || {}, out = {};
+  const ids = new Set([...Object.keys(acct.chains || {}), ...Object.keys(led), ...S.pools.map(p => String(pchain(p)))]);
+  for (const k of ids) {
+    const id = +k, c = (acct.chains || {})[k] || {}, l = led[k] || {};
+    const pools = Object.values(acct.pools || {}).filter(p => (p.chain_id || 8453) === id);
+    const deployed = pools.reduce((s, p) => s + (p.deployed_usd || 0), 0);
+    const idle = Object.values(c.tokens || {}).reduce((s, t) => s + (t.usd || 0), 0);
+    const rw = ((S.rewards || {}).by_chain || {})[k] || {};
+    out[k] = {id, total: c.total_usd, deployed, idle, gas: c.gas, gasSym: c.gas_symbol || chainOf(id).gas_symbol, minGas: chainOf(id).min_gas,
+      earned: l.earned_usd, claimed: l.claimed_usd, claimable: rw.usd ?? l.claimable_usd, gasUsd: l.gas_usd, swapCost: l.swap_cost_usd,
+      profit: l.profit_usd, txs: l.txs, claims: l.claims, pools: S.pools.filter(p => pchain(p) === id && p.enabled).length};
+  }
+  return out;
 }
 function renderOverview(acct, w) {
   const total = acct.total_usd || 0, pools = acct.pools || {};
   const deployed = Object.values(pools).reduce((s, p) => s + (p.deployed_usd || 0), 0);
   const idle = Object.values(acct.tokens || {}).reduce((s, t) => s + (t.usd || 0), 0);
+  const cs = Object.values(chainStats(acct, w)).sort((a, b) => (b.total || 0) - (a.total || 0));
+  const sum = k => cs.some(c => c[k] != null) ? cs.reduce((s, c) => s + (c[k] || 0), 0) : null;
   $("kTotal").textContent = usd(total, 2); $("kDeployed").textContent = usd(deployed, 2);
   $("kDeployedPct").textContent = total ? fmt(deployed / total * 100, 1) + "% of managed" : "";
   $("kIdle").textContent = usd(idle, 2);
-  const rw = S.rewards || {}, rsum = (rw.claimable || []).reduce((s, r) => s + (r.usd || 0), 0);
-  $("kRewards").textContent = rw.error ? "–" : usd(rsum, 2);
-  const cl = (w.claim || {});
-  $("kClaim").textContent = cl.status === "waiting" ? cl.reason : S.settings.claim.enabled ? `auto-claim every ${S.settings.claim.every_days} d` : "auto-claim off";
-  $("kGas").textContent = fmt(acct.eth_gas, 5);
-  $("kGasNote").innerHTML = acct.eth_gas != null && acct.eth_gas < 0.0002 ? "<span class=bad>below 0.0002: actions blocked</span>" : "enough for many transactions";
+  const profit = sum("profit"), earned = sum("earned");
+  $("kProfit").innerHTML = profit == null ? "–" : sgn(profit, 2);
+  $("kEarned").textContent = usd(earned, 2);
+  $("kEarnedNote").textContent = earned == null ? "computed after the first cycle" : `claimed ${usd(sum("claimed"), 2)} · claimable ${usd(sum("claimable"), 2)}`;
+  $("kProfitNote").textContent = profit == null ? "earned − gas − swap costs" : `gas ${usd(sum("gasUsd"), 2)} · swap costs ${usd(sum("swapCost"), 2)}`;
+  $("chainCards").innerHTML = cs.map(c => {
+    const lowGas = c.gas != null && c.minGas != null && c.gas < c.minGas;
+    return `<div class="card chaincard" style="--cc:${cc(c.id)}" data-help="chaincard">
+      <div class="top"><span class="cdot"></span><b>${esc(chainOf(c.id).name)}</b><span class="sp"></span><span class="mute small">${c.pools} active pool${c.pools === 1 ? "" : "s"}</span></div>
+      <div class="bal">${usd(c.total, 2)}</div><div class="mute small">managed on this chain</div>
+      <div class="kv"><span>Deployed</span><span>${usd(c.deployed, 2)}</span><span>Idle</span><span>${usd(c.idle, 2)}</span>
+        <span>Gas balance</span><span class="${lowGas ? "bad" : ""}">${c.gas == null ? "–" : fmt(c.gas, 5) + " " + esc(c.gasSym)}</span>
+        <i class="sep"></i>
+        <span>Earned</span><span>${usd(c.earned, 2)}</span><span>Gas paid</span><span>${usd(c.gasUsd, 2)}</span><span>Swap costs</span><span>${usd(c.swapCost, 2)}</span>
+        <span><b style="color:var(--fg)">Profit</b></span><span><b>${c.profit == null ? "–" : sgn(c.profit, 2)}</b></span></div>
+      ${lowGas ? `<div class="bad small" style="margin-top:8px">Gas below ${fmt(c.minGas, 4)} ${esc(c.gasSym)}: actions on this chain are blocked.</div>` : ""}</div>`;
+  }).join("") || `<div class="card empty">No chains with pools yet. Pick a chain and a pool under <a href="#" onclick="show('pools');return false">Pools</a>.</div>`;
   chart();
-  // pool cards
+  // position cards
   let html = "";
-  S.pools.forEach((p, i) => {
-    const a = pools[p.name] || {}, st = (w.pools || {})[p.name] || {};
+  S.pools.forEach(p => {
+    const a = pools[p.name] || {}, st = (w.pools || {})[p.name] || {}, id = pchain(p);
     if (!p.enabled && !(a.positions || []).length) return;
-    const target = total * (p.enabled ? p.allocation_pct : 0) / 100;
-    const pos = (a.positions || []).map(x => `<div><span class="dot ${x.in_range ? "d-ok" : "d-bad"}"></span>[${x.tl}, ${x.tu}) · ${usd(x.usd)}</div>`).join("") || "<span class=mute>no positions</span>";
-    html += `<div class="card"><div class="row"><div class="pair"><b>${esc((a.symbols || p.symbols || [p.name]).join(" / "))}</b></div>
+    const ctot = (((acct.chains || {})[id]) || {}).total_usd || 0, target = ctot * (p.enabled ? p.allocation_pct : 0) / 100;
+    const ps = a.positions || [], mx = Math.max(...ps.map(x => x.usd || 0), 1);
+    const pos = ps.map(x => `<div class="r ${x.in_range ? "in" : ""}"><span class="mono">[${x.tl}, ${x.tu})</span><span class="b"><i style="width:${Math.max(2, (x.usd || 0) / mx * 100)}%"></i></span><span class="num">${usd(x.usd, 0)}</span></div>`).join("")
+      || "<span class=mute>no positions</span>";
+    html += `<div class="card poscard"><div class="head"><b>${esc((a.symbols || p.symbols || [p.name]).join(" / "))}</b>${ctag(id)}
         <span class="chip">${esc(p.strategy.type)}</span><span class="sp"></span>
-        <span class="${a.in_range ? "ok" : (a.positions || []).length ? "bad" : "mute"} small">${a.in_range ? "in range" : (a.positions || []).length ? "out of range" : ""}</span></div>
-      <div class="grid kpis" style="margin:10px 0">
-        <div><div class="mute small">Deployed</div><b>${usd(a.deployed_usd, 2)}</b></div>
-        <div><div class="mute small">Target (${fmt(p.enabled ? p.allocation_pct : 0, 0)}%)</div><b>${usd(target, 2)}</b></div>
-        <div><div class="mute small">Tick · fee</div><b>${a.tick ?? "–"}</b> <span class=mute>· ${a.fee_pips ?? "–"} pips</span></div>
-        <div data-help="flvr"><div class="mute small" title="fee income ÷ loss to arbitrage, trailing 7 days; good above 10, warning below 2">Fee / arb loss (7d)</div>${flvrFig(st.flvr)}</div></div>
-      <div class="pos-list">${pos}</div>
-      <div class="small" style="margin-top:8px">Last decision: <b>${esc(st.mode || "–")}</b>${st.error ? ` <span class=bad>${esc(st.error)}</span>` : ""}
+        <span class="small ${a.in_range ? "ok" : ps.length ? "bad" : "mute"}">${a.in_range ? "● in range" : ps.length ? "● out of range" : ""}</span></div>
+      <div class="stats">
+        <div><div>Deployed</div><b>${usd(a.deployed_usd, 2)}</b></div>
+        <div><div>Target (${fmt(p.enabled ? p.allocation_pct : 0, 0)}%)</div><b>${usd(target, 2)}</b></div>
+        <div><div>Tick · fee</div><b>${a.tick ?? "–"}</b> <span class="mute small">· ${a.fee_pips ?? "–"} pips</span></div>
+        <div data-help="flvr"><div title="fee income ÷ loss to arbitrage, trailing 7 days; good above 10, warning below 2">Fee / arb loss (7d)</div>${flvrFig(st.flvr)}</div></div>
+      <div class="ladder pos-list">${pos}</div>
+      <div class="small" style="margin-top:10px">Last decision: <b>${esc(st.mode || "–")}</b>${st.error ? ` <span class=bad>${esc(st.error)}</span>` : ""}
         ${st.report ? `<details style="margin-top:4px"><summary>cycle log</summary><pre class="mute">${esc(st.report.join("\n"))}</pre></details>` : ""}</div></div>`;
   });
-  $("poolCards").innerHTML = html || `<div class="card mute">No active pools. Enable one under Pools &amp; allocation, or find one under Discover pairs.</div>`;
-  let rows = "<tr><th>Token</th><th class=num>Amount</th><th class=num>USD</th></tr>";
-  for (const [sym, t] of Object.entries(acct.tokens || {})) rows += `<tr><td>${esc(sym)}</td><td class=num>${fmt(t.amount, 4)}</td><td class=num>${usd(t.usd, 2)}</td></tr>`;
-  $("tokens").innerHTML = rows;
-  rows = "<tr><th>Claimable</th><th class=num>Amount</th><th class=num>USD</th></tr>";
-  for (const r of rw.claimable || []) rows += `<tr><td>${esc(r.symbol)}</td><td class=num>${fmt(r.amount, 4)}</td><td class=num>${usd(r.usd, 2)}</td></tr>`;
-  $("rewards").innerHTML = rw.error ? `<tr><td class=bad>${esc(rw.error)}</td></tr>` : rows;
+  $("poolCards").innerHTML = html;
+  let rows = "<thead><tr><th>Token</th><th>Chain</th><th class=num>Amount</th><th class=num>USD</th></tr></thead><tbody>";
+  for (const [k, c] of Object.entries(acct.chains || {}))
+    for (const [sym, t] of Object.entries(c.tokens || {})) rows += `<tr><td>${esc(sym)}</td><td>${ctag(+k)}</td><td class=num>${fmt(t.amount, 4)}</td><td class=num>${usd(t.usd, 2)}</td></tr>`;
+  $("tokens").innerHTML = rows + "</tbody>";
+  const rw = S.rewards || {};
+  rows = "<thead><tr><th>Claimable</th><th>Chain</th><th class=num>Amount</th><th class=num>USD</th></tr></thead><tbody>";
+  for (const [k, r] of Object.entries(rw.by_chain || {}))
+    for (const x of (r.claimable || []).filter(x => x.amount > 0)) rows += `<tr><td>${esc(x.symbol)}</td><td>${ctag(+k)}</td><td class=num>${fmt(x.amount, 4)}</td><td class=num>${usd(x.usd, 2)}</td></tr>`;
+  $("rewards").innerHTML = rw.error ? `<tr><td class=bad>${esc(rw.error)}</td></tr>` : rows + "</tbody>";
   renderSolidLp();
-  $("claimInfo").textContent = "Claimed tokens compound at each pool's next rebalance" + (S.settings.solid_lp.enabled
+  const cl = w.claim || {};
+  $("claimInfo").textContent = (cl.status === "waiting" ? cl.reason + ". " : "") + (S.settings.claim.enabled ? `Auto-claim every ${S.settings.claim.every_days} days. ` : "Auto-claim off. ") +
+    "Claimed tokens compound at each pool's next rebalance" + (S.settings.solid_lp.enabled
     ? "; SOLID is deposited full range into the SOLID pool (not sold)." : S.settings.sell_rewards.enabled
     ? `; SOLID is sold when the quote loses ≤ ${S.settings.sell_rewards.max_impact_pct}% and is worth ≥ $${S.settings.sell_rewards.min_value_usd}.` : "; SOLID is kept.");
 }
@@ -284,23 +437,21 @@ function chart() {
   // before rewards were tracked, fall back to positions + idle)
   const pts = (S.snapshots || []).filter(p => p.total_usd > 0).map(p => ({...p, v: p.value_usd ?? p.total_usd})), svg = $("chart"), axes = $("chartAxes");
   if (pts.length < 2) { svg.innerHTML = ""; axes.innerHTML = ""; $("chartInfo").textContent = "History builds up as the worker runs (one point per cycle)."; $("kChange").textContent = ""; return; }
-  const H = 190, xs = pts.map(p => p.ts), ys = pts.map(p => p.v);
+  const H = 210, xs = pts.map(p => p.ts), ys = pts.map(p => p.v);
   const x0 = Math.min(...xs), x1 = Math.max(...xs), lo = Math.min(...ys), hi = Math.max(...ys);
   // a tight but readable y range: at least 0.2% of the value, so a flat line is not blown up to noise
   const span = Math.max(hi - lo, hi * 0.002, 1), y0 = lo - span * 0.15, dy = span * 1.3;
   const X = t => (t - x0) / (x1 - x0 || 1) * 800, Y = v => H - 8 - (v - y0) / dy * (H - 16);
   const line = pts.map(p => `${X(p.ts).toFixed(1)},${Y(p.v).toFixed(1)}`).join(" ");
-  // live rebalances and claims as markers along the bottom
   const marks = (S.events || []).filter(e => e.ts >= x0 && e.ts <= x1 && ((e.kind === "rebalance" && e.live) || (e.kind === "sent" && e.what === "claim")));
-  svg.innerHTML = `<defs><linearGradient id="g" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="var(--acc)" stop-opacity=".35"/><stop offset="1" stop-color="var(--acc)" stop-opacity="0"/></linearGradient></defs>
+  svg.innerHTML = `<defs><linearGradient id="g" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="var(--acc)" stop-opacity=".28"/><stop offset="1" stop-color="var(--acc)" stop-opacity="0"/></linearGradient></defs>
     ${[0, .5, 1].map(f => `<line x1="0" x2="800" y1="${8 + f * (H - 16)}" y2="${8 + f * (H - 16)}" stroke="var(--line)" stroke-width="1" vector-effect="non-scaling-stroke"/>`).join("")}
     ${marks.map(e => `<line x1="${X(e.ts)}" x2="${X(e.ts)}" y1="8" y2="${H}" stroke="${e.kind === "rebalance" ? "var(--warn)" : "var(--ok)"}" stroke-dasharray="3 3" stroke-width="1" vector-effect="non-scaling-stroke" opacity=".7"/>`).join("")}
     <polygon fill="url(#g)" points="0,${H} ${line} 800,${H}"/><polyline fill="none" stroke="var(--acc)" stroke-width="2" vector-effect="non-scaling-stroke" points="${line}"/>`;
   const tfmt = t => { const d = new Date(t * 1000); return (x1 - x0 > 86400 * 2 ? d.toLocaleDateString(undefined, {month: "short", day: "numeric"}) + " " : "") + d.toLocaleTimeString(undefined, {hour: "2-digit", minute: "2-digit"}); };
-  // y labels sit on the three grid lines (pixel offsets match the SVG's 190-unit height)
   axes.innerHTML = [0, .5, 1].map(f => { const yPix = 8 + f * (H - 16);
       return `<div class="yl" style="top:${yPix}px">${usd(y0 + (H - 8 - yPix) / (H - 16) * dy, 0)}</div>`; }).join("") +
-    [0, .25, .5, .75, 1].map(f => `<div class="xl" style="left:calc(58px + (100% - 58px) * ${f})">${tfmt(x0 + (x1 - x0) * f)}</div>`).join("");
+    [0, .25, .5, .75, 1].map(f => `<div class="xl" style="left:calc(62px + (100% - 62px) * ${f})">${tfmt(x0 + (x1 - x0) * f)}</div>`).join("");
   const wrap = $("chartWrap"), tip = $("chartTip"), cross = $("chartCross");
   wrap.onmousemove = ev => {
     const r = svg.getBoundingClientRect(), fx = (ev.clientX - r.left) / r.width;
@@ -311,11 +462,10 @@ function chart() {
     const ev2 = marks.filter(e => Math.abs(e.ts - p.ts) < 300).map(e => e.kind === "rebalance" ? `live ${esc(e.mode || "rebalance")}` : "claim");
     tip.innerHTML = `<div class="t">${new Date(p.ts * 1000).toLocaleString()}${p.mode ? " · " + esc(p.mode) : ""}</div>
       <div><b>Total</b><b>${usd(p.v, 2)}</b></div>` +
-      Object.entries(p.pools || {}).filter(([, v]) => v).map(([k, v]) => `<div><span>${esc(k)} positions</span><span>${usd(v, 2)}</span></div>`).join("") +
-      (p.idle_usd != null ? `<div><span>Idle in wallet</span><span>${usd(p.idle_usd, 2)}</span></div>` : "") +
-      (p.value_usd == null ? `<div class="t">rewards not recorded yet at this point</div>` :
-        `<div><span>Unclaimed rewards</span><span>${p.rewards_usd == null ? "–" : usd(p.rewards_usd, 2)}</span></div>` +
-        (p.solid_usd != null ? `<div><span>SOLID in wallet</span><span>${usd(p.solid_usd, 2)}</span></div>` : "")) +
+      Object.entries(p.chains || {}).filter(([, v]) => v && v.total_usd).map(([k, v]) => `<div><span>${esc(chainOf(+k).name)}</span><span>${usd(v.total_usd, 2)}</span></div>`).join("") +
+      Object.entries(p.pools || {}).filter(([, v]) => v).map(([k, v]) => `<div><span class=mute>${esc(k)} positions</span><span>${usd(v, 2)}</span></div>`).join("") +
+      (p.idle_usd != null ? `<div><span class=mute>Idle in wallet</span><span>${usd(p.idle_usd, 2)}</span></div>` : "") +
+      (p.value_usd == null ? "" : `<div><span class=mute>Unclaimed rewards</span><span>${p.rewards_usd == null ? "–" : usd(p.rewards_usd, 2)}</span></div>`) +
       (ev2.length ? `<div class="t" style="margin-top:4px">${ev2.join(", ")}</div>` : "");
     tip.style.display = "block";
     const tw = tip.offsetWidth, ww = wrap.clientWidth;
@@ -324,40 +474,41 @@ function chart() {
   };
   wrap.onmouseleave = () => { tip.style.display = cross.style.display = "none"; };
   const ch = ys[ys.length - 1] - ys[0];
-  $("kChange").innerHTML = `<span class=${ch >= 0 ? "ok" : "bad"}>${ch >= 0 ? "+" : ""}${usd(ch, 2)}</span> since ${new Date(x0 * 1000).toLocaleDateString()}`;
-  $("chartInfo").innerHTML = `${pts.length} points (one per cycle) since ${new Date(x0 * 1000).toLocaleString()} · min ${usd(lo, 2)} · max ${usd(hi, 2)} · positions + idle + unclaimed rewards + wallet SOLID · includes deposits and withdrawals · ` +
-    `<span style="color:var(--warn)">┊</span> live rebalance <span style="color:var(--ok)">┊</span> claim · hover for details`;
+  $("kChange").innerHTML = `${sgn(ch, 2)} since ${new Date(x0 * 1000).toLocaleDateString()} <span class=mute>(incl. deposits)</span>`;
+  $("chartInfo").innerHTML = `${pts.length} points · <span style="color:var(--warn)">┊</span> live rebalance <span style="color:var(--ok)">┊</span> claim`;
 }
-// ---------- pools ----------
-function renderPools() {
-  const w = S.worker || {}, acct = w.account || {}, total = acct.total_usd || 0;
-  let rows = "<tr><th></th><th>Pool</th><th>Enabled</th><th>Allocation</th><th class=num>TVL</th><th class=num>In-range TVL</th><th class=num>Target</th><th class=num>Deployed</th><th class=num title='estimated APR at the target size, last 1 hour'>APR 1h</th><th class=num>APR 6h</th><th class=num>APR 24h</th><th>Strategy &amp; limits</th><th></th></tr>";
-  poolsEdit.forEach((p, i) => {
-    const a = (acct.pools || {})[p.name] || {}, sp = p.strategy || {};
-    const mk = (MARKET || []).find(x => x.pool === p.pool.toLowerCase());
-    rows += `<tr><td><span class="sw" style="background:${COLORS[i % COLORS.length]}"></span></td>
-      <td><b>${esc(p.name)}</b><div class="mute small">${esc((a.symbols || p.symbols || []).join(" / "))} · <a href="https://basescan.org/address/${esc(p.pool)}" target=_blank>${esc(p.pool.slice(0, 8))}…</a>${p.pegged === false ? ' · <span class="chip volatile">volatile · not backtested</span>' : ""}</div></td>
-      <td><input type=checkbox ${p.enabled ? "checked" : ""} onchange="editPool(${i},'enabled',this.checked)"></td>
-      <td style="min-width:150px"><div class="row" style="flex-wrap:nowrap"><input type=range min=0 max=100 step=1 value="${p.allocation_pct}" oninput="editPool(${i},'allocation_pct',+this.value);this.nextElementSibling.value=this.value" style="padding:0">
-        <input type=number min=0 max=100 step=1 value="${p.allocation_pct}" style="width:64px" oninput="editPool(${i},'allocation_pct',parseFloat(this.value)||0);this.previousElementSibling.value=this.value"></div></td>
-      <td class=num>${mk ? compact(mk.tvl_usd) : MARKET ? "–" : "…"}</td>
-      <td class=num>${mk ? compact(mk.active_usd) + (mk.tvl_usd ? `<div class="mute small">${fmt(mk.active_usd / mk.tvl_usd * 100, 0)}% in range</div>` : "") : MARKET ? "–" : "…"}</td>
-      <td class=num id="tgt${i}">${usd(total * (p.enabled ? p.allocation_pct : 0) / 100)}</td><td class=num>${usd(a.deployed_usd)}</td>
-      <td class=num id="apr${i}_h1"></td><td class=num id="apr${i}_h6"></td><td class=num id="apr${i}_h24"></td>
-      <td><details><summary>${esc(sp.type)} · ${esc(Object.entries(sp).filter(([k]) => k !== "type").map(([k, v]) => k + " " + v).join(", "))}</summary><div class="fields" style="margin-top:8px">
-        ${["lookback", "span", "every", "turnover", "guard"].filter(k => k in sp).map(k => `<div><label class=f>${k}</label><input type=number step=any value="${sp[k]}" oninput="editStrat(${i},'${k}',this.value)"></div>`).join("")}
-        ${["slippage_bps", "max_swap_cost_bps", "max_spot_dev_ticks", "max_actions_per_day", "min_swap_value", "max_ranges"].map(k => `<div><label class=f>${k}</label><input type=number step=any value="${p[k]}" oninput="editPool(${i},'${k}',parseFloat(this.value))"></div>`).join("")}
-      </div></details></td>
-      <td class=num><button class="sec sm" onclick="ctl('resolve_now',{name:'${esc(p.name)}'})" title="make the ladder re-solve on the next cycle">Re-solve</button>
-        <button class="sec sm" onclick="removePool('${esc(p.name)}')">Remove</button></td></tr>`;
-  });
-  $("pools").innerHTML = rows;
-  updateSum();
+// ---------- chain filters ----------
+function renderChainBar() {
+  const n = id => (MARKET || []).filter(p => p.chain_id === id).length + poolsEdit.filter(p => pchain(p) === id && !(MARKET || []).some(m => m.chain_id === id && m.pool === p.pool.toLowerCase())).length;
+  $("chainBar").innerHTML = `<span class="h" style="margin:0 6px 0 0">Chains</span>` + chains().map(c => {
+    const mine = poolsEdit.some(p => pchain(p) === c.id);
+    return `<button class="chipbtn ${c.enabled ? "on" : ""}" style="--cc:${cc(c.id)}" onclick="toggleChain(${c.id},${!c.enabled})" aria-pressed="${c.enabled}"
+      title="${c.enabled ? "Shown and scanned. Click to turn off" : "Click to list this chain's pools"}${mine ? " (you have pools here: they are managed either way)" : ""}">
+      <span class="cdot"></span>${esc(c.name)}${c.enabled && MARKET ? `<span class="n">${n(c.id)}</span>` : ""}</button>`; }).join("") +
+    `<span class="mute small" style="margin-left:4px">Turn a chain on to list and scan its pools. Pools you hold are managed on any chain.</span>`;
 }
-function poolApr(p, win) {
-  const acct = (S.worker || {}).account || {}, total = acct.total_usd || 0;
-  const m = (MARKET || []).find(x => x.pool === p.pool.toLowerCase());
-  const w = m && m.windows[win];
+async function toggleChain(id, on) {
+  try { const r = await api("/api/chains", {id, enabled: on}); S.chains = r.chains; renderChainBar();
+    toast(`${chainOf(id).name} ${on ? "on: loading its pools…" : "off"}`); loadMarket(true); }
+  catch (e) { toast(e.message, true); }
+}
+// ---------- pools: one table for configured and discovered pools, every chain ----------
+async function loadMarket(force) {
+  if (force) MARKET = null;
+  if (!MARKET) renderPools();
+  try { MARKET = (await api("/api/market")).pools; renderChainBar(); if (S && !$("pools").contains(document.activeElement)) renderPools(); }
+  catch (e) { MARKET = []; $("pools").innerHTML = `<tr><td class="bad empty">${esc(e.message)}</td></tr>`; }
+}
+function estApr(win, dep) {
+  if (!win || !win.hours) return null;
+  const r = (win.fees + win.emissions + win.bribes) * 8760 / win.hours, base = (win.active_tvl || 0) + dep;
+  return base > 0 ? r / base * 100 : null;
+}
+const chainTotal = id => ((((S.worker || {}).account || {}).chains || {})[id] || {}).total_usd || 0;
+// A configured pool's APR at its target size (its share of its chain's managed value).
+function poolApr(p, m, win) {
+  const acct = (S.worker || {}).account || {}, total = chainTotal(pchain(p));
+  const w = m && m.windows && m.windows[win];
   if (!w || !w.hours) return null;
   const mine = ((acct.pools || {})[p.name] || {}).deployed_usd || 0;
   let dep = total * (p.enabled ? p.allocation_pct : 0) / 100;
@@ -366,30 +517,122 @@ function poolApr(p, win) {
   return {apr: (w.fees + w.emissions + w.bribes) * 8760 / w.hours / base * 100, dep, w};
 }
 function aprHtml(r) {
-  if (!r) return MARKET ? "<span class=mute>–</span>" : "<span class=mute>…</span>";
+  if (!r) return MARKET ? "<span class=mute>–</span>" : `<span class="skel"></span>`;
   const tip = `at $${fmt(r.dep, 0)} deposited · fees $${fmt(r.w.fees)} · emissions $${fmt(r.w.emissions)} · bribes $${fmt(r.w.bribes)} over ${r.w.hours}h · in-range TVL ${compact(r.w.active_tvl)}`;
   return `<span class="apr ${r.apr >= 5 ? "hi" : ""}" title="${esc(tip)}">${fmt(r.apr, r.apr < 10 ? 2 : 1)}%</span>`;
 }
-function updateSum() {
-  const total = ((S.worker || {}).account || {}).total_usd || 0;
-  const en = poolsEdit.map((p, i) => ({p, i})).filter(x => x.p.enabled && x.p.allocation_pct > 0);
-  const sum = en.reduce((s, x) => s + x.p.allocation_pct, 0);
-  $("allocBar").innerHTML = en.map(x => `<div title="${esc(x.p.name)} ${x.p.allocation_pct}%" style="width:${Math.min(x.p.allocation_pct, 100)}%;background:${COLORS[x.i % COLORS.length]}"></div>`).join("");
-  $("allocLegend").innerHTML = en.map(x => `<span><span class="sw" style="background:${COLORS[x.i % COLORS.length]}"></span>${esc(x.p.name)} ${fmt(x.p.allocation_pct, 0)}% · ${usd(total * x.p.allocation_pct / 100)}</span>`).join("") +
-    `<span><span class="sw" style="background:var(--card2);border:1px solid var(--line)"></span>idle ${fmt(Math.max(0, 100 - sum), 0)}%</span>`;
+// Rows: every configured pool (always shown) plus every listed pool of the enabled chains.
+function tableRows() {
+  const dep = parseFloat($("depSize").value) || (((S.worker || {}).account || {}).total_usd || 0), minTvl = parseFloat($("minTvl").value) || 0;
+  const only = $("onlySupported").checked, mineOnly = $("onlyMine").checked, q = $("q").value.trim().toLowerCase();
+  const rows = [];
   poolsEdit.forEach((p, i) => {
-    const el = $("tgt" + i); if (el) el.textContent = usd(total * (p.enabled ? p.allocation_pct : 0) / 100);
-    for (const k of ["h1", "h6", "h24"]) { const c = $(`apr${i}_${k}`); if (c) c.innerHTML = aprHtml(poolApr(p, k)); }
+    const m = (MARKET || []).find(x => x.chain_id === pchain(p) && x.pool === p.pool.toLowerCase());
+    rows.push({cfg: p, i, m, chain_id: pchain(p), pool: p.pool.toLowerCase(), pegged: m ? m.pegged : p.pegged !== false,
+      sym: (m ? `${m.token0.symbol} / ${m.token1.symbol}` : (p.symbols || [p.name]).join(" / ")), apr: k => poolApr(p, m, k)});
   });
-  // Blended APR of the whole managed value (idle share earns 0).
-  const blend = k => { if (!MARKET || !total) return null; let inc = 0;
-    for (const x of en) { const r = poolApr(x.p, k); if (r) inc += r.apr / 100 * r.dep; } return inc / total * 100; };
-  const b = ["h1", "h6", "h24"].map(blend);
-  $("blendApr").innerHTML = b[2] == null ? (MARKET ? "" : "loading APRs…") :
-    `Blended APR on the managed value: <b>${fmt(b[0], 2)}%</b> (1h) · <b>${fmt(b[1], 2)}%</b> (6h) · <b>${fmt(b[2], 2)}%</b> (24h) → about <b>${usd(total * b[2] / 100)}</b>/year at the 24h rate`;
-  $("allocSum").innerHTML = `Allocated <b class=${sum > 100 ? "bad" : ""}>${fmt(sum, 1)}%</b>` + (sum > 100 ? " <span class=bad>(over 100%)</span>" : "") + (dirtyPools ? " · <span class=warn>unsaved changes</span>" : "");
+  for (const m of MARKET || []) {
+    if (rows.some(r => r.chain_id === m.chain_id && r.pool === m.pool)) continue;
+    rows.push({m, chain_id: m.chain_id, pool: m.pool, pegged: m.pegged, sym: `${m.token0.symbol} / ${m.token1.symbol}`,
+      apr: k => { const a = estApr(m.windows[k], dep); return a == null ? null : {apr: a, dep, w: m.windows[k]}; }});
+  }
+  return rows.filter(r => r.cfg || ((r.m.tvl_usd >= minTvl) && (!only || r.pegged) && chainOf(r.chain_id).enabled))
+    .filter(r => !mineOnly || r.cfg)
+    .filter(r => !q || r.sym.toLowerCase().includes(q) || r.pool.includes(q) || (r.cfg && r.cfg.name.toLowerCase().includes(q)) || chainOf(r.chain_id).name.toLowerCase().includes(q));
 }
-function editPool(i, k, v) { poolsEdit[i][k] = v; dirtyPools = true; updateSum(); }
+const SORTERS = {
+  pair: r => r.sym.toLowerCase(), chain: r => chainOf(r.chain_id).name, fee: r => r.m ? r.m.fee_pips || 0 : -1,
+  tvl: r => r.m ? r.m.tvl_usd || 0 : -1, active: r => r.m ? r.m.active_usd || 0 : -1,
+  vol: r => r.m ? ((r.m.windows.h24 || {}).volume ?? r.m.volume_24h) || 0 : -1,
+  h1: r => (r.apr("h1") || {}).apr ?? -1, h6: r => (r.apr("h6") || {}).apr ?? -1, h24: r => (r.apr("h24") || {}).apr ?? -1,
+  flvr: r => { const v = flvrVal(r.m ? r.m.flvr : null); return v == null ? -1 : v === Infinity ? 1e18 : v; },
+  alloc: r => r.cfg ? (r.cfg.enabled ? r.cfg.allocation_pct : 0) + 1000 : -1,
+  deployed: r => r.cfg ? ((((S.worker || {}).account || {}).pools || {})[r.cfg.name] || {}).deployed_usd || 0 : -1,
+};
+function sortBy(k) { SORT = SORT.key === k ? {key: k, dir: -SORT.dir} : {key: k, dir: ["pair", "chain"].includes(k) ? 1 : -1}; try { localStorage.setItem("alm.sort", JSON.stringify(SORT)); } catch (e) {} renderPools(); }
+// Strategy rows that are open (key "chain:pool"), kept across re-renders.
+const OPEN = new Set();
+function toggleOpen(k) { OPEN.has(k) ? OPEN.delete(k) : OPEN.add(k); renderPools(); }
+function renderPools() {
+  if (!poolsEdit) return;
+  const acct = (S.worker || {}).account || {};
+  let rows = tableRows();
+  // default order: your pools first (by allocation), then the rest by 24h APR
+  const key = SORT.key === "default" ? null : SORTERS[SORT.key];
+  rows.sort((a, b) => {
+    if (!key) return ((!!b.cfg) - (!!a.cfg)) || (SORTERS.alloc(b) - SORTERS.alloc(a)) || (SORTERS.h24(b) - SORTERS.h24(a));
+    const x = key(a), y = key(b);
+    return (x < y ? -1 : x > y ? 1 : 0) * SORT.dir;
+  });
+  const sk = (k, label) => `<span class="sk ${SORT.key === k ? "on" : ""}" onclick="event.stopPropagation();sortBy('${k}')">${label}<span class="ar">${SORT.key === k ? (SORT.dir > 0 ? "▲" : "▼") : ""}</span></span>`;
+  const th = (k, label, cls = "", title = "") => `<th class="sort ${cls} ${SORT.key === k ? "on" : ""}" data-label="${esc(label)}" onclick="sortBy('${k}')" ${title ? `title="${esc(title)}"` : ""}
+      aria-sort="${SORT.key === k ? (SORT.dir > 0 ? "ascending" : "descending") : "none"}">${label}<span class="ar">${SORT.key === k ? (SORT.dir > 0 ? "▲" : "▼") : "↕"}</span></th>`;
+  let h = `
+    <thead><tr><th data-label="Pair" class="${["pair", "chain"].includes(SORT.key) ? "on" : ""}">${sk("pair", "Pair")} <span class="mute">·</span> ${sk("chain", "Chain")}</th>
+    ${th("fee", "Fee", "num c-fee")}${th("tvl", "TVL", "num")}${th("vol", "24h volume", "num c-vol")}
+    ${th("h24", "APR 24h", "num", "estimated APR over the last 24 hours (1h and 6h below): at the target size for your pools, at the deposit size above for the rest")}
+    ${th("flvr", "Fee / arb 7d", "num", "fee income ÷ loss to arbitrage per unit of at-the-money liquidity, trailing 7 days; good above 10, warning below 2")}
+    ${th("alloc", "Allocation")}<th data-label=""></th></tr></thead><tbody>`;
+  if (!rows.length) h += `<tr><td colspan=8 class=empty>${MARKET ? "No pools match the filters." : "Loading pools from the Solidly UI…"}</td></tr>`;
+  for (const r of rows) {
+    const m = r.m, p = r.cfg, id = r.chain_id, rk = id + ":" + r.pool, open = p && OPEN.has(rk);
+    const t0 = m ? m.token0 : {symbol: (p.symbols || ["?"])[0]}, t1 = m ? m.token1 : {symbol: (p.symbols || ["?", "?"])[1]};
+    const sub = `${ctag(id)} <a href="${explorer(id, "address", r.pool)}" target=_blank title="${esc(r.pool)}${m ? " · tick spacing " + m.tick_spacing : ""}">${r.pool.slice(0, 6)}…${r.pool.slice(-4)}</a>` +
+      (p ? ` <span class="chip mine">${esc(p.name)}</span>` : "") + (!r.pegged ? ` <span class="chip volatile" title="volatile pair: the strategy has not been backtested on it">volatile</span>` : "");
+    const a24 = r.apr("h24"), a1 = r.apr("h1"), a6 = r.apr("h6");
+    const short = x => x ? fmt(x.apr, x.apr < 10 ? 1 : 0) + "%" : "–";
+    let alloc = '<span class="mute small">–</span>', act;
+    if (p) {
+      const i = r.i, dep = ((acct.pools || {})[p.name] || {}).deployed_usd;
+      alloc = `<div class="alloc"><label class="sw" title="${p.enabled ? "enabled: click to disable" : "disabled: click to enable"}"><input type=checkbox ${p.enabled ? "checked" : ""} onchange="editPool(${i},'enabled',this.checked)"><span class="t"></span></label>
+        <input type=number min=0 max=100 step=1 value="${p.allocation_pct}" oninput="editPool(${i},'allocation_pct',parseFloat(this.value)||0)" ${p.enabled ? "" : "disabled"} aria-label="allocation %"><span class=mute>%</span></div>
+        <div class="mute small">${dep ? usd(dep, 0) + " deployed" : "nothing deployed"}</div>`;
+      act = `<button class="sec sm icon ${open ? "on" : ""}" onclick="toggleOpen('${rk}')" title="strategy, limits, re-solve and remove" aria-expanded="${!!open}">${open ? "▴" : "⚙"}</button>`;
+    } else {
+      act = `<button class="sm" onclick="addPool('${m.pool}',undefined,${id})">Add</button>`;
+    }
+    h += `<tr class="${p ? "mine" : ""}${open ? " opened" : ""}"><td><div class="pair"><span class="logos">${logo(t0)}${logo(t1)}</span><div class="pn"><b>${esc(r.sym)}</b><div class="mute small sub">${sub}</div></div></div></td>
+      <td class="num c-fee">${m ? `${fmt((m.fee_pips || 0) / 100, 2)} bp<div class="mute small">tier ${fmt((m.fee_tier || 0) / 100, 0)}</div>` : "–"}</td>
+      <td class=num>${m ? compact(m.tvl_usd) + `<div class="mute small" title="in-range TVL ${compact(m.active_usd)}">${m.tvl_usd ? fmt(m.active_usd / m.tvl_usd * 100, 0) + "% in range" : ""}</div>` : "–"}</td>
+      <td class="num c-vol">${m ? compact((m.windows.h24 || {}).volume ?? m.volume_24h) : "–"}</td>
+      <td class=num>${aprHtml(a24)}<div class="mute small" title="APR over the last 1 hour · 6 hours">${MARKET ? `1h ${short(a1)} · 6h ${short(a6)}` : ""}</div></td>
+      <td class=num>${flvrFig(m ? m.flvr : null)}</td>
+      <td>${alloc}</td><td class=num>${act}</td></tr>`;
+    if (open) {
+      const i = r.i, sp = p.strategy || {};
+      h += `<tr class="mine expand"><td colspan=8 data-help="p-strategy"><div class="row" style="margin-bottom:10px"><b>${esc(p.name)}</b><span class="mute small">${esc(sp.type)} strategy &amp; safety limits · saved with the bar below</span><span class="sp"></span>
+        <button class="sec sm" onclick="ctl('resolve_now',{name:'${esc(p.name)}'})" title="make the ladder re-solve on the next cycle">Re-solve</button>
+        <button class="sec sm" onclick="removePool('${esc(p.name)}')" title="Remove from the config">Remove</button></div>
+        <div class="fields">
+        ${["lookback", "span", "every", "turnover", "guard"].filter(k => k in sp).map(k => `<div><label class=f>${k}</label><input type=number step=any value="${sp[k]}" oninput="editStrat(${i},'${k}',this.value)"></div>`).join("")}
+        ${["slippage_bps", "max_swap_cost_bps", "max_spot_dev_ticks", "max_actions_per_day", "min_swap_value", "max_ranges"].map(k => `<div><label class=f>${k}</label><input type=number step=any value="${p[k]}" oninput="editPool(${i},'${k}',parseFloat(this.value))"></div>`).join("")}
+        </div></td></tr>`;
+    }
+  }
+  $("pools").innerHTML = h + "</tbody>";
+  updateSum();
+}
+// Allocation is per chain: each pool's % is of everything managed on its own chain.
+function updateSum() {
+  const ids = [...new Set(poolsEdit.map(pchain))].sort((a, b) => chainTotal(b) - chainTotal(a));
+  let over = false;
+  $("allocs").innerHTML = ids.map(id => {
+    const total = chainTotal(id), en = poolsEdit.map((p, i) => ({p, i})).filter(x => pchain(x.p) === id && x.p.enabled && x.p.allocation_pct > 0);
+    const sum = en.reduce((s, x) => s + x.p.allocation_pct, 0); over = over || sum > 100;
+    const blend = k => { if (!MARKET || !total) return null; let inc = 0;
+      for (const x of en) { const r = poolApr(x.p, MARKET.find(m => m.chain_id === id && m.pool === x.p.pool.toLowerCase()), k); if (r) inc += r.apr / 100 * r.dep; } return inc / total * 100; };
+    const b = blend("h24");
+    return `<div class="card" style="--cc:${cc(id)}" id="${id === 8453 ? "allocBar" : ""}"><div class="row"><span class="cdot"></span><b>${esc(chainOf(id).name)}</b><span class="sp"></span>
+        <span class="small ${sum > 100 ? "bad" : "mute"}">${fmt(sum, 0)}% of ${usd(total, 0)}</span></div>
+      <div class="alloc-bar">${en.map(x => `<div title="${esc(x.p.name)} ${x.p.allocation_pct}%" style="width:${Math.min(x.p.allocation_pct, 100)}%;background:${COLORS[x.i % COLORS.length]}"></div>`).join("")}</div>
+      <div class="legend">${en.map(x => `<span><span class="swc" style="background:${COLORS[x.i % COLORS.length]}"></span>${esc(x.p.name)} ${fmt(x.p.allocation_pct, 0)}% · ${usd(total * x.p.allocation_pct / 100)}</span>`).join("")}
+        <span><span class="swc" style="background:var(--card2);border:1px solid var(--line2)"></span>idle ${fmt(Math.max(0, 100 - sum), 0)}%</span></div>
+      <div class="small" style="margin-top:8px">${b == null ? (MARKET ? "" : '<span class="skel"></span>') : `Blended APR <b class="mono">${fmt(b, 2)}%</b> (24h) → about <b class="mono">${usd(total * b / 100)}</b>/year`}</div></div>`;
+  }).join("");
+  $("saveBar").classList.toggle("show", dirtyPools);
+  $("allocSum").innerHTML = over ? `<span class=bad>A chain is allocated over 100%</span>` : `<span class=warn>Unsaved changes</span> <span class=mute>· applied on the next cycle</span>`;
+}
+function editPool(i, k, v) { poolsEdit[i][k] = v; dirtyPools = true; if (k === "enabled") renderPools(); else updateSum(); }
 function editStrat(i, k, v) { poolsEdit[i].strategy[k] = parseFloat(v); dirtyPools = true; updateSum(); }
 function resetPools() { dirtyPools = false; poolsEdit = JSON.parse(JSON.stringify(S.pools)); renderPools(); }
 async function savePools() {
@@ -398,45 +641,9 @@ async function savePools() {
 }
 async function removePool(name) {
   if (!confirm(`Remove ${name} from the config?`)) return;
-  try { await api("/api/pools/remove", {name}); dirtyPools = false; refresh(); if (MARKET) loadMarket(true); } catch (e) { toast(e.message, true); }
+  try { await api("/api/pools/remove", {name}); dirtyPools = false; await refresh(); if (MARKET) loadMarket(true); } catch (e) { toast(e.message, true); }
 }
-// ---------- discover ----------
-async function loadMarket(force) {
-  if (force) MARKET = null;
-  $("market").innerHTML = `<tr><td class=mute>Loading pools from the Solidly UI…</td></tr>`;
-  try { MARKET = (await api("/api/market")).pools; renderMarket(); if (S && !$("pools").contains(document.activeElement)) renderPools(); }
-  catch (e) { $("market").innerHTML = `<tr><td class=bad>${esc(e.message)}</td></tr>`; }
-}
-function estApr(win, dep) {
-  if (!win || !win.hours) return null;
-  const r = (win.fees + win.emissions + win.bribes) * 8760 / win.hours, base = (win.active_tvl || 0) + dep;
-  return base > 0 ? r / base * 100 : null;
-}
-function aprCell(win, dep) {
-  const a = estApr(win, dep);
-  if (a == null) return "<td class=num>–</td>";
-  const tip = win ? `fees $${fmt(win.fees)} · emissions $${fmt(win.emissions)} · bribes $${fmt(win.bribes)} · volume ${compact(win.volume)} · avg in-range TVL ${compact(win.active_tvl)} over ${win.hours}h` : "";
-  return `<td class=num title="${esc(tip)}"><span class="apr ${a >= 5 ? "hi" : ""}">${fmt(a, a < 10 ? 2 : 1)}%</span></td>`;
-}
-function renderMarket() {
-  if (!$("depSize").value) $("depSize").value = Math.round(((S && S.worker && S.worker.account) || {}).total_usd || 10000);
-  const dep = parseFloat($("depSize").value) || 0, minTvl = parseFloat($("minTvl").value) || 0, only = $("onlySupported").checked;
-  const rows = (MARKET || []).filter(p => (p.tvl_usd >= minTvl || p.configured) && (!only || p.pegged)).sort((a, b) => (estApr(b.windows.h24, dep) || 0) - (estApr(a.windows.h24, dep) || 0));
-  let h = `<tr><th>Pair</th><th class=num>Fee</th><th class=num>TVL</th><th class=num>In-range TVL</th><th class=num>24h volume</th>
-    <th class=num title="estimated APR if deposited, last 1 hour">APR 1h</th><th class=num>APR 6h</th><th class=num>APR 24h</th><th class=num title="processor's own 24h APR on in-range liquidity">Pool APR 24h</th>
-    <th class=num title="fee income ÷ loss to arbitrage per unit of at-the-money liquidity, trailing 7 days; well above 1 = fee-paying flow, below 2 = mostly arbitrage. Configured pools use their hourly fee history; other pools their current fee. Appears a minute or two after the app starts">Fee / arb 7d</th><th></th></tr>`;
-  for (const p of rows) {
-    const act = (p.pegged ? "" : `<span class="chip volatile">volatile · not backtested</span> `) +
-      (p.configured ? `<span class="chip">configured</span>` : `<button class="sm" onclick="addPool('${p.pool}')">Add</button>`);
-    h += `<tr><td><div class="pair"><span class="logos">${logo(p.token0)}${logo(p.token1)}</span><div><b>${esc(p.token0.symbol)} / ${esc(p.token1.symbol)}</b>
-        <div class="mute small"><a href="https://basescan.org/address/${p.pool}" target=_blank>${p.pool.slice(0, 8)}…</a> · spacing ${p.tick_spacing}${p.whitelisted ? " · whitelisted" : ""}</div></div></div></td>
-      <td class=num>${fmt((p.fee_tier || 0) / 100, 2)} bp<div class="mute small">now ${fmt((p.fee_pips || 0) / 100, 2)} bp</div></td>
-      <td class=num>${compact(p.tvl_usd)}</td><td class=num>${compact(p.active_usd)}</td><td class=num>${compact((p.windows.h24 || {}).volume ?? p.volume_24h)}</td>
-      ${aprCell(p.windows.h1, dep)}${aprCell(p.windows.h6, dep)}${aprCell(p.windows.h24, dep)}<td class="num mute">${fmt(p.processor_apr_24h, 1)}%</td><td class=num>${flvrFig(p.flvr)}</td><td class=num>${act}</td></tr>`;
-  }
-  $("market").innerHTML = rows.length ? h : `<tr><td class=mute>No pools match the filters.</td></tr>`;
-}
-["depSize", "minTvl"].forEach(id => $(id).addEventListener("input", () => MARKET && renderMarket()));
+["depSize", "minTvl", "q", "onlyMine"].forEach(id => $(id).addEventListener("input", () => renderPools()));
 // Volatile pairs are hidden by default; showing them needs an explicit confirmation every time.
 $("onlySupported").addEventListener("change", e => {
   if (!e.target.checked && !confirm("Show volatile pairs? " +
@@ -445,12 +652,12 @@ $("onlySupported").addEventListener("change", e => {
     e.target.checked = true;
     return;
   }
-  if (MARKET) renderMarket();
+  renderPools();
 });
-async function addPool(addr, name) {
-  try { const r = await api("/api/pools/add", {pool: addr, name: name || undefined});
-    toast(`Added ${r.pool.name} (disabled, 0%). Set its allocation under Pools & allocation; data downloads on the next cycle.`);
-    $("newPool").value = ""; $("newName").value = ""; dirtyPools = false; await refresh(); if (MARKET) { MARKET.forEach(p => { if (p.pool === r.pool.pool) p.configured = true; }); renderMarket(); } }
+async function addPool(addr, name, chainId) {
+  try { const r = await api("/api/pools/add", {pool: addr, name: name || undefined, chain_id: chainId || 8453});
+    toast(`Added ${r.pool.name} on ${chainOf(chainId || 8453).name} (disabled, 0%). Set its allocation in the table; data downloads on the next cycle.`);
+    $("newPool").value = ""; $("newName").value = ""; dirtyPools = false; await refresh(); if (MARKET) { MARKET.forEach(p => { if (p.pool === r.pool.pool) p.configured = true; }); renderPools(); } }
   catch (e) { toast(e.message, true); }
 }
 // ---------- settings ----------
@@ -472,12 +679,12 @@ function renderSettings() {
     ? `<div><label class=f>${l}</label><select data-k="${k}">${$("solidMode").innerHTML.replace(/ selected(="")?/g, "")
         .replace(`value="${solidMode(S.settings)}"`, `value="${solidMode(S.settings)}" selected`)}</select></div>`
     : t === "checkbox"
-    ? `<div><label class="row small"><input type=checkbox data-k="${k}" ${getp(S.settings, k) ? "checked" : ""}> ${l}</label></div>`
+    ? `<div><label class="sw" style="margin-top:22px"><input type=checkbox data-k="${k}" ${getp(S.settings, k) ? "checked" : ""}><span class="t"></span>${l}</label></div>`
     : `<div ${k === "wallet" ? 'style="grid-column:1/-1"' : ""}><label class=f>${l}</label><input data-k="${k}" type=${t} step=any value="${esc(getp(S.settings, k) ?? "")}"></div>`).join("");
   if (fundingSel === undefined) fundingSel = [...(S.settings.funding_tokens || [])];
   renderPicker();
   const sg = S.signer || {};
-  $("keyStatus").innerHTML = sg.error ? `<span class=bad>${esc(sg.error)}</span>` : sg.stored ? `Key set for <b>${esc(sg.address)}</b>` +
+  $("keyStatus").innerHTML = sg.error ? `<span class=bad>${esc(sg.error)}</span>` : sg.stored ? `Key set for <b class=mono>${esc(sg.address)}</b>` +
     (sg.address && sg.address.toLowerCase() !== S.settings.wallet.toLowerCase() ? ` <span class=bad>(≠ managed wallet ${esc(S.settings.wallet)})</span>` : " <span class=ok>(matches the managed wallet)</span>")
     : "No key set: the worker runs as a dry run.";
   const where = {"Windows DPAPI": "Encrypted for your Windows account (DPAPI, secrets/private_key.dpapi)",
@@ -494,7 +701,6 @@ function renderPicker() {
   const box = $("fundingPicker");
   const open = box.firstElementChild && box.firstElementChild.classList.contains("open"), q = open ? box.querySelector("input").value : "";
   if (open) return filterPicker();
-  // selected tokens, largest USD balance first (the order shortfalls are bought in)
   const sel = [...fundingSel].sort((a, b) => ((tokenOf(b) || {}).balance_usd || 0) - ((tokenOf(a) || {}).balance_usd || 0));
   const chips = sel.map(a => { const t = tokenOf(a);
     return `<span class="chip">${t ? logo(t) + `<b>${esc(t.symbol)}</b><span class=mute>${fmt(t.balance, 4)} · ${usd(t.balance_usd, 2)}</span>`
@@ -512,16 +718,15 @@ function togglePicker() {
 function filterPicker() {
   const box = $("fundingPicker"), q = box.querySelector("input").value.trim().toLowerCase(), list = box.querySelector(".list");
   const items = (TOKENS || []).filter(t => !q || (t.symbol || "").toLowerCase().includes(q) || (t.name || "").toLowerCase().includes(q) || t.address.includes(q));
-  // selected tokens stay on top so they are easy to untick
   items.sort((a, b) => fundingSel.includes(b.address) - fundingSel.includes(a.address));
   list.innerHTML = `<div class="opt ${!fundingSel.length ? "cur" : ""}" data-a=""><span class="ck">${!fundingSel.length ? "✓" : ""}</span><span class="logo ph">–</span><div class="nm"><div><b>None</b></div><div>clear the selection: cross-pool funding off</div></div></div>` +
     (TOKENS ? items.slice(0, 150).map(t => tokenRow(t, fundingSel.includes(t.address))).join("") : `<div class="mute small" style="padding:8px">Loading balances…</div>`) +
     (/^0x[0-9a-f]{40}$/.test(q) && !items.length ? `<div class="opt ${fundingSel.includes(q) ? "cur" : ""}" data-a="${q}"><span class="ck">${fundingSel.includes(q) ? "✓" : ""}</span><span class="logo ph">?</span><div class="nm"><div><b>Use this address</b></div><div>${q}</div></div></div>` : "");
   list.querySelectorAll(".opt").forEach(o => o.onclick = e => {
-    e.stopPropagation();  // the row is redrawn below; the outside-click handler must not close the menu
+    e.stopPropagation();
     const a = o.dataset.a;
     fundingSel = !a ? [] : fundingSel.includes(a) ? fundingSel.filter(x => x !== a) : [...fundingSel, a];
-    filterPicker();  // the menu stays open so several tokens can be ticked
+    filterPicker();
   });
 }
 document.addEventListener("click", e => { const p = $("fundingPicker").firstElementChild; if (p && p.classList.contains("open") && !p.contains(e.target)) { p.classList.remove("open"); renderPicker(); } });
@@ -537,16 +742,16 @@ async function saveSettings() {
 }
 // ---------- activity ----------
 function renderActivity() {
-  const names = Object.fromEntries(S.pools.map(p => [p.pool.toLowerCase(), p.name]));
-  let rows = "<tr><th>When</th><th>Pool</th><th>Event</th><th>Details</th></tr>";
+  const names = Object.fromEntries(S.pools.map(p => [pchain(p) + ":" + p.pool.toLowerCase(), p.name]));
+  let rows = "<thead><tr><th>When</th><th>Chain</th><th>Pool</th><th>Event</th><th>Details</th></tr></thead><tbody>";
   for (const e of S.events) {
-    const k = e.kind, cls = k === "error" ? "bad" : k === "retry" || k === "blocked" ? "warn" : k === "sent" ? "ok" : "";
+    const k = e.kind, cls = k === "error" ? "bad" : k === "retry" || k === "blocked" ? "warn" : k === "sent" ? "ok" : "", id = e.chain_id || 8453;
     let d = esc(e.what || e.mode || (e.problems || []).join("; ") || e.error || e.reason || "");
-    if (e.hash) d += ` <a href="https://basescan.org/tx/${esc(e.hash)}" target=_blank>${esc(e.hash.slice(0, 12))}…</a>`;
-    rows += `<tr><td class="mute small" style="white-space:nowrap">${new Date(e.ts * 1000).toLocaleString()}</td><td>${esc(names[(e.pool || "").toLowerCase()] || "")}</td>
+    if (e.hash) d += ` <a href="${explorer(id, "tx", esc(e.hash))}" target=_blank>${esc(e.hash.slice(0, 12))}…</a>`;
+    rows += `<tr><td class="mute small" style="white-space:nowrap">${new Date(e.ts * 1000).toLocaleString()}</td><td>${ctag(id)}</td><td>${esc(names[id + ":" + (e.pool || "").toLowerCase()] || "")}</td>
       <td class=${cls}>${esc(k)}${e.live === false ? " <span class=mute>(dry)</span>" : ""}</td><td class=small>${d}</td></tr>`;
   }
-  $("events").innerHTML = rows;
+  $("events").innerHTML = rows + "</tbody>";
   $("errors").textContent = (S.errors || []).join("\n") || "none";
 }
 let SOLID_POOLS = null;
@@ -576,7 +781,6 @@ function renderSolidLp() {
   } else if (sl.enabled) info = "Runs on the next cycle.";
   $("solidLpInfo").innerHTML = info;
 }
-// One choice for claimed SOLID, stored as the two flags the worker reads (solid_lp wins over selling).
 const solidMode = st => st.solid_lp.enabled ? "lp" : st.sell_rewards.enabled ? "sell" : "keep";
 const solidModeBody = m => ({sell_rewards: {enabled: m === "sell"}, solid_lp: {enabled: m === "lp"}});
 async function setSolidMode(m) {
@@ -593,8 +797,8 @@ async function ctl(action, extra) { try { await api("/api/control", {action, ...
 function togglePause() { ctl(S.paused ? "resume" : "pause"); }
 async function toggleLive() {
   const on = !S.settings.execute;
-  if (on && !confirm("Go LIVE? The worker will sign and send real transactions with the stored key.")) return;
-  try { await api("/api/settings", {execute: on}); await api("/api/control", {action: "run_now"});  // apply the switch now, not in up to one interval
+  if (on && !confirm("Go LIVE? The worker will sign and send real transactions with the stored key, on every chain with enabled pools.")) return;
+  try { await api("/api/settings", {execute: on}); await api("/api/control", {action: "run_now"});
     toast(on ? "Live trading on: a cycle is starting now." : "Dry run: a cycle is starting now."); refresh(); } catch (e) { toast(e.message, true); }
 }
 async function setKey() {
@@ -604,7 +808,8 @@ async function setKey() {
   catch (e) { toast(e.message, true); }
 }
 async function delKey() { if (!confirm("Remove the stored private key? Live trading turns off.")) return; try { await api("/api/key/delete", {}); refresh(); } catch (e) { toast(e.message, true); } }
-try { const t = localStorage.getItem("alm.tab"); if (t) show(t); } catch (e) {}
+try { const s = JSON.parse(localStorage.getItem("alm.sort") || "null"); if (s && s.key) SORT = s; } catch (e) {}
+try { const t = localStorage.getItem("alm.tab"); if (t) show(t === "discover" ? "pools" : t); } catch (e) {}
 refresh(); setInterval(refresh, 10000);
 </script>
 <script src="/help.js"></script>

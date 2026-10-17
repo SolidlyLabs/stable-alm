@@ -13,6 +13,7 @@ mod claim;
 mod data;
 mod desktop;
 mod engine;
+mod ledger;
 mod eth;
 mod ladder;
 mod log;

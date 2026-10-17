@@ -188,6 +188,10 @@ impl Worker {
         flvr_chains.extend(by_chain.keys().filter(|c| !flvr_chains.contains(c)).copied().collect::<Vec<_>>());
         crate::market_flvr::refresh_in_background(flvr_chains, wallet.clone());
 
+        // Earned, costs and profit per chain, from the app's own transactions.
+        let ledger_chains: Vec<u64> = by_chain.keys().copied().collect();
+        self.set("ledger", crate::ledger::summary(&wallet, &ledger_chains));
+
         let mut snap = account_value(&by_chain, &wallet, &s);
         snap["mode"] = json!(mode);
         extra_value(&by_chain, &wallet, &mut snap);

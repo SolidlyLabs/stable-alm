@@ -363,6 +363,12 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
             w.request(false);
             Ok(json!({"ok": true}))
         }
+        "/api/chains" => {
+            let id = body["id"].as_u64().ok_or("expected {id, enabled}")?;
+            crate::chains::set_enabled(id, body["enabled"].as_bool().unwrap_or(false))?;
+            w.request(false);
+            Ok(json!({"ok": true, "chains": crate::chains::as_json()}))
+        }
         "/api/pools/add" => {
             let cid = body["chain_id"].as_u64().unwrap_or(crate::chains::BASE);
             Ok(json!({"ok": true, "pool": add_pool(body["pool"].as_str().unwrap_or(""), body["name"].as_str(), cid)?}))

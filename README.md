@@ -1,6 +1,7 @@
 # Stable ALM
 
-Stable ALM manages concentrated liquidity on **Solidly V3** for you. It runs as a small desktop app
+Stable ALM manages concentrated liquidity on **Solidly V3** for you, on every chain Solidly runs on
+(Ethereum, Optimism, Base, Arbitrum and Sonic). It runs as a small desktop app
 (a tray icon plus a local dashboard in your browser) and keeps your positions where trading
 actually happens, so they keep earning swap fees and SOLID emissions with no manual rebalancing.
 
@@ -29,6 +30,10 @@ move.
 - **It starts in dry run.** Every cycle plans and simulates against the real chain, but nothing is
   signed until you add a key and press **Go live**.
 
+The dashboard shows your balance, deployed and idle value, gas and **profit** per chain and in total.
+Profit is computed from the app's own transactions: what the reward claims paid in (plus what is
+claimable now), minus gas and swap costs.
+
 Each pool card on the dashboard also shows **fee vs arbitrage loss (7 days)**: whether liquidity at
 the current price earns more in fees than it loses to arbitrage. It is a health signal for the pool;
 the help panel explains how to read it.
@@ -48,13 +53,15 @@ build it yourself (below).
 ## Using the app
 
 1. Start Stable ALM. A tray icon appears; double-click it to open the dashboard.
-2. **Discover pairs** lists every Solidly V3 pool. Pegged pairs are shown by default. Add one, give
-   it an allocation under **Pools & allocation**, and watch a few dry-run cycles.
+2. **Pools** lists your pools and every Solidly V3 pool on the chains you turn on with the chain
+   filters at the top. Sort by any column; pegged pairs are shown by default. Add one, give it an
+   allocation (a share of what you hold on that chain), and watch a few dry-run cycles.
 3. When the plan looks right, paste your wallet's private key under **Settings** and press **Go
    live**.
    - On Windows the key is encrypted for your user account (DPAPI); on macOS it goes into the
      Keychain.
    - It never leaves your computer and is never shown again.
+   - The same address is used on every chain. Keep a little of each chain's gas token there.
 
 Your settings, data and logs are kept in `%LOCALAPPDATA%\StableALM` (Windows) or
 `~/Library/Application Support/StableALM` (macOS). Run only one copy per wallet.
@@ -79,7 +86,7 @@ It is a single file of about 2.3 MB; copy it anywhere and run it.
 To build the Windows installer, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run, from `rs/`:
 
 ```bash
-ISCC /DAppVersion=0.1.0 installer/StableALM.iss     # -> rs/dist/StableALM-Setup-0.1.0.exe
+ISCC /DAppVersion=0.2.0 installer/StableALM.iss     # -> rs/dist/StableALM-Setup-0.2.0.exe
 ```
 
 Useful command-line options:

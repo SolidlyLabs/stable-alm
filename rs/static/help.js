@@ -7,7 +7,7 @@
     _default: ["How to use this panel", `
       <p>Move the pointer over anything on the page (a number, a column header, a button, a setting) and this panel explains what it is,
       how it is calculated and what changing it does. On a phone, tap the item.</p>
-      <p><b>What this app does.</b> It manages your concentrated liquidity on Solidly V3 (Base) automatically. Every cycle (5 minutes by default) the worker:</p>
+      <p><b>What this app does.</b> It manages your concentrated liquidity on Solidly V3 automatically, on every chain Solidly runs on (Ethereum, Optimism, Base, Arbitrum, Sonic). Every cycle (5 minutes by default) the worker:</p>
       <ol><li>refreshes pool data,</li><li>values everything it manages in USD,</li><li>claims rewards when due,</li>
       <li>asks each pool's strategy whether the position should change,</li><li>runs safety checks,</li><li>and only then withdraws, swaps through the Solidly UI aggregator and re-deposits.</li></ol>
       <p>Nothing is signed until a private key is set <i>and</i> you press <b>Go live</b>. Until then every cycle is a <b>dry run</b>: the same plan, with every transaction simulated against the real chain.</p>`],
@@ -35,9 +35,10 @@
       <p><b>Go live</b> lets the worker sign and send real transactions with the stored private key from the next cycle on. It needs a key (Settings), and the key's address must equal the managed wallet.</p>
       <p><b>Switch to dry run</b> turns signing off again. Positions stay exactly as they are; nothing is withdrawn.</p>
       <p>Before going live: check that the wallet has ETH for gas (Overview), the allocations add up to what you want, and the last dry runs look right (Activity, pool cycle logs).</p>`],
-    "tab-overview": ["Overview tab", `<p>Live state of everything the worker manages: total value and its history, what is deployed, what is idle, claimable rewards, gas, and one card per active pool with its positions and last decision.</p>`],
-    "tab-pools": ["Pools & allocation tab", `<p>Decide how the managed value is split between pools, turn pools on or off, see each pool's estimated APR at its target size, and tune each strategy's parameters and safety limits.</p>`],
-    "tab-discover": ["Discover pairs tab", `<p>Every Solidly V3 pool on Base, with TVL, volume and estimated APR for a deposit of your size over the last 1, 6 and 24 hours. Add promising pairs from here; they start disabled at 0%.</p>`],
+    "tab-overview": ["Overview tab", `<p>Live state of everything the worker manages: total value, profit and its parts across all chains, one card per chain with its balance, gas and profit, the value history, and one card per active pool with its positions and last decision.</p>`],
+    "tab-pools": ["Pools tab", `<p>One table for every pool: the ones you manage (highlighted, at the top by default) and every other Solidly V3 pool on the chains you turned on. Click a column header to sort.</p>
+      <ul><li>Turn chains on or off with the chips at the top.</li><li>Search, show only your pools, or show volatile pairs (after a confirmation).</li>
+      <li>Set each managed pool's allocation, enable it, and tune its strategy; then <b>Save</b> in the bar that appears.</li><li><b>Add</b> any listed pool; it starts disabled at 0%.</li></ul>`],
     "tab-settings": ["Settings tab", `<p>Global options (cycle interval, claims, reward selling, retries, the funding tokens for cross-pool allocations) and the private key.</p>`],
     "tab-activity": ["Activity tab", `<p>Every decision and transaction the worker made (newest first), and the tail of the warnings/errors log.</p>`],
 
@@ -52,6 +53,24 @@
       <ul><li>after a failed or partial deposit (redeployed automatically next cycle),</li><li>after a claim,</li><li>or because part of the value is unallocated.</li></ul>`],
     "k-idle": ["Idle in wallet", `<p>Free balances of the managed tokens (pool tokens and the funding tokens) sitting in the wallet, not earning.</p>
       <p>When a pool's idle share exceeds <i>Redeploy idle above</i> (Settings, default 2% of its allocation), the next cycle tops the position up without withdrawing it. Smaller amounts wait for the next rebalance.</p>`],
+    "k-profit": ["Profit", `<p>What the app has made for you across all chains, from its own transactions:</p>
+      <p><code>profit = earned − gas paid − swap costs</code></p>
+      <ul><li><b>Earned</b>: everything the reward claims paid into the wallet, plus what is claimable now. On Solidly V3 all LP income (swap fees, SOLID emissions, bribes) is paid through claims.</li>
+      <li><b>Gas paid</b>: every transaction the app sent (claims, swaps, approvals, deposits, withdrawals), including the L1 data fee on OP-stack chains.</li>
+      <li><b>Swap costs</b>: value given away by rebalancing swaps and SOLID sales (what went out minus what came in).</li></ul>
+      <p>Each transaction is valued at the token prices of its time (today's when no snapshot is near). Later price moves of the tokens you hold are not counted here; they show in the managed value. Transactions you sent yourself are not included.</p>`],
+    "k-earned": ["Earned", `<p>Claimed rewards (valued at the prices when they were claimed) plus rewards claimable now, summed over all chains. The line below splits it into claimed and claimable.</p>`],
+    chaincard: ["Chain", `<p>Everything the app manages on one chain. The same wallet address is used on every chain.</p><ul>
+      <li><b>Managed</b>: positions plus idle managed tokens on this chain. Allocations on this chain are percentages of this number.</li>
+      <li><b>Deployed / Idle</b>: in positions vs free in the wallet.</li>
+      <li><b>Gas balance</b>: the chain's native token (ETH, or S on Sonic). Red, with a warning, when it is below the minimum: the worker then takes no action on this chain until you top it up.</li>
+      <li><b>Earned, gas paid, swap costs, profit</b>: as in the profit figure at the top, for this chain only.</li></ul>`],
+    chainfilter: ["Chains", `<p>Which chains' pools are listed and scanned (APR windows, fee / arb loss). Turning a chain on downloads its pool list; turning it off hides its other pools.</p>
+      <p>Pools you already manage keep running on any chain, on or off. Fantom is not offered: Solidly retired it.</p>`],
+    chain: ["Chain", `<p>The chain the pool is on. Each chain has its own balances, gas and allocation: a pool's % is of what is managed on its own chain.</p>`],
+    search: ["Search", `<p>Filters the table by pair, token symbol, pool name, chain name or pool address.</p>`],
+    onlymine: ["My pools", `<p>Shows only the pools in your configuration, on every chain.</p>`],
+    newchain: ["Chain for the address", `<p>The chain the pasted pool address is on.</p>`],
     "k-rewards": ["Claimable rewards", `<p>Rewards you can claim now from Solidly's Rewards Distributor, valued in USD: trading fees in pool tokens, SOLID emissions, and bribes.</p>
       <p>Rewards are computed off-chain and published as a Merkle root about every 24 h. After each root push there is a ~1 hour security buffer before claiming opens. The line below shows the auto-claim cadence, or why claiming is waiting right now.</p>`],
     "k-gas": ["ETH for gas", `<p>Native ETH in the wallet. Every withdraw, swap, approval, deposit and claim costs gas, typically a few cents on Base.</p>
@@ -81,7 +100,7 @@
       <p>Compounding: claimed pool tokens join the next rebalance. SOLID is sold into the pool's numeraire during that rebalance, in the largest chunk that loses at most the configured %. SOLID liquidity is thin, so small amounts are kept until they are worth selling.</p>`],
 
     // ---- pools ----
-    allocation: ["Allocation of the managed value", `<p>Each enabled pool targets its percentage of the managed value. Example: with $15,000 managed, 60% → $9,000 target.</p>
+    allocation: ["Allocation of the managed value", `<p>Allocation is per chain: each enabled pool targets its percentage of the value managed <i>on its own chain</i>. Example: with $15,000 managed on Base, 60% → $9,000 target. Each chain's pools may add up to at most 100%.</p>
       <ul><li>Unallocated percent stays idle in the wallet.</li>
       <li>Raising a pool's % makes the next cycle top it up from idle tokens. If the pool needs tokens the wallet does not hold, they are bought with the funding tokens through the aggregator.</li>
       <li>Lowering a pool's % below what it holds (by more than 10%) triggers a rebalance down to the new target.</li>
@@ -90,19 +109,19 @@
     blend: ["Blended APR", `<p>The estimated APR of the <i>whole</i> managed value with the current allocation: each pool's estimated APR at its target size, weighted by its target. Idle percent counts as 0%.</p>
       <p>Shown for the last 1 h, 6 h and 24 h, with the yearly dollars at the 24 h rate. These are raw processor figures: the backtests assume 82% of fees are actually paid and SOLID is worth half, so real results tend to be lower. Short windows are noisy, because volume is lumpy.</p>`],
     "p-color": ["Colour", `<p>The pool's colour in the allocation bar.</p>`],
-    "p-pool": ["Pool", `<p>The pool's name in this app, its token pair and its contract on Basescan.</p>`],
+    "p-pool": ["Pool", `<p>The pool's name in this app, its token pair and its contract on the chain's explorer.</p>`],
     "p-enabled": ["Enabled", `<p>Disabled pools get no new deposits. If a disabled pool still holds positions, the next cycle withdraws them. Use it to exit a pair without deleting its settings.</p>`],
-    "p-alloc": ["Allocation %", `<p>The pool's share of the managed value. Drag or type, then <b>Save pools &amp; allocation</b>. Enabled pools may add up to at most 100%.</p>`],
+    "p-alloc": ["Allocation %", `<p>The pool's share of the value managed on its chain. Type it, then <b>Save pools &amp; allocation</b>. Enabled pools on one chain may add up to at most 100%. The switch enables or disables the pool; The ⚙ button opens its strategy parameters, Re-solve and Remove; the line below shows what it holds now.</p>`],
     "p-target": ["Target", `<p>Allocation % × managed value: the dollars this pool should hold. The worker tops up when the pool holds clearly less (idle tokens above the redeploy threshold) and rebalances down when it holds more than 110% of it.</p>`],
     "p-deployed": ["Deployed", `<p>The value of this pool's positions right now.</p>`],
     apr: ["Estimated APR (if deposited)", `<p>What a deposit would have earned over the window, annualised:</p>
       <p><code>(fees + emissions + bribes) × 8760 / hours ÷ (in-range TVL + deposit)</code></p>
       <ul><li><b>Inputs</b>: fees, emissions and bribes are what the whole pool paid its in-range LPs, from the Solidly data processor's hourly history.</li>
-      <li><b>Deposit</b>: your deposit joins the in-range liquidity and shares pro rata, like the average in-range LP. In <i>Pools</i> it is the pool's target size, with your own existing liquidity taken out of the TVL so it is not counted twice. A pool at 0% shows a 10% slice. In <i>Discover</i> it is the deposit size you entered.</li>
+      <li><b>Deposit</b>: your deposit joins the in-range liquidity and shares pro rata, like the average in-range LP. In <i>Pools</i> it is the pool's target size, with your own existing liquidity taken out of the TVL so it is not counted twice. A pool at 0% shows a 10% slice. For other pools it is the deposit size you entered.</li>
       <li><b>Windows</b>: 1 h reacts fast but is noisy; 24 h is steadier. Large differences mean volume came in bursts.</li>
       <li><b>Caveats</b>: these are raw figures. The backtests count fees at 82% (what the rewarder actually paid) and SOLID at 50%. The ladder's 1-tick positions usually earn more than the average in-range LP, and wide ranges earn less.</li></ul>
       <p>Hover a value for its breakdown, shown under "This value" below.</p>`],
-    "p-strategy": ["Strategy & limits", `<p>The strategy that decides where the liquidity goes, plus this pool's safety limits. Open it to edit; changes apply after <b>Save</b>.</p>
+    "p-strategy": ["Strategy & limits", `<p>The strategy that decides where the liquidity goes, plus this pool's safety limits. Open it with the ⚙ button on the pool's row; changes apply after <b>Save</b>.</p>
       <p><b>ladder</b> (recommended, best in walk-forward backtests on every pair): every <i>every</i> bars it looks at the last <i>lookback</i> seconds and finds which ticks paid fees and how crowded each was with other LPs. It then spreads the capital over single ticks to maximise its fee share, using √(fees × competing liquidity) − competing liquidity. It only re-deposits if more than <i>turnover</i> of the capital would move.</p>`],
     "param-lookback": ["lookback (seconds)", `<p>How much recent history the ladder uses to decide where fees are paid. 86400 = 1 day, which was best in backtests: it follows the peg's slow drift but ignores single bursts. Longer is steadier; shorter reacts faster but churns more.</p>`],
     "param-span": ["span (ticks)", `<p>How far from the median tick (of the lookback window) the ladder may place liquidity: ±span ticks. 3 for USDC/USDT (±0.03%); 6 for cbETH/WETH, which moves more. Wider costs nothing if those ticks pay no fees, because the solver gives them nothing.</p>`],
@@ -129,7 +148,7 @@
     onlysupported: ["Only pegged pairs", `<p>Shows only pairs whose two tokens track the same asset: both USD stablecoins, ETH and its liquid-staking tokens (cbETH, wstETH, weETH…), BTC wrappers, EUR or MXN stables. Their prices must also agree within 0.8–1.25. A token that merely trades near $1 (e.g. AERO) does not count. The ladder strategy and its safety settings were backtested on these.</p>
       <p>On by default. Turning it off asks you to confirm first, because the strategy has not been tested on volatile pairs.</p>
       <p>Volatile pairs (e.g. WETH/USDC) can be added and run, but nothing has been backtested for them: concentrated liquidity on a volatile pair can lose more to price moves (divergence loss) than it earns in fees.</p>`],
-    pair: ["Pair", `<p>The pool's tokens, its address on Basescan and its tick spacing. Spacing is the tick granularity of positions: 1 for pegged pairs, larger for volatile pairs. <i>whitelisted</i> means Solidly emissions can be voted to the pool.</p>`],
+    pair: ["Pair", `<p>The pool's tokens, its address on the chain's explorer and its tick spacing. Spacing is the tick granularity of positions: 1 for pegged pairs, larger for volatile pairs. <i>whitelisted</i> means Solidly emissions can be voted to the pool.</p>`],
     fee: ["Fee", `<p>The pool's fee tier (bp = 0.01%) and the current dynamic fee. Solidly V3 adjusts fees per pool; the current fee is what swaps pay right now and what LPs earn per unit of volume.</p>`],
     tvl: ["TVL", `<p>The total value locked in the pool, in all ranges, in USD (Solidly UI data).</p>`],
     activetvl: ["In-range TVL", `<p>The value of the liquidity whose range contains the current price, i.e. the liquidity that is actually earning fees now. Your deposit shares fees with this, not with the full TVL.</p>`],
@@ -147,14 +166,14 @@
       <li><b>Below 1: losing.</b> Liquidity at the money loses more to arbitrage than it earns, whatever the strategy. Deep volatile pools sit near 1; Solidly WETH/USDC sits at about 0.55, which is why it is not worth LPing.</li></ul>
       <p>Hover the figure for F, LVR and the number of swaps used. It is shown for every pool. Configured pools use their stored swaps and hourly fee history; other pools use the last 7 days of swaps downloaded for the whole chain, priced at the pool's current fee. It shows "–" until the first download has finished, a minute or two after the app starts.</p>`],
     addpair: ["Add", `<p>Adds the pool to the configuration, <b>disabled at 0%</b>, with the default ladder strategy. Its tokens, decimals and tick spacing are read on-chain, and its data downloads on the next cycle.</p>
-      <p>Give it an allocation under Pools &amp; allocation. Ideally backtest it first; the strategy parameters were tuned on USDC/USDT and cbETH/WETH.</p>`],
-    configured: ["Configured", `<p>This pool is already in your configuration. Manage it under Pools &amp; allocation.</p>`],
+      <p>Give it an allocation in the same table. Ideally backtest it first; the strategy parameters were tuned on USDC/USDT and cbETH/WETH.</p>`],
+    configured: ["Configured", `<p>This pool is in your configuration (the name shown). Its row is highlighted and has the allocation controls.</p>`],
     volatile: ["Volatile · not backtested", `<p>The two tokens do not track the same asset (they are not both USD stables, ETH variants, BTC wrappers, …). Any decimal combination works (e.g. WETH 18 / USDC 6). Prices and liquidity are converted per token.</p>
       <p>When added, the pair gets volatile defaults:</p>
       <ul><li>a wider ladder (span 60 tick spacings);</li><li>no depeg guard, which would freeze on every normal move;</li>
       <li>a looser 1 h spot check (100 ticks);</li><li>10 bp slippage and a 15 bp swap-cost cap.</li></ul>
       <p>None of this has been backtested. Expect divergence loss when the price trends, and keep allocations small until it proves itself.</p>`],
-    addaddr: ["Add by address", `<p>Paste any Solidly V3 pool address on Base to add it (disabled, 0%). It works for pools not shown in the list.</p>`],
+    addaddr: ["Add by address", `<p>Pick the chain and paste any Solidly V3 pool address to add it (disabled, 0%). It works for pools not shown in the list.</p>`],
     refresh: ["Refresh", `<p>Reloads the pool list and the APR windows. Data is cached for a few minutes: pools 5 min, APR windows 10 min.</p>`],
 
     // ---- settings ----
@@ -194,12 +213,12 @@
     helpvis: ["Show explanations panel", `<p>Shows or hides this panel. It is on by default. The choice is remembered in this browser only (not a worker setting), and takes effect immediately without saving.</p>
       <p>With the panel hidden, hovering still works as normal tooltips where values have breakdowns.</p>`],
     savesettings: ["Save settings", `<p>Writes the options and the funding tokens to <code>config/settings.json</code>. They take effect on the next cycle.</p>`],
-    safety: ["Safety", `<p>Checks before any action:</p><ul><li>kill switch,</li><li>depeg guard,</li><li>spot vs 1 h median,</li><li>at least 0.0002 ETH for gas,</li><li>daily action cap.</li></ul>
+    safety: ["Safety", `<p>Checks before any action:</p><ul><li>kill switch,</li><li>depeg guard,</li><li>spot vs 1 h median,</li><li>enough gas on the chain,</li><li>daily action cap.</li></ul>
       <p>Every transaction is simulated with <code>eth_call</code> and <code>estimateGas</code> before it is sent. Swaps only go through the Solidly UI meta-aggregator, capped against the pool price, with exact-amount approvals. Stuck transactions are re-broadcast with higher fees.</p>`],
 
     // ---- activity ----
-    events: ["Activity", `<p>Every decision and transaction, newest first (<code>logs/executor.jsonl</code>). Hover an event type for its meaning. Transaction hashes link to Basescan. "(dry)" marks dry-run rows.</p>`],
-    "ev-sent": ["sent", `<p>A real transaction was broadcast and mined successfully. The link opens it on Basescan.</p>`],
+    events: ["Activity", `<p>Every decision and transaction, newest first (<code>logs/executor.jsonl</code>). Hover an event type for its meaning. Transaction hashes link to the chain's explorer. "(dry)" marks dry-run rows.</p>`],
+    "ev-sent": ["sent", `<p>A real transaction was broadcast and mined successfully. The link opens it on the chain's explorer.</p>`],
     "ev-dry_run": ["dry_run", `<p>A transaction that would have been sent in live mode. It was built and, where its inputs already exist on-chain, simulated successfully.</p>`],
     "ev-solid_lp": ["solid_lp", `<p>The start of a SOLID deposit into the SOLID pool (full range, paired with the same $ of the other token). The amount of SOLID and its USD value are in details.</p>`],
     "ev-rebalance": ["rebalance", `<p>The start of a rebalance, top-up or exit (the mode is shown in details). Live ones count towards the daily cap.</p>`],
@@ -212,7 +231,7 @@
   };
 
   const TH = {"APR 1h": "apr", "APR 6h": "apr", "APR 24h": "apr", "Pool APR 24h": "poolapr", "TVL": "tvl", "In-range TVL": "activetvl", "24h volume": "vol24", "Fee / arb 7d": "flvr",
-    "Fee": "fee", "Pair": "pair", "Pool": "p-pool", "Enabled": "p-enabled", "Allocation": "p-alloc", "Target": "p-target", "Deployed": "p-deployed",
+    "Fee": "fee", "Pair": "pair", "Chain": "chain", "Pool": "p-pool", "Enabled": "p-enabled", "Allocation": "p-alloc", "Target": "p-target", "Deployed": "p-deployed",
     "Strategy & limits": "p-strategy", "Token": "wallet", "Claimable": "rewards", "When": "events", "Event": "events", "Details": "events"};
   const BTN = {"Run now": "run_now", "Claim now": "claim_now", "Pause": "pause", "Resume": "pause", "Go live": "live", "Switch to dry run": "live",
     "Re-solve": "resolve", "Remove": "remove", "Add": "addpair", "Save pools & allocation": "savepools", "Discard changes": "discard", "Save settings": "savesettings",
@@ -223,28 +242,30 @@
     root.querySelectorAll("#tabs button").forEach(b => set(b, "tab-" + b.dataset.t));
     root.querySelectorAll("button").forEach(b => { const k = BTN[b.textContent.trim()]; if (k) set(b, k); });
     root.querySelectorAll("table").forEach(t => {
-      const heads = [...t.querySelectorAll("tr:first-child th")].map(th => TH[th.textContent.trim()] || null);
+      const heads = [...t.querySelectorAll("tr:first-child th")].map(th => TH[(th.dataset.label ?? th.textContent).trim()] || null);
       t.querySelectorAll("tr:first-child th").forEach((th, i) => heads[i] && set(th, heads[i]));
       t.querySelectorAll("tr").forEach(tr => [...tr.children].forEach((td, i) => { if (td.tagName === "TD" && heads[i]) set(td, heads[i]); }));
     });
     root.querySelectorAll("#settings [data-k]").forEach(el => set(el.closest("div"), el.dataset.k === "solid_mode" ? "solidmode" : "set-" + el.dataset.k));
-    root.querySelectorAll("#pools details .fields > div").forEach(d => { const l = d.querySelector("label"); if (l) set(d, "param-" + l.textContent.trim()); });
-    root.querySelectorAll("#pools tr td:first-child").forEach(td => set(td, "p-color"));
+    root.querySelectorAll("#pools .fields > div").forEach(d => { const l = d.querySelector("label"); if (l) set(d, "param-" + l.textContent.trim()); });
     root.querySelectorAll("#poolCards .card").forEach(c => set(c, "poolcard"));
     root.querySelectorAll("#poolCards .pos-list > div").forEach(d => set(d, "position"));
     root.querySelectorAll("#poolCards .card > .small").forEach(d => set(d, "decision"));
-    root.querySelectorAll("#events tr").forEach(tr => { const c = tr.children[2]; if (c && c.tagName === "TD") set(c, "ev-" + c.textContent.replace(/\(dry\)/, "").trim()); });
+    root.querySelectorAll("#events tr").forEach(tr => { const c = tr.children[3]; if (c && c.tagName === "TD") set(c, "ev-" + c.textContent.replace(/\(dry\)/, "").trim()); });
     root.querySelectorAll(".chip.volatile").forEach(c => set(c, "volatile"));
-    root.querySelectorAll("#market .chip:not(.volatile)").forEach(c => set(c, "configured"));
-    const ids = {mode: "mode", cycle: "cycle", chart: "chart", tokens: "wallet", rewards: "rewards", allocBar: "allocation", allocLegend: "allocation",
-      blendApr: "blend", depSize: "depsize", minTvl: "mintvl", fundingPicker: "funding", pk: "privkey", keyStatus: "privkey", errors: "errors", newPool: "addaddr", newName: "addaddr"};
+    root.querySelectorAll("#pools .chip.mine").forEach(c => set(c, "configured"));
+    root.querySelectorAll("#allocs .card").forEach(c => set(c, "allocation"));
+    root.querySelectorAll("#chainBar .chipbtn").forEach(c => set(c, "chainfilter"));
+    const ids = {mode: "mode", cycle: "cycle", chart: "chart", tokens: "wallet", rewards: "rewards", chainBar: "chainfilter", q: "search", newChain: "newchain", depSize: "depsize", minTvl: "mintvl", fundingPicker: "funding", pk: "privkey", keyStatus: "privkey", errors: "errors", newPool: "addaddr", newName: "addaddr"};
     for (const [id, k] of Object.entries(ids)) set(document.getElementById(id), k);
-    const kp = {kTotal: "k-total", kDeployed: "k-deployed", kIdle: "k-idle", kRewards: "k-rewards", kGas: "k-gas"};
+    const kp = {kTotal: "k-total", kProfit: "k-profit", kEarned: "k-earned", kDeployed: "k-deployed", kIdle: "k-idle"};
     for (const [id, k] of Object.entries(kp)) { const e = document.getElementById(id); if (e) set(e.closest(".card"), k); }
     set(document.getElementById("solidModeBox"), "solidmode");
     set(document.getElementById("solidLpBox"), "solidlppool");
     const hv = document.getElementById("helpVisible"); if (hv) set(hv.closest("label"), "helpvis");
     const os = document.getElementById("onlySupported"); if (os) set(os.closest("label"), "onlysupported");
+    const om = document.getElementById("onlyMine"); if (om) set(om.closest("label"), "onlymine");
+    set(document.getElementById("allocSum"), "allocation");
     document.querySelectorAll("section[data-tab=settings] .card h2").forEach(h => { if (h.textContent.trim() === "Safety") set(h.closest(".card"), "safety"); });
   }
 
