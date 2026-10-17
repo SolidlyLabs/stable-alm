@@ -1,0 +1,20 @@
+| group                      |   pnl |   apr_pct |   max_drawdown |   worst_day |   median_config |
+|:---------------------------|------:|----------:|---------------:|------------:|----------------:|
+| ladder|guard=none          | 548.2 |       2.3 |          -36.3 |       -22   |           470.2 |
+| ladder|guard=30            | 548.2 |       2.3 |          -36.3 |       -22   |           470.2 |
+| ladder|guard=15            | 548.2 |       2.3 |          -36.3 |       -22   |           470.2 |
+| ladder|guard=8             | 522.4 |       2.2 |          -37   |       -22.1 |           468   |
+| static|guard=none          | 344.6 |       1.5 |          -47.8 |       -28.8 |           337.7 |
+| recenter_noswap|guard=8    | 324.9 |       1.4 |          -53.5 |       -22.2 |           229.8 |
+| volband|guard=8            | 322   |       1.4 |          -56.9 |       -22.1 |           143.9 |
+| recenter|guard=8           | 282.3 |       1.2 |          -67.5 |       -22.4 |           278.3 |
+| volband|guard=15           | 279.3 |       1.2 |          -85.3 |       -22.1 |            67   |
+| recenter_noswap|guard=15   | 275.4 |       1.2 |          -70.4 |       -22.2 |           188   |
+| volband|guard=30           | 260.4 |       1.1 |         -104.2 |       -22.8 |            56   |
+| recenter_noswap|guard=30   | 258.6 |       1.1 |          -87.1 |       -23.9 |           170.1 |
+| recenter_noswap|guard=none | 258.6 |       1.1 |          -87.2 |       -23.9 |           166.4 |
+| volband|guard=none         | 256.4 |       1.1 |         -108.2 |       -22.8 |            60.5 |
+| recenter|guard=15          | 233.2 |       1   |         -123.8 |       -23.4 |           246   |
+| recenter|guard=30          | 208.5 |       0.9 |         -148.4 |       -27.7 |           218.2 |
+| recenter|guard=none        | 208.3 |       0.9 |         -148.6 |       -27.7 |           218   |
+| hold_usdc|guard=none       |   0   |       0   |            0   |         0   |             0   |

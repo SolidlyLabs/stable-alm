@@ -1,0 +1,46 @@
+[package]
+name = "stable-alm"
+version = "0.1.0"
+edition = "2021"
+description = "Stable ALM: automated liquidity management for Solidly V3 (desktop app)"
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "StableALM"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+ureq = { version = "2.10", default-features = false, features = ["json", "native-tls"] }
+native-tls = "0.2"
+tiny_http = "0.12"
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+tiny-keccak = { version = "2", features = ["keccak"] }
+num-bigint = "0.4"
+num-traits = "0.2"
+num-integer = "0.1"
+hmac = "0.12"
+sha2 = "0.10"
+getrandom = "0.2"
+tray-icon = { version = "0.19", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_System_Threading",
+  "Win32_System_Registry", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Memory", "Win32_System_Console",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSRunningApplication"] }
+objc2-foundation = "0.3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+# unwind (not abort): the worker catches a panicking cycle and keeps running
+strip = true

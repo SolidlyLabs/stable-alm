@@ -1,0 +1,612 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>stable-alm</title>
+<style>
+:root{--bg:#0d0f13;--card:#151820;--card2:#1b1f29;--line:#252a36;--fg:#e7e9ef;--mute:#8a92a6;--acc:#5b9cff;--acc2:#7c5cff;--ok:#3fbf7f;--warn:#e0a63a;--bad:#e5534b;
+  --c1:#5b9cff;--c2:#3fbf7f;--c3:#e0a63a;--c4:#c065e8;--c5:#e5534b;--c6:#41c6c6}
+@media (prefers-color-scheme: light){:root{--bg:#f4f5f8;--card:#fff;--card2:#f7f8fa;--line:#e3e6ec;--fg:#191d26;--mute:#667085;--acc:#2f6fe0}}
+*{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
+header{position:sticky;top:0;z-index:5;background:color-mix(in srgb,var(--bg) 92%,transparent);backdrop-filter:blur(6px);border-bottom:1px solid var(--line)}
+.bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:12px 20px}
+.brand{font-weight:700;font-size:16px;letter-spacing:.2px;margin-right:6px}.brand span{color:var(--acc)}
+nav{display:flex;gap:2px;padding:0 14px;overflow-x:auto}nav button{background:none;border:0;border-bottom:2px solid transparent;color:var(--mute);padding:9px 12px;border-radius:0;font-weight:500}
+nav button.on{color:var(--fg);border-color:var(--acc)}
+main{max-width:1280px;margin:0 auto;padding:18px 20px 60px}
+.grid{display:grid;gap:14px}.g2{grid-template-columns:repeat(auto-fit,minmax(min(100%,460px),1fr))}.kpis{grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;min-width:0}
+.card h2{font-size:14px;margin:0 0 10px;color:var(--mute);font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+.kpi .v{font-size:22px;font-weight:650;font-variant-numeric:tabular-nums}.kpi .l{color:var(--mute);font-size:12px}
+.badge{padding:3px 10px;border-radius:99px;font-weight:700;font-size:11px;letter-spacing:.4px}
+.b-live{background:var(--bad);color:#fff}.b-dry{background:var(--acc);color:#fff}.b-paused{background:var(--warn);color:#111}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
+th{color:var(--mute);font-weight:500;font-size:12px;white-space:nowrap}tr:last-child td{border-bottom:0}
+.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.mute{color:var(--mute)}.small{font-size:12px}
+.ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}
+button{background:var(--acc);color:#fff;border:0;border-radius:8px;padding:7px 12px;font:inherit;cursor:pointer;white-space:nowrap}
+button:disabled{opacity:.45;cursor:default}button.sec{background:transparent;color:var(--fg);border:1px solid var(--line)}button.danger{background:var(--bad)}button.sm{padding:4px 9px;font-size:12px}
+input,select{background:var(--card2);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:7px 9px;font:inherit;width:100%}
+input[type=checkbox]{width:auto;accent-color:var(--acc)}label.f{font-size:12px;color:var(--mute);display:block;margin-bottom:3px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.sp{flex:1}.fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px 14px}
+.scroll{overflow:auto}.tall{max-height:520px}pre{white-space:pre-wrap;font:12px/1.45 ui-monospace,Consolas,monospace;margin:0}
+details summary{cursor:pointer;color:var(--acc)}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}.d-ok{background:var(--ok)}.d-off{background:var(--mute)}.d-bad{background:var(--bad)}
+.pair{display:flex;align-items:center;gap:8px}.logos{display:flex}.logo{width:22px;height:22px;border-radius:50%;background:var(--card2);border:1px solid var(--line);object-fit:cover;flex:none}
+.logos .logo+.logo{margin-left:-7px}.ph{display:inline-flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:var(--mute)}
+.alloc-bar{display:flex;height:12px;border-radius:99px;overflow:hidden;background:var(--card2);border:1px solid var(--line);margin:6px 0 4px}
+.alloc-bar div{height:100%}.legend{display:flex;flex-wrap:wrap;gap:12px;font-size:12px;color:var(--mute)}.sw{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:middle}
+.apr{font-weight:600}.apr.hi{color:var(--ok)}.chip{font-size:11px;padding:2px 7px;border-radius:99px;border:1px solid var(--line);color:var(--mute);white-space:nowrap}
+.picker{position:relative}.picker .sel{display:flex;align-items:center;gap:8px;width:100%;background:var(--card2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;color:var(--fg);cursor:pointer}
+.picker .menu{position:absolute;z-index:20;top:calc(100% + 4px);left:0;right:0;min-width:300px;background:var(--card);border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 30px rgba(0,0,0,.35);padding:8px;display:none}
+.picker.open .menu{display:block}.picker .list{max-height:300px;overflow:auto;margin-top:6px}
+.opt{display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:8px;cursor:pointer}.opt:hover,.opt.cur{background:var(--card2)}
+.opt .ck{width:14px;color:var(--ok, #3ecf8e);font-weight:700;text-align:center}.picker .chips{display:flex;flex-wrap:wrap;gap:6px;min-width:0}.picker .chip{display:inline-flex;align-items:center;gap:6px;background:var(--card);border:1px solid var(--line);border-radius:999px;padding:2px 8px 2px 3px;font-size:12px}.picker .chip .logo{width:18px;height:18px}.picker .chip .x{cursor:pointer;color:var(--mute);padding:0 2px}.picker .chip .x:hover{color:var(--fg)}
+.opt .nm{flex:1;min-width:0}.opt .nm div:last-child{font-size:11px;color:var(--mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+svg.chart{width:100%;height:190px;display:block}
+.chartwrap{position:relative;padding-left:58px;padding-bottom:18px}
+.chartwrap .yl{position:absolute;left:0;width:52px;text-align:right;font-size:11px;color:var(--mute);transform:translateY(-50%)}
+.chartwrap .xl{position:absolute;bottom:0;font-size:11px;color:var(--mute);transform:translateX(-50%);white-space:nowrap}
+.chartwrap .cross{position:absolute;top:0;bottom:18px;width:1px;background:var(--mute);opacity:.6;pointer-events:none;display:none}
+.chartwrap .tip{position:absolute;top:6px;z-index:5;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;pointer-events:none;display:none;min-width:190px;box-shadow:0 8px 20px rgba(0,0,0,.35)}
+.chartwrap .tip div{display:flex;justify-content:space-between;gap:12px}.chartwrap .tip .t{color:var(--mute);margin-bottom:4px}
+#toast{position:fixed;bottom:18px;right:18px;background:var(--card);border:1px solid var(--line);padding:10px 14px;border-radius:10px;display:none;max-width:440px;z-index:30;box-shadow:0 10px 30px rgba(0,0,0,.3)}
+.hide{display:none}.pos-list{font-size:12px;line-height:1.6}
+@media (max-width:640px){main{padding:12px}.bar{padding:10px 12px}th,td{padding:6px 5px}}
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div class="brand">stable<span>-alm</span></div>
+    <span id="mode" class="badge">…</span>
+    <span id="cycle" class="mute small"></span>
+    <span class="sp"></span>
+    <button onclick="ctl('run_now')">Run now</button>
+    <button class="sec" onclick="ctl('claim_now')">Claim now</button>
+    <button id="pauseBtn" class="sec" onclick="togglePause()">Pause</button>
+    <button id="liveBtn" class="danger" onclick="toggleLive()">Go live</button>
+  </div>
+  <nav id="tabs">
+    <button data-t="overview" class="on">Overview</button><button data-t="pools">Pools &amp; allocation</button>
+    <button data-t="discover">Discover pairs</button><button data-t="settings">Settings</button><button data-t="activity">Activity</button>
+  </nav>
+</header>
+<main>
+  <!-- OVERVIEW -->
+  <section data-tab="overview" class="grid">
+    <div class="grid kpis">
+      <div class="card kpi"><div class="l">Managed value</div><div class="v" id="kTotal">–</div><div class="l" id="kChange"></div></div>
+      <div class="card kpi"><div class="l">Deployed in pools</div><div class="v" id="kDeployed">–</div><div class="l" id="kDeployedPct"></div></div>
+      <div class="card kpi"><div class="l">Idle in wallet</div><div class="v" id="kIdle">–</div><div class="l">free pool &amp; funding tokens</div></div>
+      <div class="card kpi"><div class="l">Claimable rewards</div><div class="v" id="kRewards">–</div><div class="l" id="kClaim"></div></div>
+      <div class="card kpi"><div class="l">ETH for gas</div><div class="v" id="kGas">–</div><div class="l" id="kGasNote"></div></div>
+    </div>
+    <div class="card"><h2>Value history</h2><div class="chartwrap" id="chartWrap"><svg class="chart" id="chart" viewBox="0 0 800 190" preserveAspectRatio="none"></svg><div id="chartAxes"></div>
+      <div class="cross" id="chartCross"></div><div class="tip" id="chartTip"></div></div><div class="mute small" id="chartInfo"></div></div>
+    <div class="grid g2" id="poolCards"></div>
+    <div class="grid g2">
+      <div class="card"><h2>Wallet (managed tokens)</h2><table id="tokens"></table></div>
+      <div class="card"><h2>Rewards</h2><table id="rewards"></table>
+        <div id="solidModeBox" style="margin-top:10px"><label class="f">Claimed SOLID</label><select id="solidMode" onchange="setSolidMode(this.value)" style="max-width:100%"><option value="keep">Keep in the wallet</option><option value="sell">Sell into the pool at the next rebalance</option><option value="lp">LP full range, paired with the same $ of the other token</option></select></div>
+        <div id="solidLpBox" style="margin-top:8px"><label class="f">SOLID LP pool</label><select id="solidLpPool" onchange="setSolidLpPool(this.value)" style="max-width:100%"></select>
+          <div class="mute small" id="solidLpInfo" style="margin-top:6px"></div></div>
+        <p class="mute small" id="claimInfo"></p></div>
+    </div>
+  </section>
+
+  <!-- POOLS -->
+  <section data-tab="pools" class="grid hide">
+    <div class="card">
+      <h2>Allocation of the managed value</h2>
+      <div class="alloc-bar" id="allocBar"></div><div class="legend" id="allocLegend"></div>
+      <p id="blendApr" class="small" style="margin:10px 0 0"></p>
+      <p class="mute small">Each enabled pool gets its % of everything managed (all positions + free tokens). Unallocated stays idle. A pool at 0% or
+        disabled is withdrawn on the next cycle. If a pool's share needs tokens the wallet does not hold, they are bought with the funding tokens.
+        APRs are estimates at each pool's target size (fees + emissions + bribes over the window, annualised, shared with the other in-range LPs); a pool at 0% shows
+        the APR for a 10% slice. Raw figures, before the backtest's haircuts.</p>
+    </div>
+    <div class="card"><div class="scroll"><table id="pools"></table></div>
+      <div class="row" style="margin-top:12px"><span id="allocSum" class="mute"></span><span class="sp"></span>
+        <button class="sec" onclick="resetPools()">Discard changes</button><button onclick="savePools()">Save pools &amp; allocation</button></div></div>
+  </section>
+
+  <!-- DISCOVER -->
+  <section data-tab="discover" class="grid hide">
+    <div class="card">
+      <div class="row">
+        <div style="width:170px"><label class="f">Deposit size for the estimate ($)</label><input id="depSize" type="number" min="0" step="100"></div>
+        <div style="width:170px"><label class="f">Min TVL ($)</label><input id="minTvl" type="number" min="0" step="10" value="50"></div>
+        <label class="row small mute" style="margin-top:16px"><input type="checkbox" id="onlySupported" checked> only pegged pairs (what the strategy was backtested on)</label>
+        <span class="sp"></span><button class="sec" onclick="loadMarket(true)">Refresh</button>
+      </div>
+      <p class="mute small" style="margin-bottom:0">Estimated APR if deposited = (fees + emissions + bribes over the window, annualised) ÷ (average in-range TVL + your deposit),
+        i.e. sharing like the average in-range LP. Data: Solidly UI pool list + data-processor hourly history. Raw figures, before the backtest's haircuts
+        (fees ×0.82, SOLID ×0.5); the ladder's single ticks usually earn more than the average in-range LP, wide ranges less.</p>
+    </div>
+    <div class="card"><div class="scroll"><table id="market"><tr><td class="mute">Loading pools…</td></tr></table></div></div>
+    <div class="card"><h2>Add by address</h2>
+      <div class="row"><input id="newPool" placeholder="Solidly V3 pool address 0x…" style="flex:2;min-width:260px"><input id="newName" placeholder="name (optional)" style="flex:1;min-width:140px">
+        <button onclick="addPool($('newPool').value,$('newName').value)">Add (disabled, 0%)</button></div>
+      <p class="mute small">Tokens, decimals and tick spacing are read on-chain. Equal-decimal pairs only for now. Backtest a pair before giving it a large share.</p></div>
+  </section>
+
+  <!-- SETTINGS -->
+  <section data-tab="settings" class="grid g2 hide">
+    <div class="card"><h2>Options</h2>
+      <div class="fields" id="settings"></div>
+      <div style="margin-top:12px"><label class="f">Funding tokens (buy allocation shortfalls, largest balance first; tick several, "None" disables)</label><div id="fundingPicker"></div></div>
+      <div class="row" style="margin-top:14px"><span class="sp"></span><button onclick="saveSettings()">Save settings</button></div>
+    </div>
+    <div class="grid">
+      <div class="card"><h2>Private key</h2><p id="keyStatus" class="mute"></p>
+        <div class="row"><input id="pk" type="password" autocomplete="off" placeholder="0x… private key" style="flex:1;min-width:220px">
+          <button onclick="setKey()">Save key</button><button class="sec" onclick="delKey()">Remove</button></div>
+        <p class="mute small"><span id="keyStore">Stored as a plain file (secrets/private_key)</span>, so restarts resume on their own. Never shown again,
+          only its address. The managed wallet becomes the key's address.</p></div>
+      <div class="card"><h2>Interface</h2>
+        <label class="row" style="gap:8px"><input type="checkbox" id="helpVisible" checked onchange="window.almHelp && almHelp.setVisible(this.checked)">
+          <span><b>Show explanations panel</b> <span class="mute small">(explains whatever you hover; remembered in this browser)</span></span></label></div>
+      <div class="card"><h2>Safety</h2><ul class="mute small" style="margin:0;padding-left:18px">
+        <li>Depeg guard, 1h-median spot check, daily rebalance cap and gas check run before every action.</li>
+        <li>Every transaction is simulated first; swaps only through the Solidly UI aggregator, capped vs the pool price.</li>
+        <li>Pause stops all actions immediately (persists across restarts).</li></ul></div>
+    </div>
+  </section>
+
+  <!-- ACTIVITY -->
+  <section data-tab="activity" class="grid hide">
+    <div class="card"><h2>Activity</h2><div class="scroll tall"><table id="events"></table></div></div>
+    <div class="card"><h2>Errors &amp; warnings</h2><div class="scroll tall"><pre id="errors" class="mute"></pre></div></div>
+  </section>
+</main>
+<div id="toast"></div>
+<script>
+const $ = id => document.getElementById(id);
+const COLORS = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)", "var(--c5)", "var(--c6)"];
+let S = null, poolsEdit = null, dirtyPools = false, MARKET = null, TOKENS = null, fundingSel = undefined, tab = "overview";
+const fmt = (x, d = 2) => x == null || isNaN(x) ? "–" : Number(x).toLocaleString(undefined, {minimumFractionDigits: d, maximumFractionDigits: d});
+const usd = (x, d = 0) => x == null || isNaN(x) ? "–" : "$" + fmt(x, d);
+const compact = x => x == null ? "–" : x >= 1e6 ? "$" + fmt(x / 1e6, 2) + "M" : x >= 1e3 ? "$" + fmt(x / 1e3, 1) + "k" : "$" + fmt(x, 0);
+const ago = ts => { if (!ts) return "never"; const s = Math.round(Date.now() / 1000 - ts); return s < 90 ? s + "s ago" : s < 5400 ? Math.round(s / 60) + "m ago" : Math.round(s / 3600) + "h ago"; };
+// Fee vs loss to arbitrage per unit of at-the-money liquidity, trailing 7 days (reports/VOLATILE.md).
+// Below 2 the pool's flow is mostly arbitrage: a warning, not acted on by the worker.
+const flvrTip = v => v ? `F ${(v.f ?? 0).toExponential(3)} ÷ LVR ${(v.lvr ?? 0).toExponential(3)} over ${v.swaps ?? 0} swaps, ${v.hours ?? 0} hours` +
+  (v.basis ? ` (fees at the pool's ${v.basis})` : "") +
+  (v.error ? ` (${v.error})` : "") + ". Fee income vs loss to arbitrage for at-the-money liquidity; below 2 the flow is mostly arbitrage." : "not computed yet";
+function flvrFig(v) {
+  if (!v || v.swaps == null || (v.ratio == null && !v.swaps)) return `<span class=mute title="${esc(flvrTip(v))}">–</span>`;
+  const r = v.ratio, txt = r == null ? "∞" : r >= 1000 ? fmt(r, 0) : fmt(r, r < 10 ? 2 : 1);
+  return `<span class="${r != null && r < 2 ? "warn" : "ok"}" title="${esc(flvrTip(v))}"><b>${txt}</b></span>`;
+}
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const logoUrl = u => !u ? "" : u.startsWith("http") ? u : "https://solidly.com" + u;
+const logo = t => t && t.logo ? `<img class="logo" src="${esc(logoUrl(t.logo))}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'logo ph',textContent:'${esc((t.symbol || '?').slice(0, 3))}'}))">`
+  : `<span class="logo ph">${esc(((t && t.symbol) || "?").slice(0, 3))}</span>`;
+function toast(msg, bad) { const t = $("toast"); t.textContent = msg; t.style.display = "block"; t.style.borderColor = bad ? "var(--bad)" : "var(--line)"; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = "none", 5500); }
+function signedOut() {
+  if (document.getElementById("signedOut")) return;
+  const d = document.createElement("div");
+  d.id = "signedOut";
+  d.style.cssText = "position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:var(--bg,#111);color:var(--fg,#eee);font:15px system-ui;padding:16px;text-align:center";
+  d.textContent = "Not signed in. Open the dashboard from the Stable ALM tray icon (or the link in the log).";
+  document.body.appendChild(d);
+}
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  const j = await r.json().catch(() => ({}));
+  if (r.status === 401) signedOut();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+// ---------- tabs ----------
+function show(t) {
+  tab = t;
+  document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.t === t));
+  document.querySelectorAll("main > section").forEach(s => s.classList.toggle("hide", s.dataset.tab !== t));
+  try { localStorage.setItem("alm.tab", t); } catch (e) {}
+  if ((t === "discover" || t === "pools") && !MARKET) loadMarket();
+  if (t === "settings" && !TOKENS) loadTokens();
+}
+document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => show(b.dataset.t));
+// ---------- status ----------
+async function refresh() { try { S = await api("/api/status"); render(); } catch (e) { toast("status: " + e.message, true); } }
+function render() {
+  const w = S.worker || {}, acct = w.account || {};
+  const mode = S.paused ? "paused" : (w.mode || "dry run");
+  // w.mode is what the last cycle ran as; a switch made since then applies from the next cycle
+  const want = S.settings.execute ? "LIVE" : "dry run", pending = !S.paused && mode !== want && !(w.mode || "").startsWith("paused");
+  $("mode").textContent = pending ? `${want.toUpperCase()} (from next cycle)` : mode.toUpperCase();
+  $("mode").className = "badge " + ((pending ? want : mode) === "LIVE" ? "b-live" : S.paused ? "b-paused" : "b-dry");
+  $("mode").title = pending ? `The last cycle ran as ${mode}; the switch applies when the next cycle starts.` : "";
+  const next = w.next_cycle ? Math.max(0, Math.round(w.next_cycle - Date.now() / 1000)) : null;
+  $("cycle").innerHTML = `${esc(w.state || "")} · last cycle ${ago(w.last_cycle)}${w.cycle_seconds ? " (" + w.cycle_seconds + "s)" : ""}` +
+    (next != null && w.state !== "running" ? ` · next in ${next >= 60 ? Math.round(next / 60) + "m" : next + "s"}` : "") + (w.last_error ? ` · <span class=bad>${esc(w.last_error)}</span>` : "");
+  $("pauseBtn").textContent = S.paused ? "Resume" : "Pause";
+  $("liveBtn").textContent = S.settings.execute ? "Switch to dry run" : "Go live";
+  $("liveBtn").className = S.settings.execute ? "sec" : "danger";
+  renderOverview(acct, w);
+  if (!dirtyPools) poolsEdit = JSON.parse(JSON.stringify(S.pools));
+  if (!$("pools").contains(document.activeElement)) renderPools();
+  renderSettings();
+  renderActivity();
+  if (MARKET) renderMarket();
+}
+function renderOverview(acct, w) {
+  const total = acct.total_usd || 0, pools = acct.pools || {};
+  const deployed = Object.values(pools).reduce((s, p) => s + (p.deployed_usd || 0), 0);
+  const idle = Object.values(acct.tokens || {}).reduce((s, t) => s + (t.usd || 0), 0);
+  $("kTotal").textContent = usd(total, 2); $("kDeployed").textContent = usd(deployed, 2);
+  $("kDeployedPct").textContent = total ? fmt(deployed / total * 100, 1) + "% of managed" : "";
+  $("kIdle").textContent = usd(idle, 2);
+  const rw = S.rewards || {}, rsum = (rw.claimable || []).reduce((s, r) => s + (r.usd || 0), 0);
+  $("kRewards").textContent = rw.error ? "–" : usd(rsum, 2);
+  const cl = (w.claim || {});
+  $("kClaim").textContent = cl.status === "waiting" ? cl.reason : S.settings.claim.enabled ? `auto-claim every ${S.settings.claim.every_days} d` : "auto-claim off";
+  $("kGas").textContent = fmt(acct.eth_gas, 5);
+  $("kGasNote").innerHTML = acct.eth_gas != null && acct.eth_gas < 0.0002 ? "<span class=bad>below 0.0002: actions blocked</span>" : "enough for many transactions";
+  chart();
+  // pool cards
+  let html = "";
+  S.pools.forEach((p, i) => {
+    const a = pools[p.name] || {}, st = (w.pools || {})[p.name] || {};
+    if (!p.enabled && !(a.positions || []).length) return;
+    const target = total * (p.enabled ? p.allocation_pct : 0) / 100;
+    const pos = (a.positions || []).map(x => `<div><span class="dot ${x.in_range ? "d-ok" : "d-bad"}"></span>[${x.tl}, ${x.tu}) · ${usd(x.usd)}</div>`).join("") || "<span class=mute>no positions</span>";
+    html += `<div class="card"><div class="row"><div class="pair"><b>${esc((a.symbols || p.symbols || [p.name]).join(" / "))}</b></div>
+        <span class="chip">${esc(p.strategy.type)}</span><span class="sp"></span>
+        <span class="${a.in_range ? "ok" : (a.positions || []).length ? "bad" : "mute"} small">${a.in_range ? "in range" : (a.positions || []).length ? "out of range" : ""}</span></div>
+      <div class="grid kpis" style="margin:10px 0">
+        <div><div class="mute small">Deployed</div><b>${usd(a.deployed_usd, 2)}</b></div>
+        <div><div class="mute small">Target (${fmt(p.enabled ? p.allocation_pct : 0, 0)}%)</div><b>${usd(target, 2)}</b></div>
+        <div><div class="mute small">Tick · fee</div><b>${a.tick ?? "–"}</b> <span class=mute>· ${a.fee_pips ?? "–"} pips</span></div>
+        <div data-help="flvr"><div class="mute small" title="fee income ÷ loss to arbitrage, trailing 7 days; good above 10, warning below 2">Fee / arb loss (7d)</div>${flvrFig(st.flvr)}</div></div>
+      <div class="pos-list">${pos}</div>
+      <div class="small" style="margin-top:8px">Last decision: <b>${esc(st.mode || "–")}</b>${st.error ? ` <span class=bad>${esc(st.error)}</span>` : ""}
+        ${st.report ? `<details style="margin-top:4px"><summary>cycle log</summary><pre class="mute">${esc(st.report.join("\n"))}</pre></details>` : ""}</div></div>`;
+  });
+  $("poolCards").innerHTML = html || `<div class="card mute">No active pools. Enable one under Pools &amp; allocation, or find one under Discover pairs.</div>`;
+  let rows = "<tr><th>Token</th><th class=num>Amount</th><th class=num>USD</th></tr>";
+  for (const [sym, t] of Object.entries(acct.tokens || {})) rows += `<tr><td>${esc(sym)}</td><td class=num>${fmt(t.amount, 4)}</td><td class=num>${usd(t.usd, 2)}</td></tr>`;
+  $("tokens").innerHTML = rows;
+  rows = "<tr><th>Claimable</th><th class=num>Amount</th><th class=num>USD</th></tr>";
+  for (const r of rw.claimable || []) rows += `<tr><td>${esc(r.symbol)}</td><td class=num>${fmt(r.amount, 4)}</td><td class=num>${usd(r.usd, 2)}</td></tr>`;
+  $("rewards").innerHTML = rw.error ? `<tr><td class=bad>${esc(rw.error)}</td></tr>` : rows;
+  renderSolidLp();
+  $("claimInfo").textContent = "Claimed tokens compound at each pool's next rebalance" + (S.settings.solid_lp.enabled
+    ? "; SOLID is deposited full range into the SOLID pool (not sold)." : S.settings.sell_rewards.enabled
+    ? `; SOLID is sold when the quote loses ≤ ${S.settings.sell_rewards.max_impact_pct}% and is worth ≥ $${S.settings.sell_rewards.min_value_usd}.` : "; SOLID is kept.");
+}
+function chart() {
+  // value = positions + idle managed tokens + unclaimed rewards + wallet SOLID (older points, recorded
+  // before rewards were tracked, fall back to positions + idle)
+  const pts = (S.snapshots || []).filter(p => p.total_usd > 0).map(p => ({...p, v: p.value_usd ?? p.total_usd})), svg = $("chart"), axes = $("chartAxes");
+  if (pts.length < 2) { svg.innerHTML = ""; axes.innerHTML = ""; $("chartInfo").textContent = "History builds up as the worker runs (one point per cycle)."; $("kChange").textContent = ""; return; }
+  const H = 190, xs = pts.map(p => p.ts), ys = pts.map(p => p.v);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), lo = Math.min(...ys), hi = Math.max(...ys);
+  // a tight but readable y range: at least 0.2% of the value, so a flat line is not blown up to noise
+  const span = Math.max(hi - lo, hi * 0.002, 1), y0 = lo - span * 0.15, dy = span * 1.3;
+  const X = t => (t - x0) / (x1 - x0 || 1) * 800, Y = v => H - 8 - (v - y0) / dy * (H - 16);
+  const line = pts.map(p => `${X(p.ts).toFixed(1)},${Y(p.v).toFixed(1)}`).join(" ");
+  // live rebalances and claims as markers along the bottom
+  const marks = (S.events || []).filter(e => e.ts >= x0 && e.ts <= x1 && ((e.kind === "rebalance" && e.live) || (e.kind === "sent" && e.what === "claim")));
+  svg.innerHTML = `<defs><linearGradient id="g" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="var(--acc)" stop-opacity=".35"/><stop offset="1" stop-color="var(--acc)" stop-opacity="0"/></linearGradient></defs>
+    ${[0, .5, 1].map(f => `<line x1="0" x2="800" y1="${8 + f * (H - 16)}" y2="${8 + f * (H - 16)}" stroke="var(--line)" stroke-width="1" vector-effect="non-scaling-stroke"/>`).join("")}
+    ${marks.map(e => `<line x1="${X(e.ts)}" x2="${X(e.ts)}" y1="8" y2="${H}" stroke="${e.kind === "rebalance" ? "var(--warn)" : "var(--ok)"}" stroke-dasharray="3 3" stroke-width="1" vector-effect="non-scaling-stroke" opacity=".7"/>`).join("")}
+    <polygon fill="url(#g)" points="0,${H} ${line} 800,${H}"/><polyline fill="none" stroke="var(--acc)" stroke-width="2" vector-effect="non-scaling-stroke" points="${line}"/>`;
+  const tfmt = t => { const d = new Date(t * 1000); return (x1 - x0 > 86400 * 2 ? d.toLocaleDateString(undefined, {month: "short", day: "numeric"}) + " " : "") + d.toLocaleTimeString(undefined, {hour: "2-digit", minute: "2-digit"}); };
+  // y labels sit on the three grid lines (pixel offsets match the SVG's 190-unit height)
+  axes.innerHTML = [0, .5, 1].map(f => { const yPix = 8 + f * (H - 16);
+      return `<div class="yl" style="top:${yPix}px">${usd(y0 + (H - 8 - yPix) / (H - 16) * dy, 0)}</div>`; }).join("") +
+    [0, .25, .5, .75, 1].map(f => `<div class="xl" style="left:calc(58px + (100% - 58px) * ${f})">${tfmt(x0 + (x1 - x0) * f)}</div>`).join("");
+  const wrap = $("chartWrap"), tip = $("chartTip"), cross = $("chartCross");
+  wrap.onmousemove = ev => {
+    const r = svg.getBoundingClientRect(), fx = (ev.clientX - r.left) / r.width;
+    if (fx < 0 || fx > 1) { tip.style.display = cross.style.display = "none"; return; }
+    const t = x0 + fx * (x1 - x0), p = pts.reduce((a, b) => Math.abs(b.ts - t) < Math.abs(a.ts - t) ? b : a);
+    const px = r.left - wrap.getBoundingClientRect().left + X(p.ts) / 800 * r.width;
+    cross.style.left = px + "px"; cross.style.display = "block";
+    const ev2 = marks.filter(e => Math.abs(e.ts - p.ts) < 300).map(e => e.kind === "rebalance" ? `live ${esc(e.mode || "rebalance")}` : "claim");
+    tip.innerHTML = `<div class="t">${new Date(p.ts * 1000).toLocaleString()}${p.mode ? " · " + esc(p.mode) : ""}</div>
+      <div><b>Total</b><b>${usd(p.v, 2)}</b></div>` +
+      Object.entries(p.pools || {}).filter(([, v]) => v).map(([k, v]) => `<div><span>${esc(k)} positions</span><span>${usd(v, 2)}</span></div>`).join("") +
+      (p.idle_usd != null ? `<div><span>Idle in wallet</span><span>${usd(p.idle_usd, 2)}</span></div>` : "") +
+      (p.value_usd == null ? `<div class="t">rewards not recorded yet at this point</div>` :
+        `<div><span>Unclaimed rewards</span><span>${p.rewards_usd == null ? "–" : usd(p.rewards_usd, 2)}</span></div>` +
+        (p.solid_usd != null ? `<div><span>SOLID in wallet</span><span>${usd(p.solid_usd, 2)}</span></div>` : "")) +
+      (ev2.length ? `<div class="t" style="margin-top:4px">${ev2.join(", ")}</div>` : "");
+    tip.style.display = "block";
+    const tw = tip.offsetWidth, ww = wrap.clientWidth;
+    tip.style.left = Math.min(Math.max(px + 12, 0), ww - tw) + "px";
+    if (px + 12 + tw > ww) tip.style.left = Math.max(px - tw - 12, 0) + "px";
+  };
+  wrap.onmouseleave = () => { tip.style.display = cross.style.display = "none"; };
+  const ch = ys[ys.length - 1] - ys[0];
+  $("kChange").innerHTML = `<span class=${ch >= 0 ? "ok" : "bad"}>${ch >= 0 ? "+" : ""}${usd(ch, 2)}</span> since ${new Date(x0 * 1000).toLocaleDateString()}`;
+  $("chartInfo").innerHTML = `${pts.length} points (one per cycle) since ${new Date(x0 * 1000).toLocaleString()} · min ${usd(lo, 2)} · max ${usd(hi, 2)} · positions + idle + unclaimed rewards + wallet SOLID · includes deposits and withdrawals · ` +
+    `<span style="color:var(--warn)">┊</span> live rebalance <span style="color:var(--ok)">┊</span> claim · hover for details`;
+}
+// ---------- pools ----------
+function renderPools() {
+  const w = S.worker || {}, acct = w.account || {}, total = acct.total_usd || 0;
+  let rows = "<tr><th></th><th>Pool</th><th>Enabled</th><th>Allocation</th><th class=num>TVL</th><th class=num>In-range TVL</th><th class=num>Target</th><th class=num>Deployed</th><th class=num title='estimated APR at the target size, last 1 hour'>APR 1h</th><th class=num>APR 6h</th><th class=num>APR 24h</th><th>Strategy &amp; limits</th><th></th></tr>";
+  poolsEdit.forEach((p, i) => {
+    const a = (acct.pools || {})[p.name] || {}, sp = p.strategy || {};
+    const mk = (MARKET || []).find(x => x.pool === p.pool.toLowerCase());
+    rows += `<tr><td><span class="sw" style="background:${COLORS[i % COLORS.length]}"></span></td>
+      <td><b>${esc(p.name)}</b><div class="mute small">${esc((a.symbols || p.symbols || []).join(" / "))} · <a href="https://basescan.org/address/${esc(p.pool)}" target=_blank>${esc(p.pool.slice(0, 8))}…</a>${p.pegged === false ? ' · <span class="chip volatile">volatile · not backtested</span>' : ""}</div></td>
+      <td><input type=checkbox ${p.enabled ? "checked" : ""} onchange="editPool(${i},'enabled',this.checked)"></td>
+      <td style="min-width:150px"><div class="row" style="flex-wrap:nowrap"><input type=range min=0 max=100 step=1 value="${p.allocation_pct}" oninput="editPool(${i},'allocation_pct',+this.value);this.nextElementSibling.value=this.value" style="padding:0">
+        <input type=number min=0 max=100 step=1 value="${p.allocation_pct}" style="width:64px" oninput="editPool(${i},'allocation_pct',parseFloat(this.value)||0);this.previousElementSibling.value=this.value"></div></td>
+      <td class=num>${mk ? compact(mk.tvl_usd) : MARKET ? "–" : "…"}</td>
+      <td class=num>${mk ? compact(mk.active_usd) + (mk.tvl_usd ? `<div class="mute small">${fmt(mk.active_usd / mk.tvl_usd * 100, 0)}% in range</div>` : "") : MARKET ? "–" : "…"}</td>
+      <td class=num id="tgt${i}">${usd(total * (p.enabled ? p.allocation_pct : 0) / 100)}</td><td class=num>${usd(a.deployed_usd)}</td>
+      <td class=num id="apr${i}_h1"></td><td class=num id="apr${i}_h6"></td><td class=num id="apr${i}_h24"></td>
+      <td><details><summary>${esc(sp.type)} · ${esc(Object.entries(sp).filter(([k]) => k !== "type").map(([k, v]) => k + " " + v).join(", "))}</summary><div class="fields" style="margin-top:8px">
+        ${["lookback", "span", "every", "turnover", "guard"].filter(k => k in sp).map(k => `<div><label class=f>${k}</label><input type=number step=any value="${sp[k]}" oninput="editStrat(${i},'${k}',this.value)"></div>`).join("")}
+        ${["slippage_bps", "max_swap_cost_bps", "max_spot_dev_ticks", "max_actions_per_day", "min_swap_value", "max_ranges"].map(k => `<div><label class=f>${k}</label><input type=number step=any value="${p[k]}" oninput="editPool(${i},'${k}',parseFloat(this.value))"></div>`).join("")}
+      </div></details></td>
+      <td class=num><button class="sec sm" onclick="ctl('resolve_now',{name:'${esc(p.name)}'})" title="make the ladder re-solve on the next cycle">Re-solve</button>
+        <button class="sec sm" onclick="removePool('${esc(p.name)}')">Remove</button></td></tr>`;
+  });
+  $("pools").innerHTML = rows;
+  updateSum();
+}
+function poolApr(p, win) {
+  const acct = (S.worker || {}).account || {}, total = acct.total_usd || 0;
+  const m = (MARKET || []).find(x => x.pool === p.pool.toLowerCase());
+  const w = m && m.windows[win];
+  if (!w || !w.hours) return null;
+  const mine = ((acct.pools || {})[p.name] || {}).deployed_usd || 0;
+  let dep = total * (p.enabled ? p.allocation_pct : 0) / 100;
+  if (!dep) dep = Math.max(total * 0.1, 1000);  // not allocated: show the APR for a 10% (min $1k) slice
+  const base = Math.max((w.active_tvl || 0) - Math.min(mine, w.active_tvl || 0), 0) + dep;
+  return {apr: (w.fees + w.emissions + w.bribes) * 8760 / w.hours / base * 100, dep, w};
+}
+function aprHtml(r) {
+  if (!r) return MARKET ? "<span class=mute>–</span>" : "<span class=mute>…</span>";
+  const tip = `at $${fmt(r.dep, 0)} deposited · fees $${fmt(r.w.fees)} · emissions $${fmt(r.w.emissions)} · bribes $${fmt(r.w.bribes)} over ${r.w.hours}h · in-range TVL ${compact(r.w.active_tvl)}`;
+  return `<span class="apr ${r.apr >= 5 ? "hi" : ""}" title="${esc(tip)}">${fmt(r.apr, r.apr < 10 ? 2 : 1)}%</span>`;
+}
+function updateSum() {
+  const total = ((S.worker || {}).account || {}).total_usd || 0;
+  const en = poolsEdit.map((p, i) => ({p, i})).filter(x => x.p.enabled && x.p.allocation_pct > 0);
+  const sum = en.reduce((s, x) => s + x.p.allocation_pct, 0);
+  $("allocBar").innerHTML = en.map(x => `<div title="${esc(x.p.name)} ${x.p.allocation_pct}%" style="width:${Math.min(x.p.allocation_pct, 100)}%;background:${COLORS[x.i % COLORS.length]}"></div>`).join("");
+  $("allocLegend").innerHTML = en.map(x => `<span><span class="sw" style="background:${COLORS[x.i % COLORS.length]}"></span>${esc(x.p.name)} ${fmt(x.p.allocation_pct, 0)}% · ${usd(total * x.p.allocation_pct / 100)}</span>`).join("") +
+    `<span><span class="sw" style="background:var(--card2);border:1px solid var(--line)"></span>idle ${fmt(Math.max(0, 100 - sum), 0)}%</span>`;
+  poolsEdit.forEach((p, i) => {
+    const el = $("tgt" + i); if (el) el.textContent = usd(total * (p.enabled ? p.allocation_pct : 0) / 100);
+    for (const k of ["h1", "h6", "h24"]) { const c = $(`apr${i}_${k}`); if (c) c.innerHTML = aprHtml(poolApr(p, k)); }
+  });
+  // Blended APR of the whole managed value (idle share earns 0).
+  const blend = k => { if (!MARKET || !total) return null; let inc = 0;
+    for (const x of en) { const r = poolApr(x.p, k); if (r) inc += r.apr / 100 * r.dep; } return inc / total * 100; };
+  const b = ["h1", "h6", "h24"].map(blend);
+  $("blendApr").innerHTML = b[2] == null ? (MARKET ? "" : "loading APRs…") :
+    `Blended APR on the managed value: <b>${fmt(b[0], 2)}%</b> (1h) · <b>${fmt(b[1], 2)}%</b> (6h) · <b>${fmt(b[2], 2)}%</b> (24h) → about <b>${usd(total * b[2] / 100)}</b>/year at the 24h rate`;
+  $("allocSum").innerHTML = `Allocated <b class=${sum > 100 ? "bad" : ""}>${fmt(sum, 1)}%</b>` + (sum > 100 ? " <span class=bad>(over 100%)</span>" : "") + (dirtyPools ? " · <span class=warn>unsaved changes</span>" : "");
+}
+function editPool(i, k, v) { poolsEdit[i][k] = v; dirtyPools = true; updateSum(); }
+function editStrat(i, k, v) { poolsEdit[i].strategy[k] = parseFloat(v); dirtyPools = true; updateSum(); }
+function resetPools() { dirtyPools = false; poolsEdit = JSON.parse(JSON.stringify(S.pools)); renderPools(); }
+async function savePools() {
+  try { await api("/api/pools", {pools: poolsEdit}); dirtyPools = false; toast("Saved. Applied on the next cycle (started now)."); refresh(); }
+  catch (e) { toast(e.message, true); }
+}
+async function removePool(name) {
+  if (!confirm(`Remove ${name} from the config?`)) return;
+  try { await api("/api/pools/remove", {name}); dirtyPools = false; refresh(); if (MARKET) loadMarket(true); } catch (e) { toast(e.message, true); }
+}
+// ---------- discover ----------
+async function loadMarket(force) {
+  if (force) MARKET = null;
+  $("market").innerHTML = `<tr><td class=mute>Loading pools from the Solidly UI…</td></tr>`;
+  try { MARKET = (await api("/api/market")).pools; renderMarket(); if (S && !$("pools").contains(document.activeElement)) renderPools(); }
+  catch (e) { $("market").innerHTML = `<tr><td class=bad>${esc(e.message)}</td></tr>`; }
+}
+function estApr(win, dep) {
+  if (!win || !win.hours) return null;
+  const r = (win.fees + win.emissions + win.bribes) * 8760 / win.hours, base = (win.active_tvl || 0) + dep;
+  return base > 0 ? r / base * 100 : null;
+}
+function aprCell(win, dep) {
+  const a = estApr(win, dep);
+  if (a == null) return "<td class=num>–</td>";
+  const tip = win ? `fees $${fmt(win.fees)} · emissions $${fmt(win.emissions)} · bribes $${fmt(win.bribes)} · volume ${compact(win.volume)} · avg in-range TVL ${compact(win.active_tvl)} over ${win.hours}h` : "";
+  return `<td class=num title="${esc(tip)}"><span class="apr ${a >= 5 ? "hi" : ""}">${fmt(a, a < 10 ? 2 : 1)}%</span></td>`;
+}
+function renderMarket() {
+  if (!$("depSize").value) $("depSize").value = Math.round(((S && S.worker && S.worker.account) || {}).total_usd || 10000);
+  const dep = parseFloat($("depSize").value) || 0, minTvl = parseFloat($("minTvl").value) || 0, only = $("onlySupported").checked;
+  const rows = (MARKET || []).filter(p => (p.tvl_usd >= minTvl || p.configured) && (!only || p.pegged)).sort((a, b) => (estApr(b.windows.h24, dep) || 0) - (estApr(a.windows.h24, dep) || 0));
+  let h = `<tr><th>Pair</th><th class=num>Fee</th><th class=num>TVL</th><th class=num>In-range TVL</th><th class=num>24h volume</th>
+    <th class=num title="estimated APR if deposited, last 1 hour">APR 1h</th><th class=num>APR 6h</th><th class=num>APR 24h</th><th class=num title="processor's own 24h APR on in-range liquidity">Pool APR 24h</th>
+    <th class=num title="fee income ÷ loss to arbitrage per unit of at-the-money liquidity, trailing 7 days; well above 1 = fee-paying flow, below 2 = mostly arbitrage. Configured pools use their hourly fee history; other pools their current fee. Appears a minute or two after the app starts">Fee / arb 7d</th><th></th></tr>`;
+  for (const p of rows) {
+    const act = (p.pegged ? "" : `<span class="chip volatile">volatile · not backtested</span> `) +
+      (p.configured ? `<span class="chip">configured</span>` : `<button class="sm" onclick="addPool('${p.pool}')">Add</button>`);
+    h += `<tr><td><div class="pair"><span class="logos">${logo(p.token0)}${logo(p.token1)}</span><div><b>${esc(p.token0.symbol)} / ${esc(p.token1.symbol)}</b>
+        <div class="mute small"><a href="https://basescan.org/address/${p.pool}" target=_blank>${p.pool.slice(0, 8)}…</a> · spacing ${p.tick_spacing}${p.whitelisted ? " · whitelisted" : ""}</div></div></div></td>
+      <td class=num>${fmt((p.fee_tier || 0) / 100, 2)} bp<div class="mute small">now ${fmt((p.fee_pips || 0) / 100, 2)} bp</div></td>
+      <td class=num>${compact(p.tvl_usd)}</td><td class=num>${compact(p.active_usd)}</td><td class=num>${compact((p.windows.h24 || {}).volume ?? p.volume_24h)}</td>
+      ${aprCell(p.windows.h1, dep)}${aprCell(p.windows.h6, dep)}${aprCell(p.windows.h24, dep)}<td class="num mute">${fmt(p.processor_apr_24h, 1)}%</td><td class=num>${flvrFig(p.flvr)}</td><td class=num>${act}</td></tr>`;
+  }
+  $("market").innerHTML = rows.length ? h : `<tr><td class=mute>No pools match the filters.</td></tr>`;
+}
+["depSize", "minTvl"].forEach(id => $(id).addEventListener("input", () => MARKET && renderMarket()));
+// Volatile pairs are hidden by default; showing them needs an explicit confirmation every time.
+$("onlySupported").addEventListener("change", e => {
+  if (!e.target.checked && !confirm("Show volatile pairs? " +
+      "The strategy has NOT been tested on volatile pairs. It was backtested only on pegged pairs " +
+      "(stablecoins, ETH and its staking tokens, BTC wrappers). On a volatile pair, concentrated liquidity can lose more to price moves than it earns in fees.")) {
+    e.target.checked = true;
+    return;
+  }
+  if (MARKET) renderMarket();
+});
+async function addPool(addr, name) {
+  try { const r = await api("/api/pools/add", {pool: addr, name: name || undefined});
+    toast(`Added ${r.pool.name} (disabled, 0%). Set its allocation under Pools & allocation; data downloads on the next cycle.`);
+    $("newPool").value = ""; $("newName").value = ""; dirtyPools = false; await refresh(); if (MARKET) { MARKET.forEach(p => { if (p.pool === r.pool.pool) p.configured = true; }); renderMarket(); } }
+  catch (e) { toast(e.message, true); }
+}
+// ---------- settings ----------
+const SETTINGS = [
+  ["interval_s", "Cycle interval (s)", "number"], ["idle_redeploy_pct", "Redeploy idle above (% of allocation)", "number"],
+  ["resize_tolerance_pct", "Resize tolerance (% of allocation)", "number"],
+  ["claim.enabled", "Auto-claim rewards", "checkbox"], ["claim.every_days", "Claim every (days)", "number"],
+  ["solid_mode", "Claimed SOLID", "solidmode"], ["sell_rewards.max_impact_pct", "Max SOLID sale loss (%)", "number"],
+  ["sell_rewards.min_value_usd", "Min SOLID sale value ($)", "number"],
+  ["solid_lp.min_value_usd", "Min SOLID to deposit ($)", "number"],
+  ["solid_lp.max_price_dev_pct", "SOLID LP: max pool price deviation (%)", "number"], ["solid_lp.slippage_bps", "SOLID LP: mint slippage (bp)", "number"],
+  ["solid_lp.max_swap_cost_bps", "SOLID LP: max cost buying the pair (bp)", "number"], ["retries.attempts", "Retries per step", "number"], ["retries.backoff_s", "Retry backoff (s)", "number"],
+  ["wallet", "Managed wallet", "text"],
+];
+const getp = (o, k) => k.split(".").reduce((a, b) => a?.[b], o);
+function renderSettings() {
+  const box = $("settings");
+  if (!box.contains(document.activeElement)) box.innerHTML = SETTINGS.map(([k, l, t]) => t === "solidmode"
+    ? `<div><label class=f>${l}</label><select data-k="${k}">${$("solidMode").innerHTML.replace(/ selected(="")?/g, "")
+        .replace(`value="${solidMode(S.settings)}"`, `value="${solidMode(S.settings)}" selected`)}</select></div>`
+    : t === "checkbox"
+    ? `<div><label class="row small"><input type=checkbox data-k="${k}" ${getp(S.settings, k) ? "checked" : ""}> ${l}</label></div>`
+    : `<div ${k === "wallet" ? 'style="grid-column:1/-1"' : ""}><label class=f>${l}</label><input data-k="${k}" type=${t} step=any value="${esc(getp(S.settings, k) ?? "")}"></div>`).join("");
+  if (fundingSel === undefined) fundingSel = [...(S.settings.funding_tokens || [])];
+  renderPicker();
+  const sg = S.signer || {};
+  $("keyStatus").innerHTML = sg.error ? `<span class=bad>${esc(sg.error)}</span>` : sg.stored ? `Key set for <b>${esc(sg.address)}</b>` +
+    (sg.address && sg.address.toLowerCase() !== S.settings.wallet.toLowerCase() ? ` <span class=bad>(≠ managed wallet ${esc(S.settings.wallet)})</span>` : " <span class=ok>(matches the managed wallet)</span>")
+    : "No key set: the worker runs as a dry run.";
+  const where = {"Windows DPAPI": "Encrypted for your Windows account (DPAPI, secrets/private_key.dpapi)",
+                 "macOS Keychain": "Kept in your macOS login Keychain"}[sg.storage];
+  $("keyStore").textContent = where || "Stored as a plain file (secrets/private_key, mode 600)";
+}
+async function loadTokens() { try { TOKENS = (await api("/api/tokens")).tokens; renderPicker(); } catch (e) { toast("tokens: " + e.message, true); } }
+function tokenRow(t, cur) {
+  return `<div class="opt ${cur ? "cur" : ""}" data-a="${esc(t.address)}"><span class="ck">${cur ? "✓" : ""}</span>${logo(t)}<div class="nm"><div><b>${esc(t.symbol)}</b></div><div>${esc(t.name || t.address)}</div></div>
+    <div class="num"><div>${t.balance == null ? "–" : fmt(t.balance, t.balance >= 1000 ? 2 : 4)}</div><div class="mute small">${usd(t.balance_usd, 2)}</div></div></div>`;
+}
+const tokenOf = a => (TOKENS || []).find(t => t.address === a);
+function renderPicker() {
+  const box = $("fundingPicker");
+  const open = box.firstElementChild && box.firstElementChild.classList.contains("open"), q = open ? box.querySelector("input").value : "";
+  if (open) return filterPicker();
+  // selected tokens, largest USD balance first (the order shortfalls are bought in)
+  const sel = [...fundingSel].sort((a, b) => ((tokenOf(b) || {}).balance_usd || 0) - ((tokenOf(a) || {}).balance_usd || 0));
+  const chips = sel.map(a => { const t = tokenOf(a);
+    return `<span class="chip">${t ? logo(t) + `<b>${esc(t.symbol)}</b><span class=mute>${fmt(t.balance, 4)} · ${usd(t.balance_usd, 2)}</span>`
+      : `<span>${esc(a.slice(0, 10))}…</span><span class=mute>${TOKENS ? "unknown token" : "loading…"}</span>`}<span class="x" onclick="event.stopPropagation();unpickFunding('${a}')" title="Remove">×</span></span>`; }).join("");
+  const total = sel.reduce((s, a) => s + ((tokenOf(a) || {}).balance_usd || 0), 0);
+  box.innerHTML = `<div class="picker"><div class="sel" onclick="togglePicker()"><span class="chips">${sel.length ? chips : "<span class=mute>none: cross-pool funding off</span>"}</span><span class="sp"></span>${sel.length > 1 && TOKENS ? `<span class="mute small">${usd(total, 2)} total</span>` : ""}<span>▾</span></div>
+    <div class="menu"><input placeholder="Search symbol, name or paste an address" oninput="filterPicker()" value="${esc(q)}"><div class="list"></div></div></div>`;
+}
+function unpickFunding(a) { fundingSel = fundingSel.filter(x => x !== a); renderPicker(); }
+function togglePicker() {
+  const p = $("fundingPicker").firstElementChild; p.classList.toggle("open");
+  if (p.classList.contains("open")) { if (!TOKENS) loadTokens(); filterPicker(); p.querySelector("input").focus(); }
+  else renderPicker();
+}
+function filterPicker() {
+  const box = $("fundingPicker"), q = box.querySelector("input").value.trim().toLowerCase(), list = box.querySelector(".list");
+  const items = (TOKENS || []).filter(t => !q || (t.symbol || "").toLowerCase().includes(q) || (t.name || "").toLowerCase().includes(q) || t.address.includes(q));
+  // selected tokens stay on top so they are easy to untick
+  items.sort((a, b) => fundingSel.includes(b.address) - fundingSel.includes(a.address));
+  list.innerHTML = `<div class="opt ${!fundingSel.length ? "cur" : ""}" data-a=""><span class="ck">${!fundingSel.length ? "✓" : ""}</span><span class="logo ph">–</span><div class="nm"><div><b>None</b></div><div>clear the selection: cross-pool funding off</div></div></div>` +
+    (TOKENS ? items.slice(0, 150).map(t => tokenRow(t, fundingSel.includes(t.address))).join("") : `<div class="mute small" style="padding:8px">Loading balances…</div>`) +
+    (/^0x[0-9a-f]{40}$/.test(q) && !items.length ? `<div class="opt ${fundingSel.includes(q) ? "cur" : ""}" data-a="${q}"><span class="ck">${fundingSel.includes(q) ? "✓" : ""}</span><span class="logo ph">?</span><div class="nm"><div><b>Use this address</b></div><div>${q}</div></div></div>` : "");
+  list.querySelectorAll(".opt").forEach(o => o.onclick = e => {
+    e.stopPropagation();  // the row is redrawn below; the outside-click handler must not close the menu
+    const a = o.dataset.a;
+    fundingSel = !a ? [] : fundingSel.includes(a) ? fundingSel.filter(x => x !== a) : [...fundingSel, a];
+    filterPicker();  // the menu stays open so several tokens can be ticked
+  });
+}
+document.addEventListener("click", e => { const p = $("fundingPicker").firstElementChild; if (p && p.classList.contains("open") && !p.contains(e.target)) { p.classList.remove("open"); renderPicker(); } });
+async function saveSettings() {
+  const out = {funding_tokens: fundingSel};
+  for (const el of $("settings").querySelectorAll("[data-k]")) {
+    if (el.dataset.k === "solid_mode") { const m = solidModeBody(el.value); for (const k in m) out[k] = {...(out[k] || {}), ...m[k]}; continue; }
+    const [a, b] = el.dataset.k.split(".");
+    const v = el.type === "checkbox" ? el.checked : el.type === "number" ? parseFloat(el.value) : el.value.trim();
+    if (b) (out[a] = out[a] || {})[b] = v; else out[a] = v;
+  }
+  try { await api("/api/settings", out); toast("Settings saved."); refresh(); } catch (e) { toast(e.message, true); }
+}
+// ---------- activity ----------
+function renderActivity() {
+  const names = Object.fromEntries(S.pools.map(p => [p.pool.toLowerCase(), p.name]));
+  let rows = "<tr><th>When</th><th>Pool</th><th>Event</th><th>Details</th></tr>";
+  for (const e of S.events) {
+    const k = e.kind, cls = k === "error" ? "bad" : k === "retry" || k === "blocked" ? "warn" : k === "sent" ? "ok" : "";
+    let d = esc(e.what || e.mode || (e.problems || []).join("; ") || e.error || e.reason || "");
+    if (e.hash) d += ` <a href="https://basescan.org/tx/${esc(e.hash)}" target=_blank>${esc(e.hash.slice(0, 12))}…</a>`;
+    rows += `<tr><td class="mute small" style="white-space:nowrap">${new Date(e.ts * 1000).toLocaleString()}</td><td>${esc(names[(e.pool || "").toLowerCase()] || "")}</td>
+      <td class=${cls}>${esc(k)}${e.live === false ? " <span class=mute>(dry)</span>" : ""}</td><td class=small>${d}</td></tr>`;
+  }
+  $("events").innerHTML = rows;
+  $("errors").textContent = (S.errors || []).join("\n") || "none";
+}
+let SOLID_POOLS = null;
+async function loadSolidPools() { try { SOLID_POOLS = (await api("/api/solidpools")).pools; renderSolidLp(); } catch (e) { SOLID_POOLS = []; } }
+function renderSolidLp() {
+  const sl = S.settings.solid_lp, st = (S.worker || {}).solid_lp;
+  if (document.activeElement !== $("solidMode")) $("solidMode").value = solidMode(S.settings);
+  $("solidLpBox").style.display = sl.enabled ? "" : "none";
+  if (SOLID_POOLS === null) { SOLID_POOLS = []; loadSolidPools(); }
+  const sel = $("solidLpPool");
+  if (document.activeElement !== sel) {
+    const rows = SOLID_POOLS.length ? SOLID_POOLS : [{pool: sl.pool, symbol: sl.pool}];
+    if (!rows.some(p => p.pool === sl.pool)) rows.unshift({pool: sl.pool, symbol: sl.pool});
+    sel.innerHTML = rows.map(p => `<option value="${esc(p.pool)}" ${p.pool === sl.pool ? "selected" : ""}>${esc(p.symbol)}${p.tvl_usd != null ? ` · TVL ${usd(p.tvl_usd, 0)}` : ""}</option>`).join("");
+  }
+  let info = "";
+  if (st) {
+    const pos = st.position || {};
+    if (pos.symbols && +pos.liquidity > 0) info += `Position: ${fmt(pos.amounts[0], 4)} ${esc(pos.symbols[0])} + ${fmt(pos.amounts[1], 4)} ${esc(pos.symbols[1])}${pos.usd != null ? ` (${usd(pos.usd, 2)})` : ""}. `;
+    else if (pos.symbols) info += "No position yet. ";
+    if (st.deviation_pct != null) info += `Pool SOLID price ${st.deviation_pct >= 0 ? "+" : ""}${st.deviation_pct.toFixed(2)}% vs market. `;
+    info += {waiting: `Waiting: SOLID in the wallet (${usd(st.solid_usd || 0, 2)}) is below $${sl.min_value_usd}.`,
+      blocked: "Blocked last cycle: " + esc(((st.report || []).find(l => l.includes("BLOCKED")) || "").replace(/^\s*BLOCKED:\s*/, "")),
+      planned: `Dry run: would deposit ${fmt(st.solid, 2)} SOLID (${usd(st.solid_usd, 2)}) + ${fmt(st.pair_needed, 6)} of the pair token.`,
+      deposited: `Deposited ${fmt(st.solid, 2)} SOLID (${usd(st.solid_usd, 2)}) last cycle.`,
+      error: `<span class=bad>Error: ${esc(st.error || "see the activity log")}</span>`}[st.state] || "";
+  } else if (sl.enabled) info = "Runs on the next cycle.";
+  $("solidLpInfo").innerHTML = info;
+}
+// One choice for claimed SOLID, stored as the two flags the worker reads (solid_lp wins over selling).
+const solidMode = st => st.solid_lp.enabled ? "lp" : st.sell_rewards.enabled ? "sell" : "keep";
+const solidModeBody = m => ({sell_rewards: {enabled: m === "sell"}, solid_lp: {enabled: m === "lp"}});
+async function setSolidMode(m) {
+  try { await api("/api/settings", solidModeBody(m));
+    toast({keep: "Claimed SOLID stays in the wallet.", sell: "Claimed SOLID will be sold at the next rebalance.",
+      lp: "Claimed SOLID will be deposited full range, paired with the same $ of the other token."}[m]); refresh(); }
+  catch (e) { toast(e.message, true); $("solidMode").value = solidMode(S.settings); }
+}
+async function setSolidLpPool(pool) {
+  try { await api("/api/settings", {solid_lp: {pool}}); toast("SOLID LP pool saved."); refresh(); } catch (e) { toast(e.message, true); }
+}
+// ---------- controls ----------
+async function ctl(action, extra) { try { await api("/api/control", {action, ...(extra || {})}); toast(action.replace("_", " ") + ": done"); setTimeout(refresh, 800); } catch (e) { toast(e.message, true); } }
+function togglePause() { ctl(S.paused ? "resume" : "pause"); }
+async function toggleLive() {
+  const on = !S.settings.execute;
+  if (on && !confirm("Go LIVE? The worker will sign and send real transactions with the stored key.")) return;
+  try { await api("/api/settings", {execute: on}); await api("/api/control", {action: "run_now"});  // apply the switch now, not in up to one interval
+    toast(on ? "Live trading on: a cycle is starting now." : "Dry run: a cycle is starting now."); refresh(); } catch (e) { toast(e.message, true); }
+}
+async function setKey() {
+  const v = $("pk").value.trim(); if (!v) return;
+  try { const r = await api("/api/key", {private_key: v}); $("pk").value = "";
+    toast(`Key saved for ${r.address}` + (r.wallet_changed ? " (managed wallet switched to it)" : "")); refresh(); }
+  catch (e) { toast(e.message, true); }
+}
+async function delKey() { if (!confirm("Remove the stored private key? Live trading turns off.")) return; try { await api("/api/key/delete", {}); refresh(); } catch (e) { toast(e.message, true); } }
+try { const t = localStorage.getItem("alm.tab"); if (t) show(t); } catch (e) {}
+refresh(); setInterval(refresh, 10000);
+</script>
+<script src="/help.js"></script>
+</body>
+</html>

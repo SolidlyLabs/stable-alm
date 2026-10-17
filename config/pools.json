@@ -1,0 +1,43 @@
+[
+  {
+    "name": "usdc-usdt",
+    "pool": "0x9ab7730b09ebd9ff2df70f06339bd289a1680a46",
+    "decimals": 6,
+    "strategy": {
+      "type": "ladder",
+      "lookback": 86400,
+      "span": 3,
+      "every": 72,
+      "turnover": 0.4,
+      "guard": 15
+    },
+    "slippage_bps": 2.0,
+    "max_swap_cost_bps": 3.0,
+    "max_spot_dev_ticks": 3,
+    "max_actions_per_day": 5,
+    "min_swap_value": 5.0,
+    "enabled": true,
+    "allocation_pct": 100.0
+  },
+  {
+    "name": "cbeth-weth",
+    "pool": "0x74ad64bac8df96af2b63ea50c3d8840b79aa7a3b",
+    "decimals": 18,
+    "strategy": {
+      "type": "ladder",
+      "lookback": 86400,
+      "span": 6,
+      "every": 72,
+      "turnover": 0.4,
+      "guard": 15
+    },
+    "slippage_bps": 3.0,
+    "max_swap_cost_bps": 5.0,
+    "max_spot_dev_ticks": 5,
+    "max_actions_per_day": 5,
+    "min_swap_value": 0.002,
+    "numeraire": 1,
+    "enabled": false,
+    "allocation_pct": 0.0
+  }
+]
