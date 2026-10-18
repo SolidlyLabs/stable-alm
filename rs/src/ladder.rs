@@ -1,7 +1,7 @@
 //! The live strategy: Ladder (water-filling across single ticks) with the depeg guard, as in
 //! alm/strategies.py. Only what the executor uses: one decision at the latest bar.
 
-use crate::data::{median, rolling_median_trailing, Market, WEEK_BARS};
+use crate::data::{median, rolling_median_trailing, week_bars, Market};
 
 #[derive(Clone, Debug)]
 pub struct Params {
@@ -70,7 +70,7 @@ pub fn np_sum(a: &[f64]) -> f64 {
 /// Distance of the latest bar tick from the 7-day (2016-bar) median; None without a guard.
 pub fn guard_dev(m: &Market, p: &Params) -> Option<f64> {
     p.guard?;
-    let med = rolling_median_trailing(&m.bar_tick, WEEK_BARS, 12);
+    let med = rolling_median_trailing(&m.bar_tick, week_bars(m), 12);
     let b = m.bar_tick.len().checked_sub(1)?;
     Some((m.bar_tick[b] as f64 - med[b]).abs())
 }

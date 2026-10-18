@@ -27,6 +27,9 @@ pub fn defaults() -> Value {
         "retries": {"attempts": 3, "backoff_s": 10},
         "idle_redeploy_pct": 2.0,
         "resize_tolerance_pct": 1.0,
+        // parking.rs: tokens a strategy waits in earn in a whitelisted pegged pool meanwhile
+        // (pools: [{chain_id, token, pool}]); each strategy opts in with "park": true
+        "parking": {"enabled": false, "min_usd": 50.0, "range_pct": 0.5, "pools": []},
     })
 }
 
@@ -196,6 +199,8 @@ const SETTING_RANGES: &[(&str, f64, f64)] = &[
     ("solid_lp.max_swap_cost_bps", 0.0, 1000.0),
     ("retries.attempts", 1.0, 10.0),
     ("retries.backoff_s", 0.0, 600.0),
+    ("parking.min_usd", 0.0, 1e9),
+    ("parking.range_pct", 0.01, 20.0),
 ];
 
 fn at<'a>(v: &'a Value, path: &str) -> &'a Value {
@@ -212,6 +217,20 @@ pub fn validate_settings(s: &Value) -> Result<(), String> {
         let Some(x) = v.as_f64().filter(|x| x.is_finite()) else { return Err(format!("{k} must be a number")) };
         if x < *lo || x > *hi {
             return Err(format!("{k} must be between {lo} and {hi} (got {x})"));
+        }
+    }
+    for e in s["parking"]["pools"].as_array().cloned().unwrap_or_default() {
+        let addr = |k: &str| e[k].as_str().map(|a| a.len() == 42 && a.starts_with("0x") && a[2..].chars().all(|c| c.is_ascii_hexdigit())).unwrap_or(false);
+        if e["chain_id"].as_u64().is_none() || !addr("token") || !addr("pool") {
+            return Err("parking.pools: each entry needs a chain_id, a token address and a pool address".into());
+        }
+        if !matches!(e["strategy"].as_str(), None | Some("fixed") | Some("recentre")) {
+            return Err("parking.pools: strategy is fixed or recentre".into());
+        }
+        for (k, lo, hi) in [("range_pct", 0.01, 20.0), ("recentre_after_min", 0.0, 10080.0)] {
+            if !e[k].is_null() && !e[k].as_f64().map(|x| x >= lo && x <= hi).unwrap_or(false) {
+                return Err(format!("parking.pools: {k} must be between {lo} and {hi}"));
+            }
         }
     }
     if let Some(w) = s["wallet"].as_str() {

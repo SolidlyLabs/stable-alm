@@ -238,9 +238,28 @@ fn norm_pools(pools: &[String]) -> Vec<String> {
 /// Make sure every pool in `pools` has its events from `from_ts` up to the chain head: full days
 /// from the processor, the last minutes from RPC (see the module notes).
 pub fn ensure(cid: u64, pools: &[String], from_ts: i64) -> Result<Report, String> {
+    ensure_until(cid, pools, from_ts, None)
+}
+
+/// The store already holds the pool's events from `from_ts` to `to_ts`.
+pub fn covers(cid: u64, pool: &str, from_ts: i64, to_ts: i64) -> bool {
+    coverage(cid, pool).map(|c| c.from_ts <= from_ts && c.to_ts >= to_ts).unwrap_or(false)
+}
+
+/// Like ensure, for readers that need events only up to `to_ts`: pools the store already covers
+/// are left alone, and the RPC top-up past the processor runs only for pools still short of `to_ts`
+/// after the processor download (None: up to the chain head, as ensure).
+pub fn ensure_until(cid: u64, pools: &[String], from_ts: i64, to_ts: Option<i64>) -> Result<Report, String> {
+    let pools: Vec<String> = match to_ts {
+        Some(t) => pools.iter().filter(|p| !covers(cid, p, from_ts, t)).cloned().collect(),
+        None => pools.to_vec(),
+    };
+    if pools.is_empty() {
+        return Ok(Report::default());
+    }
     let lock = chain_lock(cid);
     let _g = lock.lock().unwrap();
-    let pools = norm_pools(pools);
+    let pools = norm_pools(&pools);
     let mut rep = Report::default();
     let mut processor_ok = false;
     if processor_enabled(cid) {
@@ -264,6 +283,10 @@ pub fn ensure(cid: u64, pools: &[String], from_ts: i64) -> Result<Report, String
             Err(e) => crate::warn!("history", "chain {cid}: processor history unavailable ({e})"),
         }
     }
+    let pools: Vec<String> = match to_ts {
+        Some(t) => pools.into_iter().filter(|p| !covers(cid, p, from_ts, t)).collect(),
+        None => pools,
+    };
     let rpc_pools: Vec<String> = if !processor_ok && pools.len() >= RPC_BACKFILL_MAX_POOLS {
         // a chain-wide fill over public RPC would take hours and starve live trading: only top up
         // pools whose coverage already reaches back far enough
@@ -287,13 +310,7 @@ fn ensure_rpc(cid: u64, pools: &[String], from_ts: i64) -> Result<Report, String
     let target = (crate::chains::block_at_ts(cid, from_ts) - crate::chains::blocks_per_day(cid) / 48).max(1);
     let pools = norm_pools(pools);
     let mut cov: HashMap<String, Option<Coverage>> = pools.iter().map(|p| (p.clone(), coverage(cid, p))).collect();
-    // where each pool must start: before its coverage when that begins too late, else right after it
-    let start_of = |c: &Option<Coverage>| -> i64 {
-        match c {
-            Some(c) if c.from_block <= target => c.to_block + 1,
-            _ => target,
-        }
-    };
+    let start_of = |c: &Option<Coverage>| rpc_start(c.as_ref(), target, from_ts);
     let need: Vec<String> = pools.iter().filter(|p| start_of(&cov[*p]) <= head).cloned().collect();
     let mut rep = Report { from_block: head + 1, to_block: head, ..Default::default() };
     if need.is_empty() {
@@ -340,6 +357,17 @@ fn ensure_rpc(cid: u64, pools: &[String], from_ts: i64) -> Result<Report, String
     }
     rep.to_block = head;
     Ok(rep)
+}
+
+/// Where the RPC download of a pool starts: right after its coverage when that reaches back to
+/// `from_ts`, else at `target` (the block of `from_ts`). Coverage reaches back when its first block
+/// or its first time does: a processor backfill over days without a single event of the pool (before
+/// it was deployed) moves the first time back but has no event to move the first block to.
+fn rpc_start(c: Option<&Coverage>, target: i64, from_ts: i64) -> i64 {
+    match c {
+        Some(c) if c.from_block <= target || c.from_ts <= from_ts => c.to_block + 1,
+        _ => target,
+    }
 }
 
 // -- the processor ------------------------------------------------------------------------------------
@@ -622,7 +650,7 @@ fn ensure_processor_days(cid: u64, pools: &[String], from_ts: i64) -> Result<Rep
                 rep.rows += rows.len();
                 store_rows(cid, p, rows)?;
                 // the downloaded days run through the day where the old coverage began
-                let fb = (first..=c.from_ts.div_euclid(DAY) * DAY).step_by(DAY as usize).find_map(|d| day_min.get(&d).copied()).unwrap_or(c.from_block);
+                let fb = (first..=c.from_ts.div_euclid(DAY) * DAY).step_by(DAY as usize).find_map(|d| day_min.get(&d).copied()).unwrap_or_else(|| crate::chains::block_at_ts(cid, first));
                 rep.from_block = rep.from_block.min(fb);
                 save_coverage(cid, p, &Coverage { from_block: fb.min(c.from_block), from_ts: first, ..c.clone() })?;
             }
@@ -870,6 +898,20 @@ pub fn import_legacy(cid: u64, pool: &str) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn days_before_a_pool_existed_do_not_send_it_to_rpc() {
+        // USDC/USDT: first event on block 30,218,057 (2025-05-14); the processor's empty days before
+        // it moved the coverage's first time back to 2025-04-04
+        let c = Coverage { from_block: 30_218_057, to_block: 52_783_267, from_ts: 1_743_724_800, to_ts: 1_792_355_881, source: "processor".into() };
+        // a backtest wanting 2025-04-19 on: covered by time, only the blocks after the coverage are new
+        assert_eq!(rpc_start(Some(&c), 29_500_000, 1_745_020_800), 52_783_268);
+        // wanting 2025-03-01: earlier than the coverage by time and by block, from the target on
+        assert_eq!(rpc_start(Some(&c), 27_000_000, 1_740_787_200), 27_000_000);
+        // a coverage reaching back by block is enough too, and no coverage starts at the target
+        assert_eq!(rpc_start(Some(&Coverage { from_ts: 1_790_000_000, ..c.clone() }), 31_000_000, 1_745_020_800), 52_783_268);
+        assert_eq!(rpc_start(None, 31_000_000, 1_745_020_800), 31_000_000);
+    }
 
     fn swap(block: i64, li: i64, tick: i64) -> Ev {
         Ev {

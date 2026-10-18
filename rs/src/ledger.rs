@@ -21,7 +21,14 @@ use std::time::{Duration, Instant};
 
 const TRANSFER: &str = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 
-static LAST: Mutex<Option<(Instant, Value)>> = Mutex::new(None);
+/// the totals, when they were computed and how long the executor log was then
+static LAST: Mutex<Option<(Instant, u64, Value)>> = Mutex::new(None);
+
+/// Forget the cached totals: a transaction was just sent, so the next read recomputes them rather
+/// than show figures from before it for up to ten minutes.
+pub fn invalidate() {
+    *LAST.lock().unwrap() = None;
+}
 
 fn path() -> std::path::PathBuf {
     crate::paths::logs().join("ledger.json")
@@ -178,52 +185,64 @@ impl PoolPx {
     }
 }
 
+/// One pool's impermanent loss (USD, positive = loss) from the wallet's Mint/Burn events alone, in
+/// block order: each withdrawal's tokens against the same share of what was deposited into that
+/// range, both at the pool price just before it (`before`, by block); the liquidity still open by
+/// the events against its deposits, both at `p_now`. `value(a0, a1, p, ts)` is the USD value of raw
+/// amounts at pool price p; `held(tl, tu, l)` the raw amounts liquidity l holds at today's price.
+///
+/// Nothing here is read at a different moment from anything else: a withdrawal not in the events
+/// yet (synced next cycle) leaves the position open in them too, so it is valued as still held, the
+/// same number either way. Comparing the events with positions read on-chain now would count every
+/// such lag as a loss (or a gain) of all the tokens in flight.
+fn il_events(ev: &[crate::data::Ev], before: &dyn Fn(i64) -> Option<f64>, value: &dyn Fn(f64, f64, f64, Option<i64>) -> Option<f64>,
+             held: &dyn Fn(i64, i64, f64) -> (f64, f64), p_now: f64) -> Option<f64> {
+    let f = |s: &str| s.parse::<f64>().unwrap_or(0.0);
+    let mut ev: Vec<&crate::data::Ev> = ev.iter().collect();
+    ev.sort_by_key(|e| (e.block, e.log_index));
+    let mut loss = 0.0;
+    // (tl, tu) -> (liquidity, deposited token0, deposited token1) still in the position
+    let mut basis: HashMap<(i64, i64), (f64, f64, f64)> = HashMap::new();
+    for e in ev {
+        let b = basis.entry((e.tick_lower, e.tick_upper)).or_default();
+        if e.kind == "mint" {
+            *b = (b.0 + f(&e.amount), b.1 + f(&e.amount0), b.2 + f(&e.amount1));
+        } else if e.kind == "burn" && b.0 > 0.0 {
+            let k = (f(&e.amount) / b.0).min(1.0);
+            if let Some(p) = before(e.block) {
+                let was = value(k * b.1, k * b.2, p, Some(e.ts))?;
+                let got = value(f(&e.amount0), f(&e.amount1), p, Some(e.ts))?;
+                loss += (was - got).max(0.0);
+            }
+            *b = (b.0 * (1.0 - k), b.1 * (1.0 - k), b.2 * (1.0 - k));
+        }
+    }
+    for ((tl, tu), (l, b0, b1)) in basis {
+        if l > 1.0 {
+            let (a0, a1) = held(tl, tu, l);
+            loss += (value(b0, b1, p_now, None)? - value(a0, a1, p_now, None)?).max(0.0);
+        }
+    }
+    Some(loss)
+}
+
 /// Impermanent loss (USD, positive = loss) of the configured pools on a chain, for liquidity minted
-/// at or after `since`: each withdrawal's tokens vs the same share of what was deposited into that
-/// range, both at the pool price just before the withdrawal; open liquidity at the pool price now.
-/// Valued at one price, a range position is never worth more than the tokens it started with, so
-/// this is never a gain.
+/// at or after `since` (`il_events`, valued at the pool's own price: valued at one price, a range
+/// position is never worth more than the tokens it started with, so this is never a gain).
 fn il_cost(cid: u64, wallet: &str, hist: &HashMap<(u64, String), Vec<(i64, f64)>>, since: i64, px: &HashMap<String, PoolPx>) -> Option<f64> {
     let mut loss = 0.0;
     for (pool, pp) in px {
-        let mut ev: Vec<crate::data::Ev> = crate::data::read_jsonl(&crate::data::wallet_path(cid, pool, wallet)).into_iter().filter(|e| e.ts >= since).collect();
+        let ev: Vec<crate::data::Ev> = crate::data::read_jsonl(&crate::data::wallet_path(cid, pool, wallet)).into_iter().filter(|e| e.ts >= since).collect();
         if ev.is_empty() {
             continue;
         }
-        ev.sort_by_key(|e| (e.block, e.log_index));
-        let f = |s: &str| s.parse::<f64>().unwrap_or(0.0);
-        // (tl, tu) -> (liquidity, deposited token0, deposited token1) still in the position
-        let mut basis: HashMap<(i64, i64), (f64, f64, f64)> = HashMap::new();
-        for e in &ev {
-            let b = basis.entry((e.tick_lower, e.tick_upper)).or_default();
-            if e.kind == "mint" {
-                *b = (b.0 + f(&e.amount), b.1 + f(&e.amount0), b.2 + f(&e.amount1));
-            } else if b.0 > 0.0 {
-                let k = (f(&e.amount) / b.0).min(1.0);
-                if let Some(p) = pp.before(e.block) {
-                    let held = pp.usd(cid, hist, k * b.1, k * b.2, p, Some(e.ts))?;
-                    let got = pp.usd(cid, hist, f(&e.amount0), f(&e.amount1), p, Some(e.ts))?;
-                    loss += (held - got).max(0.0);
-                }
-                *b = (b.0 * (1.0 - k), b.1 * (1.0 - k), b.2 * (1.0 - k));
-            }
-        }
-        let open: Vec<_> = basis.into_iter().filter(|(_, b)| b.0 > 1.0).collect();
-        if open.is_empty() {
-            continue;
-        }
         let (sp, _, _) = crate::chain::slot0(cid, pool).ok()?;
-        let p = (crate::tickmath::to_f64(&sp) / 2f64.powi(96)).powi(2) * pp.u0 / pp.u1;
-        let live: HashMap<(i64, i64), num_bigint::BigUint> =
-            crate::engine::wallet_positions(cid, pool, wallet).ok()?.into_iter().map(|(a, b, l)| ((a, b), l)).collect();
-        for ((tl, tu), (l, b0, b1)) in open {
-            let Some(cur) = live.get(&(tl, tu)) else { continue };
-            // only the share of today's liquidity that the tracked deposits account for
-            let k = (l / crate::tickmath::to_f64(cur)).min(1.0);
-            let (a0, a1) = crate::tickmath::amounts_at(&sp, tl, tu, cur);
-            let (a0, a1) = (crate::tickmath::to_f64(&a0) * k, crate::tickmath::to_f64(&a1) * k);
-            loss += (pp.usd(cid, hist, b0, b1, p, None)? - pp.usd(cid, hist, a0, a1, p, None)?).max(0.0);
-        }
+        let p_now = (crate::tickmath::to_f64(&sp) / 2f64.powi(96)).powi(2) * pp.u0 / pp.u1;
+        let held = |tl: i64, tu: i64, l: f64| {
+            let (a0, a1) = crate::tickmath::amounts_at(&sp, tl, tu, &num_bigint::BigUint::from(l.max(0.0) as u128));
+            (crate::tickmath::to_f64(&a0), crate::tickmath::to_f64(&a1))
+        };
+        loss += il_events(&ev, &|b| pp.before(b), &|a0, a1, p, ts| pp.usd(cid, hist, a0, a1, p, ts), &held, p_now)?;
     }
     Some(loss)
 }
@@ -231,8 +250,10 @@ fn il_cost(cid: u64, wallet: &str, hist: &HashMap<(u64, String), Vec<(i64, f64)>
 /// Per-chain totals: {"<chain id>": {earned_usd, claimed_usd, claimable_usd, gas_usd, swap_cost_usd,
 /// profit_usd, txs, claims, swaps}}. Recomputed at most every 10 minutes.
 pub fn summary(wallet: &str, chains: &[u64]) -> Value {
-    if let Some((t, v)) = LAST.lock().unwrap().as_ref() {
-        if t.elapsed() < Duration::from_secs(600) {
+    // a new transaction (the executor log grew) recomputes them once they are half a minute old
+    let log_len = std::fs::metadata(crate::paths::logs().join("executor.jsonl")).map(|m| m.len()).unwrap_or(0);
+    if let Some((t, n, v)) = LAST.lock().unwrap().as_ref() {
+        if t.elapsed() < Duration::from_secs(600) && (*n == log_len || t.elapsed() < Duration::from_secs(30)) {
             return v.clone();
         }
     }
@@ -312,6 +333,84 @@ pub fn summary(wallet: &str, chains: &[u64]) -> Value {
         );
     }
     let v = Value::Object(out);
-    *LAST.lock().unwrap() = Some((Instant::now(), v.clone()));
+    *LAST.lock().unwrap() = Some((Instant::now(), log_len, v.clone()));
     v
+}
+
+#[cfg(test)]
+mod il_tests {
+    use super::*;
+    use crate::data::Ev;
+
+    fn ev(block: i64, kind: &str, l: f64, a0: f64, a1: f64) -> Ev {
+        Ev { block, ts: block, kind: kind.into(), amount: format!("{l}"), amount0: format!("{a0}"), amount1: format!("{a1}"), tick_lower: -100, tick_upper: 100, ..Default::default() }
+    }
+
+    /// Uniswap amounts of liquidity l on [tl, tu) at price p (token1 per token0, raw)
+    fn amounts(tl: i64, tu: i64, l: f64, p: f64) -> (f64, f64) {
+        let (sa, sb, s) = (1.0001f64.powf(tl as f64 / 2.0), 1.0001f64.powf(tu as f64 / 2.0), p.sqrt());
+        let s = s.clamp(sa, sb);
+        (l * (sb - s) / (s * sb), l * (s - sa))
+    }
+
+    fn value(a0: f64, a1: f64, p: f64, _: Option<i64>) -> Option<f64> {
+        Some(a0 * p + a1)
+    }
+
+    /// IL with a constant pool price `before` every event and `p_now` today
+    fn il(evs: &[Ev], p_then: f64, p_now: f64) -> f64 {
+        il_events(evs, &|_| Some(p_then), &value, &|tl, tu, l| amounts(tl, tu, l, p_now), p_now).unwrap()
+    }
+
+    fn mint(block: i64, l: f64, p: f64) -> Ev {
+        let (a0, a1) = amounts(-100, 100, l, p);
+        ev(block, "mint", l, a0, a1)
+    }
+
+    fn burn(block: i64, l: f64, p: f64) -> Ev {
+        let (a0, a1) = amounts(-100, 100, l, p);
+        ev(block, "burn", l, a0, a1)
+    }
+
+    #[test]
+    fn no_price_move_no_loss() {
+        assert!(il(&[mint(1, 1e6, 1.0)], 1.0, 1.0).abs() < 1e-6);
+        assert!(il(&[mint(1, 1e6, 1.0), burn(2, 1e6, 1.0)], 1.0, 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_price_move_is_a_loss_held_or_withdrawn_alike() {
+        let p1 = 1.0001f64.powi(60);
+        let open = il(&[mint(1, 1e6, 1.0)], p1, p1);
+        let (d0, d1) = amounts(-100, 100, 1e6, 1.0);
+        let (h0, h1) = amounts(-100, 100, 1e6, p1);
+        assert!((open - ((d0 * p1 + d1) - (h0 * p1 + h1))).abs() < 1e-6 && open > 0.0, "{open}");
+        // withdrawn at that price: the same loss
+        let closed = il(&[mint(1, 1e6, 1.0), burn(2, 1e6, p1)], p1, p1);
+        assert!((open - closed).abs() < 1e-6, "{open} vs {closed}");
+    }
+
+    #[test]
+    fn a_withdrawal_not_synced_yet_changes_nothing() {
+        // the cycle withdrew 30% at today's price; until its Burn is in the events, the position is
+        // whole in them, and the number is the same as once it is
+        let p1 = 1.0001f64.powi(30);
+        let lagging = il(&[mint(1, 1e6, 1.0)], p1, p1);
+        let synced = il(&[mint(1, 1e6, 1.0), burn(5, 3e5, p1)], p1, p1);
+        assert!((lagging - synced).abs() < 1e-6, "{lagging} vs {synced}");
+        // and a deposit not synced yet is not a loss of the tokens in flight either
+        let before = il(&[mint(1, 1e6, 1.0)], p1, p1);
+        let after = il(&[mint(1, 1e6, 1.0), mint(6, 5e5, p1)], p1, p1);
+        assert!((before - after).abs() < 1e-6, "{before} vs {after}");
+    }
+
+    #[test]
+    fn partial_withdrawals_take_their_share_of_the_deposits() {
+        let p1 = 1.0001f64.powi(80);
+        let one = il(&[mint(1, 1e6, 1.0), burn(2, 1e6, p1)], p1, p1);
+        let parts = il(&[mint(1, 1e6, 1.0), burn(2, 4e5, p1), burn(3, 6e5, p1)], p1, p1);
+        assert!((one - parts).abs() < 1e-6, "{one} vs {parts}");
+        // a burn of more than is tracked (liquidity minted before the period) counts only what is
+        assert!(il(&[burn(2, 4e5, p1)], p1, p1) == 0.0);
+    }
 }

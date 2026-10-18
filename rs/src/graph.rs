@@ -3,7 +3,11 @@
 //!
 //! Nodes are sources (price, bar high/low, fees, constants), indicators (ta.rs: averages, bands,
 //! channels, oscillators and trend scores), maths and conditions, and sinks:
-//!   range     (lower, upper)  the range wanted at each bar (required);
+//!   range     (lower, upper)  the range wanted at each bar (this or a ladder is required);
+//!   ladder    ()              instead of a range: the app's ladder (ladder.rs), capital spread over
+//!                             single ticks around the trailing median where fees were paid,
+//!                             re-solved every `every_hours` (and whenever the rebalance condition
+//!                             holds), moved only when at least `turnover` of the value would move;
 //!   rebalance (when)          move to the wanted range when true (default: price left the range),
 //!                             after a delay and not within the cooldown;
 //!   exit      (when, reenter) withdraw everything; deposit again when `reenter` (default: not
@@ -14,6 +18,27 @@
 //! and an indicator still warming up is NaN (a condition on it is false, a range on it waits).
 //! Two conditions depend on the position and are evaluated at decision time: `out_of_range` and
 //! `range_shift`.
+//!
+//! "Wait out the move" (reports/DIRECTIONAL.md) is built from three nodes made for it: `breakout`
+//! (the side of the last n-hour breakout, and whether a new extreme came in the last hours: the move
+//! is on), `volatility` (the daily sigma, to size a band) and `fee_vs_arb` (the pool's trailing fees
+//! over its loss to arbitrage, F/LVR: below 1 the pool does not pay for what arbitrage takes). The
+//! exit sink's optional `to` input picks the token to wait in (+1 token0, -1 token1).
+//!
+//! Other tokens: `token_price` is another token's USD price (external.rs: Solidly pools with enough
+//! active liquidity, through a paired token when there is no stable pool), in ticks. Its `stale`
+//! output is true while there is no reliable price (no such pool, or none traded for 12 hours), so
+//! a strategy can hold or exit instead of acting on a price it does not have.
+//!
+//! Timeframes: any node that is not a position condition or a sink may run on candles of 15 or 30
+//! minutes, 1 or 4 hours or a day ("tf", in minutes), built in memory from the 5-minute bars: its
+//! inputs are taken at each candle's close (highs and lows over the candle), its periods count in
+//! hours as everywhere, and its value holds from that close until the next one. A candle counts
+//! once it has closed, so a decision never sees the candle still forming.
+//! 1-minute candles are finer than the replay: they are built from the swaps themselves (the last
+//! swap at or before each minute's end, highs, lows and fees over the minute), 5-minute inputs reach
+//! them from the last bar closed by then, and a decision (every 5 minutes) reads the minute that
+//! ends with its bar.
 
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -31,6 +56,8 @@ type Spec = (&'static str, &'static [&'static str], &'static [&'static str], &'s
 
 /// Periods up to a week: the live replay keeps 10 days, backtests warm up for 8.
 const H: (&str, f64, f64, f64) = ("hours", 24.0, 0.1, 168.0);
+/// The long-window nodes (breakout, volatility, fee vs arbitrage) reach back up to 15 days.
+const LONG: f64 = 360.0;
 pub const KINDS: &[Spec] = &[
     ("price", &[], &["tick"], &[]),
     ("high_low", &[], &["high", "low"], &[]),
@@ -63,6 +90,10 @@ pub const KINDS: &[Spec] = &[
     ("gaussian", &["in"], &["upper", "mid", "lower"], &[("hours", 12.0, 0.1, 37.0), ("k", 2.0, 0.0, 20.0)]),
     ("trend", &[], &["out"], &[("unit_hours", 1.0, 0.1, 3.5)]),
     ("momentum", &[], &["out"], &[("hours", 0.5, 0.1, 24.0), ("window", 42.0, 1.0, 120.0), ("smooth", 1.2, 0.1, 24.0)]),
+    ("breakout", &[], &["side", "hot"], &[("hours", 336.0, 1.0, LONG), ("hot_hours", 24.0, 0.0, LONG)]),
+    ("volatility", &[], &["out"], &[("hours", 168.0, 2.0, LONG)]),
+    ("fee_vs_arb", &[], &["out"], &[("hours", 168.0, 24.0, LONG)]),
+    ("token_price", &[], &["tick", "high", "low", "stale"], &[]),
     ("add", &["a", "b"], &["out"], &[]),
     ("sub", &["a", "b"], &["out"], &[]),
     ("mul", &["a", "b"], &["out"], &[]),
@@ -85,25 +116,29 @@ pub const KINDS: &[Spec] = &[
     ("out_of_range", &[], &["out"], &[("below", 0.0, -1e6, 1e6), ("above", 0.0, -1e6, 1e6)]),
     ("range_shift", &[], &["out"], &[("value", 10.0, 0.0, 1e6)]),
     ("range", &["lower", "upper"], &[], &[]),
+    ("ladder", &[], &[], &[("hours", 24.0, 1.0, 168.0), ("span", 3.0, 0.0, 1e6), ("every_hours", 6.0, 0.1, 168.0), ("turnover", 0.4, 0.0, 1.0)]),
     ("rebalance", &["when"], &[], &[("delay_min", 0.0, 0.0, 10080.0), ("cooldown_min", 60.0, 0.0, 43200.0)]),
-    ("exit", &["when", "reenter"], &[], &[("delay_min", 0.0, 0.0, 10080.0)]),
+    ("exit", &["when", "reenter", "to"], &[], &[("delay_min", 0.0, 0.0, 10080.0)]),
     ("hold", &["when"], &[], &[]),
 ];
 /// Inputs that may stay unconnected (the sink's default applies).
-const OPTIONAL: &[(&str, &str)] = &[("rebalance", "when"), ("exit", "reenter")];
+const OPTIONAL: &[(&str, &str)] = &[("rebalance", "when"), ("exit", "reenter"), ("exit", "to")];
 /// Params measured in ticks (scaled by the node's unit).
 const TICK_PARAMS: &[(&str, &str)] =
-    &[("const", "value"), ("offset", "value"), ("distance_gt", "value"), ("out_of_range", "below"), ("out_of_range", "above"), ("range_shift", "value")];
+    &[("const", "value"), ("offset", "value"), ("distance_gt", "value"), ("out_of_range", "below"), ("out_of_range", "above"), ("range_shift", "value"), ("ladder", "span")];
 /// Outputs that are prices (ticks): drawn on the chart.
 const PRICE_LIKE: &[&str] = &["price", "high_low", "sma", "ema", "median", "bollinger", "keltner", "donchian", "around", "offset", "add", "sub", "min", "max", "switch",
     "lag", "highest", "lowest", "percentile", "psar", "ichimoku", "heikin_ashi", "gaussian"];
 /// Kinds a decision can compute at one bar from other values: the only ones a node fed by a
 /// position condition may be.
 const POINTWISE: &[&str] = &["and", "or", "not", "switch", "gt", "lt", "add", "sub", "mul", "scale", "offset", "min", "max", "abs", "between", "distance_gt",
-    "range", "rebalance", "exit", "hold"];
-/// History loaded before the first decision (backtests warm up 8 days, the live replay keeps 10).
-pub const MAX_LOOKBACK_HOURS: f64 = 190.0;
+    "range", "ladder", "rebalance", "exit", "hold"];
+/// History a graph may need before its first decision. Backtests warm up 16 days; the live replay
+/// keeps 10 days, or more for a graph that needs it (`Graph::replay_days`).
+pub const MAX_LOOKBACK_HOURS: f64 = 370.0;
 const STATEFUL: &[&str] = &["out_of_range", "range_shift"];
+/// The outputs: no timeframe, at most one of each.
+const SINKS: &[&str] = &["range", "ladder", "rebalance", "exit", "hold"];
 
 fn spec(kind: &str) -> Option<&'static Spec> {
     KINDS.iter().find(|s| s.0 == kind)
@@ -116,7 +151,14 @@ pub struct Node {
     pub p: HashMap<String, f64>,
     pub inputs: HashMap<String, (usize, String)>,
     pub label: String,
+    /// candle length in seconds (300: the replay's own bars)
+    pub tf_s: i64,
+    /// token_price: the token (and its chain, when not the pool's)
+    pub token: Option<(Option<u64>, String)>,
 }
+
+/// Timeframes a node may run on, in minutes.
+pub const TIMEFRAMES: &[i64] = &[1, 5, 15, 30, 60, 240, 1440];
 
 #[derive(Clone, Debug)]
 pub struct Graph {
@@ -125,6 +167,12 @@ pub struct Graph {
     pub exit_to: ExitTo,
     pub name: String,
     stateful: HashSet<usize>,
+    /// hours of history the graph needs before its first decision
+    pub lookback: f64,
+    /// the token an exit waits in is parked in a pegged pool meanwhile (parking.rs)
+    pub park: bool,
+    /// a ladder block's most ranges (the pool's setting; the backtest's request)
+    pub max_ranges: usize,
 }
 
 fn unit_ticks(unit: &str, v: f64, spacing: i64) -> f64 {
@@ -186,7 +234,23 @@ impl Graph {
                 }
             }
             let label = n["label"].as_str().unwrap_or("").chars().take(40).collect::<String>();
-            nodes.push(Node { id, kind: sp.0, p, inputs, label });
+            let tf = n["tf"].as_i64().unwrap_or(5);
+            if !TIMEFRAMES.contains(&tf) {
+                return Err(format!("node {id}: timeframe must be one of {TIMEFRAMES:?} minutes"));
+            }
+            if tf != 5 && (STATEFUL.contains(&sp.0) || SINKS.contains(&sp.0)) {
+                return Err(format!("node {id}: position conditions and outputs run on every bar (no timeframe)"));
+            }
+            let token = if sp.0 == "token_price" {
+                let a = n["token"].as_str().unwrap_or("").to_lowercase();
+                if !(a.len() == 42 && a.starts_with("0x") && a[2..].chars().all(|c| c.is_ascii_hexdigit())) {
+                    return Err(format!("node {id}: pick the token to watch"));
+                }
+                Some((n["chain_id"].as_u64(), a))
+            } else {
+                None
+            };
+            nodes.push(Node { id, kind: sp.0, p, inputs, label, tf_s: tf * 60, token });
         }
         // order: inputs first; a cycle is refused
         let mut order = vec![];
@@ -216,8 +280,8 @@ impl Graph {
             }
         }
         let count = |k: &str| sorted.iter().filter(|n| n.kind == k).count();
-        if count("range") != 1 {
-            return Err("node strategy: needs exactly one Range node".into());
+        if count("range") + count("ladder") != 1 {
+            return Err("node strategy: needs exactly one Range or Ladder node".into());
         }
         for k in ["rebalance", "exit", "hold"] {
             if count(k) > 1 {
@@ -237,7 +301,7 @@ impl Graph {
         }
         let mut look = vec![0.0f64; sorted.len()];
         for i in 0..sorted.len() {
-            look[i] = own_lookback(&sorted[i]) + sorted[i].inputs.values().map(|(s, _)| look[*s]).fold(0.0, f64::max);
+            look[i] = own_lookback(&sorted[i]) + (sorted[i].tf_s - 300).max(0) as f64 / 3600.0 + sorted[i].inputs.values().map(|(s, _)| look[*s]).fold(0.0, f64::max);
             if look[i] > MAX_LOOKBACK_HOURS {
                 return Err(format!(
                     "node {}: needs {:.0} hours of history before its first value (chained indicators add up); at most {MAX_LOOKBACK_HOURS:.0}",
@@ -256,11 +320,43 @@ impl Graph {
             _ => ExitTo::Keep,
         };
         let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("").chars().take(60).collect();
-        Ok(Graph { nodes: sorted, exit_to, name, stateful })
+        let lookback = look.iter().copied().fold(0.0, f64::max);
+        let park = s.get("park").and_then(|v| v.as_bool()).unwrap_or(false);
+        Ok(Graph { nodes: sorted, exit_to, name, stateful, lookback, park, max_ranges: 5 })
+    }
+
+    /// Other tokens the graph watches: (node index, chain or None for the pool's, token).
+    pub fn externals(&self) -> Vec<(usize, Option<u64>, String)> {
+        self.nodes.iter().enumerate().filter_map(|(i, n)| n.token.as_ref().map(|(c, t)| (i, *c, t.clone()))).collect()
+    }
+
+    /// Days of swaps the live replay must hold for this graph (10 at least, as before).
+    /// The replay's bar, and so how often the strategy decides: every minute when any block works on
+    /// 1-minute candles (its value changes every minute), else every 5 minutes (the price bar every
+    /// position condition reads). The backtest replays on these bars and the worker checks the pool
+    /// this often, so both decide at the same moments.
+    pub fn bar_s(&self) -> i64 {
+        if self.nodes.iter().any(|n| n.tf_s == 60) { 60 } else { crate::data::BAR_S }
+    }
+
+    pub fn replay_days(&self) -> i64 {
+        ((self.lookback / 24.0).ceil() as i64 + 1).max(10)
     }
 
     pub fn label(&self) -> String {
         if self.name.is_empty() { format!("nodes({})", self.nodes.len()) } else { format!("nodes: {}", self.name) }
+    }
+
+    /// The ladder block's settings in the ladder's own terms (ladder.rs), when the graph has one.
+    pub fn ladder(&self) -> Option<crate::ladder::Params> {
+        let i = self.sink("ladder")?;
+        Some(crate::ladder::Params {
+            lookback: (self.param(i, "hours") * 3600.0).round() as i64,
+            span: self.param(i, "span").round().max(0.0) as i64,
+            every: (self.param(i, "every_hours") * BARS_PER_HOUR).round().max(1.0) as i64,
+            turnover: self.param(i, "turnover"),
+            guard: None,
+        })
     }
 
     fn sink(&self, kind: &str) -> Option<usize> {
@@ -273,10 +369,6 @@ impl Graph {
 }
 
 // -- series --------------------------------------------------------------------------------------------
-
-fn bars(hours: f64) -> usize {
-    ((hours * BARS_PER_HOUR).round() as usize).max(1)
-}
 
 fn median(x: &[f64], n: usize) -> Vec<f64> {
     // the store's trailing median on integers (milli-units keep three decimals)
@@ -301,7 +393,7 @@ fn own_lookback(n: &Node) -> f64 {
     let p = |k: &str| n.p.get(k).copied().unwrap_or(0.0);
     let bar = 1.0 / BARS_PER_HOUR;
     match n.kind {
-        "sma" | "ema" | "median" | "stdev" | "bollinger" | "keltner" | "highest" | "lowest" | "percentile" | "zscore" | "cci" | "lag" | "change" => p("hours") + bar,
+        "sma" | "ema" | "median" | "stdev" | "bollinger" | "keltner" | "highest" | "lowest" | "percentile" | "zscore" | "cci" | "lag" | "change" | "ladder" => p("hours") + bar,
         "atr" | "rsi" | "donchian" | "stochastic" => p("hours") + p("d_hours") + bar,
         "adx" => 2.0 * p("hours") + bar,
         "trix" => 3.0 * p("hours") + bar,
@@ -311,6 +403,7 @@ fn own_lookback(n: &Node) -> f64 {
         "gaussian" => 5.0 * p("hours"),
         "trend" => 50.0 * p("unit_hours"),
         "momentum" => p("hours") + p("window") + p("smooth") + bar,
+        "breakout" | "volatility" | "fee_vs_arb" => p("hours") + 1.0 + bar,
         _ => 0.0,
     }
 }
@@ -323,22 +416,250 @@ fn b(v: bool) -> f64 {
     if v { 1.0 } else { 0.0 }
 }
 
+/// The breakout state over `n` bars (a turtle): side +1 from a close above the previous n bars' highest
+/// close until one below their lowest (and the mirror); hot = 1 while the last new extreme on the
+/// side's own direction came within `hot` bars (the move is on). NaN until n bars are in.
+fn breakout(close: &[f64], n: usize, hot: usize) -> (Vec<f64>, Vec<f64>) {
+    let hi = ta::lag(&ta::extreme(close, n, true), 1);
+    let lo = ta::lag(&ta::extreme(close, n, false), 1);
+    let (mut side, mut on) = (vec![f64::NAN; close.len()], vec![f64::NAN; close.len()]);
+    let (mut st, mut last) = (0.0f64, None::<usize>);
+    for j in 0..close.len() {
+        if !hi[j].is_finite() || !lo[j].is_finite() || !close[j].is_finite() {
+            continue;
+        }
+        if close[j] > hi[j] {
+            st = 1.0;
+            last = Some(j);
+        } else if close[j] < lo[j] {
+            st = -1.0;
+            last = Some(j);
+        }
+        side[j] = st;
+        on[j] = b(st != 0.0 && last.map(|l| j - l <= hot).unwrap_or(false));
+    }
+    (side, on)
+}
+
+/// The pool's fees over its loss to arbitrage (F/LVR, data::fee_vs_lvr) over the last `n` bars, per
+/// unit of at-the-money liquidity: F sums each swap's fee over the pool's active liquidity, LVR sums
+/// r^2 * sqrt(P) / 4 over hourly closes. NaN until n bars are in, or when the price did not move.
+fn fee_vs_arb(m: &Market, n: usize) -> Vec<f64> {
+    let nb = m.bar_tick.len();
+    let ln_tick = 1.0001f64.ln();
+    let (mut f, mut l) = (vec![0.0; nb], vec![0.0; nb]);
+    let mut prev_hour: Option<i64> = None;
+    for j in 0..nb {
+        let from = if j == 0 { m.bar_idx[0] } else { m.bar_idx[j - 1] + 1 };
+        for k in from..=m.bar_idx[j] {
+            if k < m.fee.len() && m.l_active[k] > 0.0 {
+                f[j] += m.fee[k] / m.l_active[k];
+            }
+        }
+        if m.bar_end[j] % 3600 == 0 {
+            let t = m.bar_tick[j];
+            if let Some(pt) = prev_hour {
+                let r = (t - pt) as f64 * ln_tick;
+                let p = 1.0001f64.powf(t as f64) * m.px_scale;
+                let root = if m.num1 { p.sqrt() } else { 1.0 / p.sqrt() };
+                l[j] = r * r * root / 4.0;
+            }
+            prev_hour = Some(t);
+        }
+    }
+    let (mut sf, mut sl) = (0.0, 0.0);
+    let mut out = vec![f64::NAN; nb];
+    for j in 0..nb {
+        sf += f[j];
+        sl += l[j];
+        if j >= n {
+            sf -= f[j - n];
+            sl -= l[j - n];
+        }
+        if j + 1 >= n && sl > 0.0 {
+            out[j] = sf / sl;
+        }
+    }
+    out
+}
+
 /// Every stateless output over all bars of `m`.
 pub struct Eval {
     pub series: HashMap<(usize, String), Vec<f64>>,
 }
 
+/// Other tokens' prices by node index, at the replay's 5-minute bars (external.rs).
+pub type Externals = HashMap<usize, crate::external::Series>;
+
+/// Load the prices of the tokens the graph watches over the bars of `m` (chain `cid` unless a node
+/// names another). A token that cannot be priced stays out (its node is NaN) and is reported.
+pub fn load_externals(g: &Graph, cid: u64, m: &Market) -> (Externals, Vec<String>) {
+    let (mut out, mut errs) = (HashMap::new(), vec![]);
+    let minutes = minute_ends(m);
+    for (i, c, t) in g.externals() {
+        // a block finer than the replay's bars gets its own minute series from the watched pools' swaps
+        let ends = if g.nodes[i].tf_s < m.bar_s { &minutes } else { &m.bar_end };
+        match crate::external::load(c.unwrap_or(cid), &t, ends) {
+            Ok(s) => {
+                out.insert(i, s);
+            }
+            Err(e) => errs.push(format!("node {}: {e}", g.nodes[i].id)),
+        }
+    }
+    (out, errs)
+}
+
+/// The bars a node sees: the replay's own, longer candles, or 1-minute candles.
+struct Frame {
+    close: Vec<f64>,
+    hi: Vec<f64>,
+    lo: Vec<f64>,
+    fee: Vec<f64>,
+    /// candles per hour
+    bph: f64,
+    /// the 5-minute bar that closes each candle (None: the bars themselves)
+    idx: Option<Vec<usize>>,
+    /// 1-minute candles: for each, the last 5-minute bar closed by its end (its 5-minute inputs)
+    fine: Option<Vec<Option<usize>>>,
+    /// for each 5-minute bar, the last candle closed at or before it
+    pos: Vec<Option<usize>>,
+}
+
+/// The end of every minute of the replay: one per minute of each bar, the last one at the bar's end.
+pub fn minute_ends(m: &Market) -> Vec<i64> {
+    let per = (m.bar_s / 60).max(1);
+    m.bar_end.iter().flat_map(|e| (0..per).rev().map(move |k| e - 60 * k)).collect()
+}
+
+/// 1-minute candles from the swaps: the last swap at or before each minute's end (NaN before the
+/// first swap), the high and low swap ticks and the fees in the minute.
+fn minute_frame(m: &Market) -> Frame {
+    let ends = minute_ends(m);
+    let n = ends.len();
+    let mut close = vec![f64::NAN; n];
+    let (mut hi, mut lo, mut fee) = (vec![f64::NAN; n], vec![f64::NAN; n], vec![0.0; n]);
+    if !m.ts.is_empty() {
+        let last: Vec<Option<usize>> = ends.iter().map(|e| m.ts.partition_point(|t| t <= e).checked_sub(1)).collect();
+        let mut prev: Option<usize> = None;
+        for (k, l) in last.iter().enumerate() {
+            let Some(i) = *l else { continue };
+            close[k] = m.tick[i] as f64;
+            let from = prev.map(|p| p + 1).unwrap_or(i);
+            let (mut h, mut lw, mut f) = (m.tick[i], m.tick[i], 0.0);
+            for s in from..=i {
+                h = h.max(m.tick[s]);
+                lw = lw.min(m.tick[s]);
+                f += m.fee[s];
+            }
+            if prev.is_some() && from > i {
+                f = 0.0; // no swap in this minute: the close carries, no fees
+            }
+            hi[k] = h as f64;
+            lo[k] = lw as f64;
+            fee[k] = f;
+            prev = Some(i);
+        }
+    }
+    // 5-minute inputs: the bar that closed at or before the minute's end (the bar ending with it)
+    let fine: Vec<Option<usize>> = ends.iter().map(|e| m.bar_end.partition_point(|b| b <= e).checked_sub(1)).collect();
+    let per = (m.bar_s / 60).max(1) as usize;
+    let pos = (0..m.bar_end.len()).map(|j| Some(per * j + per - 1)).collect();
+    Frame { close, hi, lo, fee, bph: 60.0, idx: None, fine: Some(fine), pos }
+}
+
+fn group<F: Fn(&[f64]) -> f64>(v: &[f64], idx: &[usize], f: F) -> Vec<f64> {
+    let mut start = 0;
+    idx.iter().map(|&j| {
+        let r = f(&v[start..=j]);
+        start = j + 1;
+        r
+    }).collect()
+}
+
+fn frame(m: &Market, close: &[f64], hi: &[f64], lo: &[f64], tf_s: i64) -> Frame {
+    let n = close.len();
+    if tf_s < m.bar_s {
+        return minute_frame(m);
+    }
+    if tf_s == m.bar_s {
+        return Frame { close: close.to_vec(), hi: hi.to_vec(), lo: lo.to_vec(), fee: m.bar_fee.clone(), bph: 3600.0 / m.bar_s as f64, idx: None, fine: None, pos: (0..n).map(Some).collect() };
+    }
+    let idx: Vec<usize> = (0..n).filter(|j| m.bar_end[*j] % tf_s == 0).collect();
+    let mut pos = vec![None; n];
+    let mut k: Option<usize> = None;
+    let mut next = 0;
+    for (j, p) in pos.iter_mut().enumerate() {
+        while next < idx.len() && idx[next] <= j {
+            k = Some(next);
+            next += 1;
+        }
+        *p = k;
+    }
+    Frame {
+        close: idx.iter().map(|j| close[*j]).collect(),
+        hi: group(hi, &idx, |w| w.iter().copied().fold(f64::NEG_INFINITY, f64::max)),
+        lo: group(lo, &idx, |w| w.iter().copied().fold(f64::INFINITY, f64::min)),
+        fee: group(&m.bar_fee, &idx, |w| w.iter().sum()),
+        bph: 3600.0 / tf_s as f64,
+        idx: Some(idx),
+        fine: None,
+        pos,
+    }
+}
+
+impl Frame {
+    /// A 5-minute series at this frame's candle closes.
+    fn sample(&self, v: Vec<f64>) -> Vec<f64> {
+        if let Some(f) = &self.fine {
+            return f.iter().map(|j| j.map(|j| v[j]).unwrap_or(f64::NAN)).collect();
+        }
+        match &self.idx {
+            None => v,
+            Some(ix) => ix.iter().map(|j| v[*j]).collect(),
+        }
+    }
+    /// A series on this frame's candles, back on the 5-minute bars (each candle's value from its close on).
+    fn expand(&self, v: Vec<f64>) -> Vec<f64> {
+        if self.idx.is_none() && self.fine.is_none() {
+            return v;
+        }
+        self.pos.iter().map(|k| k.map(|k| v[k]).unwrap_or(f64::NAN)).collect()
+    }
+}
+
+/// Node outputs at every 5-minute bar of `m`, without other tokens' prices (token_price is NaN).
+#[cfg(test)]
 pub fn evaluate(g: &Graph, m: &Market) -> Eval {
-    let n = m.bar_tick.len();
-    let close: Vec<f64> = m.bar_tick.iter().map(|t| *t as f64).collect();
-    let hi: Vec<f64> = m.bar_hi.iter().map(|t| *t as f64).collect();
-    let lo: Vec<f64> = m.bar_lo.iter().map(|t| *t as f64).collect();
+    evaluate_ext(g, m, &HashMap::new())
+}
+
+/// Node outputs at every 5-minute bar of `m`, with the watched tokens' prices.
+pub fn evaluate_ext(g: &Graph, m: &Market, ext: &Externals) -> Eval {
+    let nb = m.bar_tick.len();
+    let close0: Vec<f64> = m.bar_tick.iter().map(|t| *t as f64).collect();
+    let hi0: Vec<f64> = m.bar_hi.iter().map(|t| *t as f64).collect();
+    let lo0: Vec<f64> = m.bar_lo.iter().map(|t| *t as f64).collect();
+    let mut frames: HashMap<i64, Frame> = HashMap::new();
     let mut s: HashMap<(usize, String), Vec<f64>> = HashMap::new();
+    // 1-minute outputs on their own minutes, for 1-minute nodes that read them
+    let mut fine_s: HashMap<(usize, String), Vec<f64>> = HashMap::new();
     for (i, node) in g.nodes.iter().enumerate() {
         if g.stateful.contains(&i) || node.inputs.is_empty() && STATEFUL.contains(&node.kind) {
             continue;
         }
-        let inp = |port: &str| -> Vec<f64> { node.inputs.get(port).and_then(|(src, out)| s.get(&(*src, out.clone())).cloned()).unwrap_or_else(|| vec![f64::NAN; n]) };
+        let fr = frames.entry(node.tf_s).or_insert_with(|| frame(m, &close0, &hi0, &lo0, node.tf_s));
+        let n = fr.close.len();
+        let (close, hi, lo) = (&fr.close, &fr.hi, &fr.lo);
+        let bph = fr.bph;
+        let bars = |hours: f64| ((hours * bph).round() as usize).max(1);
+        let inp = |port: &str| -> Vec<f64> {
+            if fr.fine.is_some() {
+                if let Some(v) = node.inputs.get(port).and_then(|(src, out)| fine_s.get(&(*src, out.clone()))) {
+                    return v.clone();
+                }
+            }
+            fr.sample(node.inputs.get(port).and_then(|(src, out)| s.get(&(*src, out.clone())).cloned()).unwrap_or_else(|| vec![f64::NAN; nb]))
+        };
         let hours = node.p.get("hours").copied().unwrap_or(24.0);
         let k = node.p.get("k").copied().unwrap_or(0.0);
         let val = node.p.get("value").copied().unwrap_or(0.0);
@@ -352,8 +673,10 @@ pub fn evaluate(g: &Graph, m: &Market) -> Eval {
                 put("high", hi.clone());
                 put("low", lo.clone());
             }
-            "fees" => put("out", m.bar_fee.clone()),
+            "fees" => put("out", fr.fee.clone()),
             "const" => put("value", vec![val; n]),
+            // the ladder's centre: the median price over its lookback (what the wanted range is drawn around)
+            "ladder" => put("mid", median(close, bars(hours))),
             "sma" => put("out", ta::sma(&inp("in"), bars(hours))),
             "ema" => put("out", ta::ema(&inp("in"), bars(hours))),
             "median" => put("out", median(&inp("in"), bars(hours))),
@@ -378,7 +701,7 @@ pub fn evaluate(g: &Graph, m: &Market) -> Eval {
                 put("lower", ta::lag(&ta::extreme(&lo, bars(hours), false), 1));
             }
             "rsi" => put("out", ta::rsi(&inp("in"), bars(hours))),
-            "lag" => put("out", ta::lag(&inp("in"), (hours * BARS_PER_HOUR).round() as usize)),
+            "lag" => put("out", ta::lag(&inp("in"), (hours * bph).round() as usize)),
             "change" => {
                 let x = inp("in");
                 let l = ta::lag(&x, bars(hours));
@@ -413,7 +736,7 @@ pub fn evaluate(g: &Graph, m: &Market) -> Eval {
             "trix" => put("out", ta::trix(&inp("in"), bars(hours))),
             "psar" => put("out", ta::psar(&close, &hi, &lo, par("af"), par("step"), par("max_af"))),
             "ichimoku" => {
-                let shift = (par("shift") * BARS_PER_HOUR).round() as usize;
+                let shift = (par("shift") * bph).round() as usize;
                 let (t, kj, sa, sb) = ta::ichimoku(&hi, &lo, bars(par("tenkan")), bars(par("kijun")), bars(par("span_b")), shift);
                 put("tenkan", t);
                 put("kijun", kj);
@@ -435,6 +758,50 @@ pub fn evaluate(g: &Graph, m: &Market) -> Eval {
             }
             "trend" => put("out", ta::trend(&close, &hi, &lo, bars(par("unit_hours")))),
             "momentum" => put("out", ta::momentum(&close, &hi, &lo, bars(hours), bars(par("window")), bars(par("smooth")))),
+            "breakout" => {
+                let (side, hot) = breakout(&close, bars(hours), bars(par("hot_hours")));
+                put("side", side);
+                put("hot", hot);
+            }
+            "volatility" => {
+                // the spread of hourly moves (or of each candle's, when longer), in ticks (1 tick = 0.01%), scaled to a day
+                let step = bars(1.0);
+                let step_h = step as f64 / bph;
+                let r: Vec<f64> = (0..n).map(|j| if j >= step { close[j] - close[j - step] } else { f64::NAN }).collect();
+                put("out", ta::stdev(&r, bars(hours)).iter().map(|s| s * (24.0 / step_h).sqrt()).collect());
+            }
+            // from the swaps themselves, then taken at the candle closes (its hourly LVR needs bars)
+            "fee_vs_arb" => put("out", fr.sample(fee_vs_arb(m, ((hours * 3600.0 / m.bar_s as f64).round() as usize).max(1)))),
+            "token_price" => match ext.get(&i) {
+                // 1-minute candles: loaded on the minutes already
+                Some(x) if fr.fine.is_some() && x.close.len() == n => {
+                    put("stale", x.close.iter().map(|v| b(!v.is_finite())).collect());
+                    put("high", x.hi.clone());
+                    put("low", x.lo.clone());
+                    put("tick", x.close.clone());
+                }
+                Some(x) if fr.fine.is_none() && x.close.len() == nb => {
+                    let c = fr.sample(x.close.clone());
+                    put("stale", c.iter().map(|v| b(!v.is_finite())).collect());
+                    match &fr.idx {
+                        None => {
+                            put("high", x.hi.clone());
+                            put("low", x.lo.clone());
+                        }
+                        Some(ix) => {
+                            put("high", group(&x.hi, ix, |w| w.iter().copied().fold(f64::NEG_INFINITY, f64::max)));
+                            put("low", group(&x.lo, ix, |w| w.iter().copied().fold(f64::INFINITY, f64::min)));
+                        }
+                    }
+                    put("tick", c);
+                }
+                _ => {
+                    for port in ["tick", "high", "low"] {
+                        put(port, vec![f64::NAN; n]);
+                    }
+                    put("stale", vec![1.0; n]);
+                }
+            },
             "add" => put("out", zip(inp("a"), inp("b"), &|x, y| x + y)),
             "sub" => put("out", zip(inp("a"), inp("b"), &|x, y| x - y)),
             "mul" => put("out", zip(inp("a"), inp("b"), &|x, y| x * y)),
@@ -470,8 +837,12 @@ pub fn evaluate(g: &Graph, m: &Market) -> Eval {
             "not" => put("out", inp("in").iter().map(|x| b(!truth(*x))).collect()),
             _ => {}
         }
+        let fr = &frames[&node.tf_s];
         for (port, v) in outs {
-            s.insert((i, port), v);
+            if fr.fine.is_some() {
+                fine_s.insert((i, port.clone()), v.clone());
+            }
+            s.insert((i, port), fr.expand(v));
         }
     }
     Eval { series: s }
@@ -532,11 +903,19 @@ fn input(g: &Graph, ev: &Eval, sink: usize, port: &str, at: &At) -> Option<f64> 
     g.nodes[sink].inputs.get(port).map(|(s, o)| value(g, ev, *s, o, at))
 }
 
-/// The range the graph wants at `bar`, snapped to the spacing (None while indicators warm up).
+/// The range the graph wants at `bar`, snapped to the spacing (None while indicators warm up). A
+/// ladder wants the ticks it spreads over: its span around the median price of its lookback.
 pub fn wanted(g: &Graph, ev: &Eval, bar: usize, spacing: i64) -> Option<(i64, i64)> {
-    let r = g.sink("range")?;
     let at = At { bar, tick: 0, range: None, wanted: None };
-    let (lo, hi) = (input(g, ev, r, "lower", &at)?, input(g, ev, r, "upper", &at)?);
+    let (lo, hi) = match g.sink("range") {
+        Some(r) => (input(g, ev, r, "lower", &at)?, input(g, ev, r, "upper", &at)?),
+        None => {
+            let l = g.sink("ladder")?;
+            let mid = ev.series.get(&(l, "mid".to_string())).and_then(|v| v.get(bar).copied())?.trunc();
+            let span = g.param(l, "span").round();
+            (mid - span, mid + span + 1.0)
+        }
+    };
     if !lo.is_finite() || !hi.is_finite() {
         return None;
     }
@@ -548,6 +927,26 @@ pub fn wanted(g: &Graph, ev: &Eval, bar: usize, spacing: i64) -> Option<(i64, i6
         tu = tl + sp;
     }
     Some((tl.clamp(-887_200, 887_200 - sp), tu.clamp(-887_200 + sp, 887_200)))
+}
+
+/// The token an exit at `bar` waits in: the exit sink's `to` input (+1 token0, -1 token1) when
+/// connected and decided, else the strategy's exit_to.
+pub fn exit_to(g: &Graph, ev: &Eval, bar: usize, tick: i64, range: Option<(i64, i64)>) -> ExitTo {
+    let at = At { bar, tick, range, wanted: None };
+    match g.sink("exit").and_then(|x| input(g, ev, x, "to", &at)) {
+        Some(v) if v > 0.5 => ExitTo::Token0,
+        Some(v) if v < -0.5 => ExitTo::Token1,
+        _ => g.exit_to,
+    }
+}
+
+/// How an exit's token is kept in the state: 1 token0, -1 token1, 0 as it was.
+pub fn side_code(to: ExitTo) -> i8 {
+    match to {
+        ExitTo::Token0 => 1,
+        ExitTo::Token1 => -1,
+        ExitTo::Keep => 0,
+    }
 }
 
 fn mins(s: i64) -> String {
@@ -565,6 +964,13 @@ pub fn decide(g: &Graph, ev: &Eval, st: &mut State, now: i64, bar: usize, tick: 
     }
     if let Some(x) = g.sink("exit") {
         let when = input(g, ev, x, "when", &at).map(truth).unwrap_or(false);
+        if when && st.exited {
+            // out and waiting in one token, and the move turned: wait in the other one
+            let to = exit_to(g, ev, bar, tick, range);
+            if to != ExitTo::Keep && side_code(to) != st.exit_side {
+                return Decision::Exit(format!("the move turned: waiting in token{} now", if to == ExitTo::Token0 { 0 } else { 1 }));
+            }
+        }
         if when && !st.exited {
             let since = *st.exit_since.get_or_insert(now);
             let delay = (g.param(x, "delay_min") * 60.0) as i64;
@@ -596,8 +1002,21 @@ pub fn decide(g: &Graph, ev: &Eval, st: &mut State, now: i64, bar: usize, tick: 
         return Decision::Move { tl: wl, tu: wu, reason: "no position yet: opening the wanted range".into() };
     };
     let reb = g.sink("rebalance");
+    let ladder = g.sink("ladder");
+    if let Some(l) = ladder {
+        // a ladder re-solves on its schedule; the caller moves only when the solve differs enough
+        let every = (g.param(l, "every_hours") * 3600.0) as i64;
+        if now - st.last_move >= every {
+            return Decision::Move { tl: wl, tu: wu, reason: format!("ladder re-solve (every {})", mins(every)) };
+        }
+    }
     let trigger = match reb.and_then(|r| input(g, ev, r, "when", &at)) {
         Some(v) => truth(v),
+        // a ladder without a rebalance condition waits for its schedule
+        None if ladder.is_some() => {
+            st.outside_since = None;
+            return Decision::Keep(format!("ladder: next re-solve in {}", mins((g.param(ladder.unwrap(), "every_hours") * 3600.0) as i64 - (now - st.last_move))));
+        }
         None => !(tl <= tick && tick < tu),
     };
     if !trigger {
@@ -612,6 +1031,9 @@ pub fn decide(g: &Graph, ev: &Eval, st: &mut State, now: i64, bar: usize, tick: 
     if st.last_move > 0 && now - st.last_move < cool {
         return Decision::Wait(format!("cooldown: next move allowed in {}", mins(cool - (now - st.last_move))));
     }
+    if ladder.is_some() {
+        return Decision::Move { tl: wl, tu: wu, reason: "rebalance condition true: re-solving the ladder".into() };
+    }
     if (wl, wu) == (tl, tu) {
         return Decision::Keep("the wanted range equals the current one".into());
     }
@@ -619,16 +1041,46 @@ pub fn decide(g: &Graph, ev: &Eval, st: &mut State, now: i64, bar: usize, tick: 
 }
 
 /// Chart lines: every price-like output, sampled at `bars`, plus the wanted range.
+/// Which price each node's output is in, as bits: 1 the pool's own (its ticks: decimals and
+/// orientation of the pool), 2 a watched token's USD price (`token_price`, ticks of the USD price),
+/// 0 not a price at all (a width, a volatility, a flag). The two prices are different scales: a
+/// chart can only draw a line against the one it is in, and a width not at all.
+fn frames(g: &Graph) -> Vec<u8> {
+    let mut f = vec![0u8; g.nodes.len()];
+    for (i, n) in g.nodes.iter().enumerate() {
+        let src = |port: &str| -> u8 {
+            n.inputs.get(port).map(|(j, out)| if g.nodes[*j].kind == "token_price" && out == "stale" { 0 } else { f[*j] }).unwrap_or(0)
+        };
+        f[i] = match n.kind {
+            "token_price" => 2,
+            "price" | "high_low" => 1,
+            // a price ± a width is a price; the width says nothing about which
+            "around" => src("center"),
+            // a price less a price is a distance, not a price
+            "sub" if src("a") != 0 && src("b") != 0 => 0,
+            k if PRICE_LIKE.contains(&k) => n.inputs.keys().map(|p| src(p)).fold(0, |a, b| a | b),
+            _ => 0,
+        };
+    }
+    f
+}
+
 pub fn overlays(g: &Graph, ev: &Eval, idx: &[usize], spacing: i64) -> Value {
     let mut out = vec![];
+    let fr = frames(g);
     for (i, n) in g.nodes.iter().enumerate() {
-        if g.stateful.contains(&i) || !PRICE_LIKE.contains(&n.kind) || n.kind == "price" {
-            continue;
+        if g.stateful.contains(&i) || !PRICE_LIKE.contains(&n.kind) || n.kind == "price" || fr[i] == 0 {
+            continue; // not a price (a width, a flag): nothing to draw against the price
         }
         for port in spec(n.kind).map(|s| s.2).unwrap_or(&[]) {
             if let Some(v) = ev.series.get(&(i, port.to_string())) {
                 let name = format!("{}{}", if n.label.is_empty() { format!("{} {}", n.kind, n.id) } else { n.label.clone() }, if spec(n.kind).unwrap().2.len() > 1 { format!(" {port}") } else { String::new() });
-                out.push(json!({"name": name, "node": n.id, "port": port, "v": idx.iter().map(|b| v.get(*b).copied().filter(|x| x.is_finite()).map(|x| (x * 10.0).round() / 10.0)).collect::<Vec<_>>()}));
+                let frame = match fr[i] {
+                    2 => "usd",
+                    3 => "mixed",
+                    _ => "pool",
+                };
+                out.push(json!({"name": name, "node": n.id, "port": port, "frame": frame, "v": idx.iter().map(|b| v.get(*b).copied().filter(|x| x.is_finite()).map(|x| (x * 10.0).round() / 10.0)).collect::<Vec<_>>()}));
             }
         }
     }
@@ -662,7 +1114,7 @@ mod tests {
         let fee = vec![1.0; n];
         let (bar_hi, bar_lo, bar_fee) = crate::data::bar_ranges(ticks, &fee, &bar_idx);
         Market { ts, tick: ticks.to_vec(), sp: vec![1.0; n], fee, l_others: vec![1.0; n], l_active: vec![1.0; n], bar_end, bar_idx, bar_tick: ticks.to_vec(), bar_hi, bar_lo, bar_fee,
-                 decimals: 6, px_scale: 1.0, liq_scale: 1.0 }
+                 decimals: 6, px_scale: 1.0, liq_scale: 1.0, num1: true, bar_s: 300 }
     }
 
     fn graph(v: Value) -> Result<Graph, String> {
@@ -676,6 +1128,62 @@ mod tests {
             {"id": "r", "kind": "range", "in": {"lower": ["bb", "lower"], "upper": ["bb", "upper"]}},
             {"id": "m", "kind": "rebalance", "p": {"delay_min": 0, "cooldown_min": 0}}
         ]})
+    }
+
+    #[test]
+    fn a_ladder_block_re_solves_on_its_schedule_and_on_its_trigger() {
+        let lad = |extra: Vec<Value>| -> Result<Graph, String> {
+            let mut nodes = vec![json!({"id": "lad", "kind": "ladder", "p": {"hours": 1, "span": 3, "every_hours": 6, "turnover": 0.4}})];
+            nodes.extend(extra);
+            graph(json!({"type": "graph", "nodes": nodes}))
+        };
+        let g = lad(vec![]).unwrap();
+        let p = g.ladder().unwrap();
+        assert_eq!((p.lookback, p.span, p.every), (3600, 3, 72), "the ladder's own units: seconds, ticks, 5-minute bars");
+        let m = market(&[100; 300]);
+        let ev = evaluate(&g, &m);
+        let b = 299;
+        assert_eq!(wanted(&g, &ev, b, 1), Some((97, 104)), "the span around the median price");
+        let now = 10_000_000;
+        let mut st = State::default();
+        assert!(matches!(decide(&g, &ev, &mut st, now, b, 100, None, 1), Decision::Move { .. }), "no position: open");
+        st.moved(now);
+        // a plain ladder waits for its schedule, even with the price outside its ticks
+        assert!(matches!(decide(&g, &ev, &mut st, now + 3600, b, 120, Some((97, 104)), 1), Decision::Keep(_)));
+        assert!(matches!(decide(&g, &ev, &mut st, now + 6 * 3600, b, 120, Some((97, 104)), 1), Decision::Move { .. }));
+        // with a trigger wired to Rebalance it also re-solves when that holds
+        let g2 = lad(vec![json!({"id": "oor", "kind": "out_of_range"}),
+                          json!({"id": "m", "kind": "rebalance", "p": {"delay_min": 0, "cooldown_min": 0}, "in": {"when": ["oor", "out"]}})]).unwrap();
+        let ev2 = evaluate(&g2, &m);
+        let mut st = State::default();
+        st.moved(now);
+        assert!(matches!(decide(&g2, &ev2, &mut st, now + 3600, b, 120, Some((97, 104)), 1), Decision::Move { .. }));
+        assert!(matches!(decide(&g2, &ev2, &mut st, now + 3600, b, 100, Some((97, 104)), 1), Decision::Keep(_)));
+        // one output to place liquidity: a range or a ladder, not both
+        let both = lad(vec![json!({"id": "p", "kind": "price"}), json!({"id": "r", "kind": "range", "in": {"lower": ["p", "tick"], "upper": ["p", "tick"]}})]);
+        assert!(both.is_err());
+    }
+
+    #[test]
+    fn overlay_lines_say_which_price_they_are_in() {
+        let g = graph(json!({"type": "graph", "nodes": [
+            {"id": "p", "kind": "price"},
+            {"id": "s", "kind": "sma", "p": {"hours": 1}, "in": {"in": ["p", "tick"]}},
+            {"id": "eth", "kind": "token_price", "token": "0x4200000000000000000000000000000000000006", "chain_id": 8453},
+            {"id": "ehi", "kind": "highest", "p": {"hours": 1}, "in": {"in": ["eth", "tick"]}},
+            {"id": "w", "kind": "const", "p": {"value": 20}},
+            {"id": "eo", "kind": "offset", "p": {"value": 5}, "in": {"in": ["ehi", "out"]}},
+            {"id": "mix", "kind": "max", "in": {"a": ["s", "out"], "b": ["eth", "tick"]}},
+            {"id": "ar", "kind": "around", "in": {"center": ["s", "out"], "width": ["w", "value"]}},
+            {"id": "r", "kind": "range", "in": {"lower": ["ar", "lower"], "upper": ["ar", "upper"]}},
+            {"id": "m", "kind": "rebalance", "p": {"delay_min": 0, "cooldown_min": 0}}
+        ]})).unwrap();
+        let f = frames(&g);
+        let at = |id: &str| f[g.nodes.iter().position(|n| n.id == id).unwrap()];
+        assert_eq!((at("s"), at("ar")), (1, 1), "the pool's price, also through a constant width");
+        assert_eq!((at("ehi"), at("eo")), (2, 2), "the watched token's USD price");
+        assert_eq!(at("mix"), 3, "both: no one scale to draw it on");
+        assert_eq!(at("w"), 0, "a constant width is not a price");
     }
 
     #[test]
@@ -710,7 +1218,7 @@ mod tests {
     #[test]
     fn every_new_kind_parses_and_long_chains_are_refused() {
         for (kind, ins, _, _) in KINDS.iter() {
-            if ["range", "rebalance", "exit", "hold"].contains(kind) {
+            if ["range", "ladder", "rebalance", "exit", "hold", "token_price"].contains(kind) {
                 continue;
             }
             let mut inputs = serde_json::Map::new();
@@ -727,7 +1235,8 @@ mod tests {
             let g = g.unwrap();
             let xi = g.nodes.iter().position(|n| n.id == "x").unwrap();
             let ev = evaluate(&g, &m);
-            if !STATEFUL.contains(kind) {
+            // longer than this market, or needing hourly bars: tested on their own below
+            if !STATEFUL.contains(kind) && !["breakout", "fee_vs_arb"].contains(kind) {
                 let out = ev.series.iter().filter(|((i, _), _)| *i == xi).map(|(_, v)| v).collect::<Vec<_>>();
                 assert!(!out.is_empty() && out.iter().all(|v| v[2999].is_finite()), "{kind} produced no value");
             }
@@ -735,7 +1244,8 @@ mod tests {
         let long = graph(json!({"type": "graph", "nodes": [
             {"id": "p", "kind": "price"}, {"id": "a", "kind": "sma", "p": {"hours": 120}, "in": {"in": ["p", "tick"]}},
             {"id": "b", "kind": "sma", "p": {"hours": 120}, "in": {"in": ["a", "out"]}},
-            {"id": "r", "kind": "range", "in": {"lower": ["b", "out"], "upper": ["p", "tick"]}}]}));
+            {"id": "c", "kind": "sma", "p": {"hours": 160}, "in": {"in": ["b", "out"]}},
+            {"id": "r", "kind": "range", "in": {"lower": ["c", "out"], "upper": ["p", "tick"]}}]}));
         assert!(long.unwrap_err().contains("hours of history"));
         let bad = graph(json!({"type": "graph", "nodes": [
             {"id": "p", "kind": "price"}, {"id": "o", "kind": "out_of_range"}, {"id": "e", "kind": "ema", "in": {"in": ["o", "out"]}},
@@ -795,6 +1305,162 @@ mod tests {
         st.exited();
         assert!(matches!(decide(&g, &ev, &mut st, 10, 3, -60, None, 1), Decision::Keep(_)));
         assert!(matches!(decide(&g, &ev, &mut st, 20, 4, 0, None, 1), Decision::Move { .. }));
+    }
+
+    #[test]
+    fn one_minute_strategies_decide_on_minute_bars() {
+        let g = graph(json!({"nodes": [{"id": "p", "kind": "price", "tf": 1}, {"id": "q", "kind": "price"},
+            {"id": "r", "kind": "range", "in": {"lower": ["q", "tick"], "upper": ["p", "tick"]}}]})).unwrap();
+        assert_eq!(g.bar_s(), 60, "a 1-minute block makes the strategy decide every minute");
+        let five = graph(json!({"nodes": [{"id": "q", "kind": "price", "tf": 60},
+            {"id": "r", "kind": "range", "in": {"lower": ["q", "tick"], "upper": ["q", "tick"]}}]})).unwrap();
+        assert_eq!(five.bar_s(), 300);
+        // 1-minute bars; every fifth one ends a 5-minute candle
+        let ticks: Vec<i64> = (0..20).collect();
+        let mut m = market(&ticks);
+        m.bar_s = 60;
+        m.bar_end = (1..=20).map(|k| 300 * 1000 + k * 60).collect();
+        let ev = evaluate(&g, &m);
+        let at = |id: &str, j: usize| ev.series[&(g.nodes.iter().position(|x| x.id == id).unwrap(), "tick".to_string())][j];
+        assert_eq!(at("p", 7), 7.0, "the 1-minute price is the bar's own");
+        assert!(at("q", 3).is_nan(), "no 5-minute candle closed yet");
+        assert_eq!(at("q", 4), 4.0);
+        assert_eq!(at("q", 8), 4.0, "the 5-minute candle holds until the next close");
+        assert_eq!(at("q", 9), 9.0);
+    }
+
+    #[test]
+    fn minute_candles_come_from_the_swaps() {
+        // one 5-minute bar ending at 1_000_300 with swaps inside it at 1_000_010 (tick 5), 1_000_070
+        // (tick 9), 1_000_080 (tick 7) and 1_000_250 (tick 3); a second bar with none
+        let mut m = market(&[0, 0]);
+        m.ts = vec![1_000_010, 1_000_070, 1_000_080, 1_000_250];
+        m.tick = vec![5, 9, 7, 3];
+        m.fee = vec![1.0, 2.0, 4.0, 8.0];
+        m.bar_end = vec![1_000_300, 1_000_600];
+        m.bar_tick = vec![3, 3];
+        let g = graph(json!({"nodes": [
+            {"id": "p", "kind": "price", "tf": 1},
+            {"id": "hl", "kind": "high_low", "tf": 1},
+            {"id": "f", "kind": "fees", "tf": 1},
+            {"id": "c", "kind": "change", "tf": 1, "p": {"hours": 0.1}, "in": {"in": ["p", "tick"]}},
+            {"id": "r", "kind": "range", "in": {"lower": ["p", "tick"], "upper": ["p", "tick"]}}]})).unwrap();
+        let fr = minute_frame(&m);
+        // minutes end at 1_000_060, 120, 180, 240, 300, then 360 … 600
+        assert_eq!(fr.close[..5].to_vec(), vec![5.0, 7.0, 7.0, 7.0, 3.0]);
+        assert_eq!(fr.hi[1], 9.0, "the minute's high");
+        assert_eq!(fr.lo[1], 7.0);
+        assert_eq!(fr.fee[..5].to_vec(), vec![1.0, 6.0, 0.0, 0.0, 8.0]);
+        assert_eq!(fr.close[9], 3.0, "no swap: the close carries");
+        let ev = evaluate(&g, &m);
+        let at = |id: &str, port: &str, j: usize| ev.series[&(g.nodes.iter().position(|x| x.id == id).unwrap(), port.to_string())][j];
+        // a decision reads the minute that ends with its bar
+        assert_eq!(at("p", "tick", 0), 3.0);
+        assert_eq!(at("f", "out", 0), 8.0, "fees of the bar's last minute");
+        assert_eq!(at("hl", "high", 0), 3.0);
+        // 0.1 hours = 6 one-minute candles back: from minute 3 (tick 7) to minute 9 (tick 3)
+        assert_eq!(at("c", "out", 1), -4.0);
+    }
+
+    #[test]
+    fn timeframes_use_closed_candles_only() {
+        // 5-minute bars ending on the hour every 12 bars; the price is the bar's index
+        let n = 12 * 10;
+        let ticks: Vec<i64> = (0..n as i64).collect();
+        let mut m = market(&ticks);
+        m.bar_end = (1..=n as i64).map(|k| 3600 * 1000 + k * 300).collect();
+        m.bar_hi = ticks.iter().map(|t| t + 3).collect();
+        let g = graph(json!({"nodes": [
+            {"id": "p", "kind": "price", "tf": 60},
+            {"id": "s", "kind": "sma", "tf": 60, "p": {"hours": 2}, "in": {"in": ["p", "tick"]}},
+            {"id": "hl", "kind": "high_low", "tf": 60},
+            {"id": "r", "kind": "range", "in": {"lower": ["s", "out"], "upper": ["p", "tick"]}}]})).unwrap();
+        let ev = evaluate(&g, &m);
+        let at = |id: &str, port: &str, j: usize| ev.series[&(g.nodes.iter().position(|x| x.id == id).unwrap(), port.to_string())][j];
+        // the first hourly candle closes at bar 11 (bar_end on the hour)
+        assert!(at("p", "tick", 10).is_nan(), "no candle has closed yet");
+        assert_eq!(at("p", "tick", 11), 11.0);
+        assert_eq!(at("p", "tick", 22), 11.0, "the next candle is still forming");
+        assert_eq!(at("p", "tick", 23), 23.0);
+        assert!(at("s", "out", 23).is_finite() && (at("s", "out", 23) - 17.0).abs() < 1e-9, "average of the two hourly closes 11 and 23");
+        assert_eq!(at("hl", "high", 23), 26.0, "the candle's high over its twelve bars");
+        assert_eq!(at("hl", "low", 23), 12.0);
+        // a minute value never changes what an earlier bar saw
+        let mut m2 = market(&ticks[..60]);
+        m2.bar_end = m.bar_end[..60].to_vec();
+        m2.bar_hi = m.bar_hi[..60].to_vec();
+        let ev2 = evaluate(&g, &m2);
+        let si = g.nodes.iter().position(|x| x.id == "s").unwrap();
+        for j in 0..60 {
+            let (a, b) = (ev.series[&(si, "out".to_string())][j], ev2.series[&(si, "out".to_string())][j]);
+            assert!(a == b || (a.is_nan() && b.is_nan()), "bar {j}");
+        }
+        assert!(graph(json!({"nodes": [{"id": "p", "kind": "price", "tf": 7},
+            {"id": "r", "kind": "range", "in": {"lower": ["p", "tick"], "upper": ["p", "tick"]}}]})).unwrap_err().contains("timeframe"));
+        assert!(graph(json!({"nodes": [{"id": "p", "kind": "price"}, {"id": "o", "kind": "out_of_range", "tf": 60},
+            {"id": "r", "kind": "range", "in": {"lower": ["p", "tick"], "upper": ["p", "tick"]}}]})).is_err());
+    }
+
+    #[test]
+    fn breakout_side_and_hot_window() {
+        // flat, a rise to a new high, a pause, then a fall through the low
+        let mut c = vec![0.0; 30];
+        c.extend((1..=10).map(|k| k as f64 * 5.0));
+        c.extend(vec![50.0; 20]);
+        c.extend((1..=20).map(|k| 50.0 - k as f64 * 6.0));
+        let (side, hot) = breakout(&c, 10, 5);
+        assert!(side[5].is_nan(), "warming up");
+        assert_eq!((side[25], hot[25]), (0.0, 0.0));
+        assert_eq!((side[31], hot[31]), (1.0, 1.0), "a new 10-bar high");
+        assert_eq!((side[39], hot[39]), (1.0, 1.0));
+        assert_eq!((side[45], hot[45]), (1.0, 0.0), "no new high for 6 bars: still up, the move is over");
+        let flip = (60..c.len()).find(|j| side[*j] == -1.0).unwrap();
+        assert_eq!(hot[flip], 1.0, "a new low turns the side and starts a move");
+    }
+
+    #[test]
+    fn fee_vs_arb_is_fees_over_hourly_lvr() {
+        // 12 bars an hour; the price alternates by 10 ticks each hour, each bar pays fee 1 on liquidity 1
+        let n = 12 * 48;
+        let ticks: Vec<i64> = (0..n).map(|i| if (i / 12) % 2 == 0 { 0 } else { 10 }).collect();
+        let mut m = market(&ticks);
+        m.bar_end = (0..n as i64).map(|k| 3600 * 1000 + (k + 1) * 300).collect();
+        let v = fee_vs_arb(&m, 12 * 24);
+        let r = 10.0 * 1.0001f64.ln();
+        let lvr_h = r * r * 1.0 / 4.0; // sqrt(P) ~ 1 near tick 0..10
+        let want = (12.0 * 24.0) / (24.0 * lvr_h);
+        let got = v[n - 1];
+        assert!((got / want - 1.0).abs() < 0.01, "{got} vs {want}");
+        assert!(v[12 * 24 - 2].is_nan());
+    }
+
+    #[test]
+    fn exit_waits_in_the_side_and_switches_when_the_move_turns() {
+        let v = json!({"nodes": [
+            {"id": "p", "kind": "price"},
+            {"id": "w", "kind": "const", "p": {"value": 10}},
+            {"id": "ar", "kind": "around", "in": {"center": ["p", "tick"], "width": ["w", "value"]}},
+            {"id": "r", "kind": "range", "in": {"lower": ["ar", "lower"], "upper": ["ar", "upper"]}},
+            {"id": "lim", "kind": "const", "p": {"value": 50}},
+            {"id": "far", "kind": "distance_gt", "p": {"value": 50}, "in": {"a": ["p", "tick"], "b": ["w", "value"]}},
+            {"id": "s", "kind": "sub", "in": {"a": ["p", "tick"], "b": ["w", "value"]}},
+            {"id": "x", "kind": "exit", "in": {"when": ["far", "out"], "to": ["s", "out"]}}
+        ]});
+        let g = graph(v).unwrap();
+        let ticks = vec![0, 100, 100, -100, -100, 0];
+        let m = market(&ticks);
+        let ev = evaluate(&g, &m);
+        let mut st = State::default();
+        assert!(matches!(decide(&g, &ev, &mut st, 0, 1, 100, Some((-5, 5)), 1), Decision::Exit(_)));
+        let to = exit_to(&g, &ev, 1, 100, Some((-5, 5)));
+        assert_eq!(to, ExitTo::Token0);
+        st.exited_to(to);
+        assert!(matches!(decide(&g, &ev, &mut st, 10, 2, 100, None, 1), Decision::Keep(_)));
+        assert!(matches!(decide(&g, &ev, &mut st, 20, 3, -100, None, 1), Decision::Exit(_)), "the side turned");
+        assert_eq!(exit_to(&g, &ev, 3, -100, None), ExitTo::Token1);
+        st.exited_to(ExitTo::Token1);
+        assert!(matches!(decide(&g, &ev, &mut st, 30, 4, -100, None, 1), Decision::Keep(_)));
+        assert!(matches!(decide(&g, &ev, &mut st, 40, 5, 0, None, 1), Decision::Move { .. }), "back in");
     }
 
     #[test]

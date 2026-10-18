@@ -299,6 +299,15 @@ pub struct Market {
     pub decimals: i32,
     pub px_scale: f64,
     pub liq_scale: f64,
+    /// token1 is the numeraire (fees are counted in it)
+    pub num1: bool,
+    /// bar length in seconds: BAR_S, or 60 for a node strategy that decides every minute
+    pub bar_s: i64,
+}
+
+/// A week of this market's bars.
+pub fn week_bars(m: &Market) -> usize {
+    (7 * 86400 / m.bar_s.max(1)) as usize
 }
 
 /// numpy's round-half-to-even.
@@ -372,6 +381,11 @@ fn f(s: &str) -> f64 {
 
 /// Build the market from events (already filtered to the window, plus the wallet's full history).
 pub fn build_market(events: Vec<Ev>, wallet: &str, apr: &HashMap<i64, (f64, f64)>, d0: i32, d1: i32, numeraire: i64) -> Result<Market, String> {
+    build_market_bars(events, wallet, apr, d0, d1, numeraire, BAR_S)
+}
+
+/// build_market() on bars of `bar_s` seconds.
+pub fn build_market_bars(events: Vec<Ev>, wallet: &str, apr: &HashMap<i64, (f64, f64)>, d0: i32, d1: i32, numeraire: i64, bar_s: i64) -> Result<Market, String> {
     let mut seen = HashSet::new();
     let mut ev: Vec<Ev> = events.into_iter().filter(|e| seen.insert((e.block, e.log_index))).collect();
     ev.sort_by_key(|e| (e.block, e.log_index));
@@ -431,14 +445,14 @@ pub fn build_market(events: Vec<Ev>, wallet: &str, apr: &HashMap<i64, (f64, f64)
         l_others.push((f(&e.liquidity) - l_wallet[k]).max(0.0) / liq_scale);
         l_active.push(f(&e.liquidity).max(0.0) / liq_scale);
     }
-    let bs = BAR_S;
+    let bs = bar_s;
     let t0 = (ts[0].div_euclid(bs) + 1) * bs;
     let last = *ts.last().unwrap();
     let bar_end: Vec<i64> = (0..).map(|i| t0 + i * bs).take_while(|t| *t < last).collect();
     let bar_idx: Vec<usize> = bar_end.iter().map(|b| ts.partition_point(|t| t <= b) - 1).collect();
     let bar_tick: Vec<i64> = bar_idx.iter().map(|i| tick[*i]).collect();
     let (bar_hi, bar_lo, bar_fee) = bar_ranges(&tick, &fee, &bar_idx);
-    Ok(Market { ts, tick, sp, fee, l_others, l_active, bar_end, bar_idx, bar_tick, bar_hi, bar_lo, bar_fee, decimals: d0, px_scale, liq_scale })
+    Ok(Market { ts, tick, sp, fee, l_others, l_active, bar_end, bar_idx, bar_tick, bar_hi, bar_lo, bar_fee, decimals: d0, px_scale, liq_scale, num1: numeraire == 1, bar_s })
 }
 
 /// Per bar: the high and low swap tick in (previous bar, this bar] (the close when none), and the fees.
@@ -465,6 +479,12 @@ pub fn bar_ranges(tick: &[i64], fee: &[f64], bar_idx: &[usize]) -> (Vec<i64>, Ve
 
 /// live_market(): the last `days` of swaps plus the wallet's full Mint/Burn history.
 pub fn live_market(cid: u64, pool: &str, wallet: &str, d0: i32, d1: i32, numeraire: i64, days: i64) -> Result<Market, String> {
+    live_market_bars(cid, pool, wallet, d0, d1, numeraire, days, BAR_S)
+}
+
+/// live_market() on bars of `bar_s` seconds (60 for a strategy that decides every minute).
+#[allow(clippy::too_many_arguments)]
+pub fn live_market_bars(cid: u64, pool: &str, wallet: &str, d0: i32, d1: i32, numeraire: i64, days: i64, bar_s: i64) -> Result<Market, String> {
     let now = crate::engine::now() as i64;
     let since = now - days * 86400;
     // swaps of the replay window; mints and burns as far back as the store goes (up to 31 days)
@@ -474,7 +494,7 @@ pub fn live_market(cid: u64, pool: &str, wallet: &str, d0: i32, d1: i32, numerai
     if ev.is_empty() {
         return Err(format!("no event data for pool {pool}; run the data bootstrap first"));
     }
-    build_market(ev, &wallet.to_lowercase(), &load_apr(cid, pool), d0, d1, numeraire)
+    build_market_bars(ev, &wallet.to_lowercase(), &load_apr(cid, pool), d0, d1, numeraire, bar_s)
 }
 
 /// (tl, tu) of the wallet's ranges from its Mint/Burn history.

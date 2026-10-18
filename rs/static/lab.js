@@ -144,6 +144,29 @@
   @media (max-width:700px){.sr{grid-template-columns:minmax(0,1fr) 80px}.sr .ex,.sr .ac{grid-column:1/-1}}
   .ed-tools{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
   .ne .ghost{position:fixed;z-index:50;pointer-events:none;padding:6px 10px;border-radius:8px;background:var(--card);border:1px solid var(--acc);font-size:12px}
+  /* dynamic optimization */
+  .ne .tb button.opt{color:var(--acc);font-weight:650}.ne .tb button.opt:disabled{color:var(--mute);opacity:.6;cursor:default}
+  .optm{position:fixed;inset:0;z-index:80;background:rgba(5,8,12,.62);display:flex;align-items:center;justify-content:center;padding:16px}
+  .optm .box{background:var(--card);border:1px solid var(--line2);border-radius:14px;width:min(920px,100%);max-height:88vh;display:flex;flex-direction:column;box-shadow:0 30px 80px -30px rgba(0,0,0,.8)}
+  .optm .hd{padding:14px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}
+  .optm .hd h3{margin:0;font-size:15px}.optm .hd .sp{flex:1}
+  .optm .bd{padding:12px 18px;overflow:auto}
+  .optm .ft{padding:12px 18px;border-top:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .optm .node{border:1px solid var(--line);border-radius:10px;margin-bottom:10px}
+  .optm .node .nh{padding:7px 10px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center;font-weight:650}
+  .optm .node .nh i{width:8px;height:8px;border-radius:2px}
+  .optm table{width:100%;border-collapse:collapse;font-size:12.5px}
+  .optm td,.optm th{padding:5px 8px;text-align:left;border-bottom:1px solid var(--line)}
+  .optm th{color:var(--mute);font-weight:600;font-size:11.5px}
+  .optm tr:last-child td{border-bottom:0}
+  .optm td input[type=number]{width:96px}
+  .optm .tfs{display:flex;gap:4px;flex-wrap:wrap}.optm .tfs label{display:flex;gap:3px;align-items:center;border:1px solid var(--line2);border-radius:7px;padding:2px 6px;font-size:11.5px}
+  .optm .bar{height:6px;border-radius:4px;background:var(--line);overflow:hidden;margin:8px 0}.optm .bar i{display:block;height:100%;background:var(--acc);transition:width .3s}
+  .optm .awin{position:relative;display:inline-block;width:120px;height:10px;border-radius:3px;background:var(--line);vertical-align:middle;overflow:hidden}.optm .awin i{position:absolute;top:0;bottom:0}.optm .awin i.f{background:color-mix(in srgb,var(--mute) 35%,transparent)}.optm .awin i.v{background:var(--info)}.optm .awin i.e{background:color-mix(in srgb,var(--warn) 55%,transparent)}.optm .awin i.e.ok{background:var(--ok)}.optm .awin i.e.no{background:var(--bad)}
+  .optm .res td.num{font-family:var(--mono);text-align:right}.optm .res th.num{text-align:right}
+  .optm .res tr.cur td{color:var(--fg2);background:var(--card2)}
+  .optm .vals{font-family:var(--mono);font-size:11.5px;color:var(--fg2)}
+  .optm .warn{color:var(--warn)}.optm .pos{color:var(--ok)}.optm .neg{color:var(--bad)}
   /* chart */
   .rc{position:relative;user-select:none;touch-action:none}
   .rc svg{width:100%;height:380px;display:block;overflow:visible}
@@ -214,7 +237,7 @@
   .lab-legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;color:var(--mute);margin-top:8px}
   .lab-legend span{display:inline-flex;align-items:center;gap:6px}.lab-legend i{width:14px;height:3px;border-radius:2px;display:inline-block}
   .lab-note{font-size:12px;color:var(--mute);margin:8px 0 0}
-  .rearm{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:10px;border:1px solid color-mix(in srgb,var(--warn) 45%,var(--line2));background:color-mix(in srgb,var(--warn) 8%,var(--card));margin-bottom:12px;font-size:13px}`;
+`;
   document.head.appendChild(css);
 
   const COL = {range: "var(--acc)", buffer: "var(--info)", cutoff: "var(--warn)", exit: "var(--bad)"};
@@ -273,6 +296,10 @@
     gaussian: ["Gaussian channel", "ind", "A centre line from four chained averages (close to a Gaussian filter) ± k deviations of the price around it."],
     trend: ["Trend score", "ind", "One number from −100 (down) to +100 (up): EMA 20 vs 50, MACD, ADX and RSI combined, every period counted in 'unit hours'. Above 10 leans up, below −10 down."],
     momentum: ["Momentum z-score", "ind", "How far the typical price is from its previous short average, compared with the last 'window' hours (a z-score), smoothed. Above 0.25 upward momentum, below −0.25 downward."],
+    token_price: ["Token price", "src", "Another token's price in dollars, in ticks (1 tick = 0.01%), from Solidly pools with at least $500 of active liquidity: against a stable, or through a paired token (BTC/WETH × WETH/USDC). Every such pool is used and the one that traded last sets the price; a pool that has not traded for 12 hours counts as stale and the value is empty until it trades. Pick the token on the block; the list shows which tokens can be watched and how much liquidity backs them. 'stale' is true while there is no reliable price: connect it to Hold or Exit (through an Or) to stand still or step out instead of trusting a missing price."],
+    breakout: ["Breakout", "ind", "The side of the last breakout over the period (+1 after a close above the previous highest close, −1 below the lowest, 0 before any) and 'hot': 1 while the last new extreme on that side came within 'hot hours' (the move is on). Feed 'hot' to an Exit and 'side' to its 'to' to wait a move out in the token that wins."],
+    volatility: ["Volatility (daily σ)", "ind", "How much the price moves in a day, in ticks: the standard deviation of hourly moves over the period, scaled to 24 hours. ±5σ makes a band wide enough for most days."],
+    fee_vs_arb: ["Fees vs arbitrage (F/LVR)", "ind", "The pool's fees over what arbitrage took from its liquidity, over the period. Above 1 the pool pays for the price moves; below 1 a range there loses to arbitrage on average."],
     zscore: ["Z-score", "ind", "How many standard deviations the input is from its average over the period. 0 while flat."],
     percentile: ["Percentile", "ind", "The q-th quantile of the input over the period (q 0.5 is the median, 0.9 the value 90% stay under)."],
     highest: ["Highest", "ind", "The highest value of the input over the period, this bar included."],
@@ -293,14 +320,16 @@
     out_of_range: ["Price out of range", "pos", "True while the price is outside the current position's range, widened by the buffers (negative buffers trigger inside)."],
     range_shift: ["Range shifted", "pos", "True when the wanted range's middle is further than the value from the current position's middle."],
     range: ["Range", "out", "The range to hold: its lower and upper edges, rounded out to the tick spacing. Required."],
+    ladder: ["Ladder", "out", "Instead of a Range: the app's ladder. Capital is spread over single ticks within the span of the median price over the period, weighted by where fees were paid and how much liquidity others hold there. It is re-solved every 'every' hours (and whenever Rebalance's condition holds, after its delay and cooldown) and moved only when at least 'turnover' of the value would move."],
     rebalance: ["Rebalance when", "out", "Moves to the wanted range when its condition is true (default: the price left the range), after the delay and not within the cooldown."],
-    exit: ["Exit when", "out", "Withdraws everything while its condition is true (after the delay). Deposits again when 're-enter' is true (default: when the exit condition is false)."],
+    exit: ["Exit when", "out", "Withdraws everything while its condition is true (after the delay). Deposits again when 're-enter' is true (default: when the exit condition is false). 'to' picks the token to wait in: above 0.5 all token0, below −0.5 all token1, else the strategy's 'Withdraw into'; when it changes sides while out, the wait switches token."],
     hold: ["Hold when", "out", "While true, nothing is done at all: a freeze, like the depeg guard."],
   };
+  const TFS = [[1, "1 min"], [5, "5 min"], [15, "15 min"], [30, "30 min"], [60, "1 hour"], [240, "4 hours"], [1440, "1 day"]];
   const BOOL = new Set(["gt", "lt", "cross_above", "cross_below", "between", "distance_gt", "and", "or", "not", "out_of_range", "range_shift"]);
   const PNAME = {hours: "hours", k: "k", value: "value", below: "below", above: "above", delay_min: "delay (min)", cooldown_min: "cooldown (min)",
     fast: "fast (h)", slow: "slow (h)", signal: "signal (h)", d_hours: "%D (h)", stoch_hours: "stoch (h)", af: "start step", step: "step", max_af: "max step",
-    tenkan: "conversion (h)", kijun: "base (h)", span_b: "span B (h)", shift: "shift (h)", unit_hours: "unit (h)", window: "window (h)", smooth: "smooth (h)", q: "q"};
+    hot_hours: "hot (h)", span: "span", every_hours: "every (h)", turnover: "turnover", tenkan: "conversion (h)", kijun: "base (h)", span_b: "span B (h)", shift: "shift (h)", unit_hours: "unit (h)", window: "window (h)", smooth: "smooth (h)", q: "q"};
   const kcat = k => (L.lib && L.lib.catalog || []).find(x => x.kind === k);
   const gcol = k => (GROUPS.find(g => g[0] === (K[k] || [])[1]) || [, , "var(--mute)"])[2];
 
@@ -315,7 +344,7 @@
           <div class="grow" data-help="lab-pool"><label class="f">Pool</label><div class="pp" id="labPool"></div></div>
           <div id="labOther" class="row hide" style="flex:2;min-width:320px;gap:8px"><select id="labChain" style="width:140px"></select>
             <input id="labAddr" placeholder="pool address 0x…" spellcheck="false" style="flex:1"><button class="sec" id="labGo">Load</button></div>
-          <div data-help="lab-period"><label class="f">Period</label><div class="seg" id="labDays">${[7, 14, 30, 60, 90, 180, 365].map(d => `<button data-d="${d}">${d}d</button>`).join("")}</div></div>
+          <div data-help="lab-period"><label class="f">Period</label><div class="seg" id="labDays">${[7, 14, 30, 60, 90, 180, 365, 730].map(d => `<button data-d="${d}" ${d === 730 ? `title="two years, or all the pool's history when it is younger"` : ""}>${d === 730 ? "2y" : d + "d"}</button>`).join("")}</div></div>
           <div class="mini" data-help="lab-capital"><label class="f">Capital (<span id="labNum">USD</span>)</label><input id="labCap" type="number" min="1" step="any"></div>
         </div>
       </div>
@@ -333,7 +362,6 @@
           <div class="rh"><h2>Backtest</h2></div>
           <div class="lab-status" id="labStatus"></div>
           <div class="mute small" id="labMeta" style="margin:2px 0 10px"></div>
-          <div id="labRearm"></div>
           <div id="labCmp"></div>
           <div class="pick" id="labPick" data-help="lab-compare" style="margin-top:4px"></div>
           <div class="eq"><svg id="labEq" viewBox="0 0 800 150" preserveAspectRatio="none"></svg></div>
@@ -375,7 +403,7 @@
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "o" && tab === "lab") { e.preventDefault(); openBrowser(); }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s" && tab === "lab" && L.cur) { e.preventDefault(); quickSave(); }
     });
-    $("labPick").onclick = e => { const b = e.target.closest("#labAddCmp"); if (b) addCompareMenu(b); };
+    $("labPick").onclick = e => { const b = e.target.closest("#labAddCmp"); if (b) refreshLib().then(() => addCompareMenu($("labAddCmp") || b)); };
     // removing a comparison takes its card away at once; the next backtest runs without it
     cardDrag();
     $("labCmp").onclick = e => {
@@ -522,11 +550,20 @@
         strategy: JSON.parse(JSON.stringify(cfg.strategy))});
     }
     if (!L.cur) loadItem("b:bollinger", true);
-    remember(); renderTop(); renderLib(); renderEd(); chartRange(); renderResults(); loadCustomState(); schedule(0);
+    remember(); renderTop(); renderLib(); renderEd(); chartRange(); renderResults(); schedule(0);
   }
   window.labOpen = (cid, pool) => { show("lab"); L.cur = null; select(cid, pool); };
 
   // ---------- library ----------
+  // Read the library again and redraw only when it changed: strategies saved, edited or added
+  // outside this page (another tab, config/strategies.json by hand) show up without a reload.
+  async function refreshLib() {
+    if (!L.lib) return;
+    let lib;
+    try { lib = await api("/api/strategies"); } catch (e) { return; }
+    if (JSON.stringify([lib.builtin, lib.mine]) === JSON.stringify([L.lib.builtin, L.lib.mine])) return;
+    await loadLib();
+  }
   async function loadLib() {
     try { L.lib = await api("/api/strategies"); } catch (e) { L.lib = {builtin: [], mine: [], catalog: []}; toast("strategy library: " + e.message, true); }
     renderLib(); renderPick();
@@ -541,13 +578,14 @@
   const allItems = () => L.lib ? [...L.lib.builtin, ...L.lib.mine] : [];
   const itemById = id => allItems().find(x => x.id === id);
   // ---------- strategy browser (Open…): every strategy with its APR over the chosen period ----------
-  const CATS = ["Mine", "Indicators", "Simple rules", "Ladder"];
+  // every built-in category, so none is left out of the browser; "Simple rules" for strategies saved before
+  const CATS = ["Mine", "Ladder", "Directional", "Indicators", "Simple rules"];
   function openBrowser() {
     if (!L.lib) return;
     $("labSb").classList.remove("hide");
     $("sbQ").value = ""; renderLib();
     setTimeout(() => $("sbQ").focus(), 0);
-    runApr();
+    refreshLib().then(runApr);
   }
   function closeBrowser() { $("labSb").classList.add("hide"); }
   const aprKey = () => JSON.stringify([L.chain, L.pool, L.days, L.capital, L.costs, allItems().map(x => [x.id, x.strategy])]);
@@ -642,7 +680,7 @@
   function setCur(item) {
     L.cur = {id: item.id, fromPool: item.fromPool || null, name: item.name, description: item.description || "", builtin: !!(item.id && item.id.startsWith("b:")),
       strategy: forPool(item.strategy)};
-    L.dirty = false; L.sel = null;
+    L.dirty = false; L.sel = null; L.selSet = new Set();
   }
   function loadItem(id, quiet) {
     const x = itemById(id);
@@ -652,7 +690,8 @@
   }
   function newStrategy(kind) {
     if (L.dirty && !confirm("Discard the changes to the strategy you are editing?")) return;
-    if (kind === "rules") setCur({id: null, name: "New rules", description: "", strategy: {type: "custom", width: 6 * sp(), placement: "center", skew: 0.5, buffer_lo: 0, buffer_hi: 0, delay_min: 0, cooldown_min: 60}});
+    if (kind === "ladder_nodes") setCur({id: null, name: "My ladder", description: "", strategy: {type: "graph", nodes: [
+      {id: "lad", kind: "ladder", unit: "spacings", x: 500, y: 60, p: {hours: 24, span: 3, every_hours: 6, turnover: 0.4}, in: {}}]}});
     else if (kind === "ladder") setCur({id: null, name: "My ladder", description: "", strategy: {type: "ladder"}});
     else newGraph();
     L.dirty = true;
@@ -720,7 +759,7 @@
     $("labOpen").onclick = openBrowser;
     $("labNewBtn").onclick = e => {
       const r = e.currentTarget.getBoundingClientRect();
-      openMenu(r.left, r.bottom + 6, `<div class="ttl">New strategy</div>${item("graph", "Node strategy", "<kbd>blocks</kbd>")}${item("rules", "Simple rules", "<kbd>one range</kbd>")}${item("ladder", "Ladder", "<kbd>the app's own</kbd>")}`,
+      openMenu(r.left, r.bottom + 6, `<div class="ttl">New strategy</div>${item("graph", "Node strategy", "<kbd>blocks</kbd>")}${item("ladder_nodes", "Ladder as blocks", "<kbd>ladder + blocks</kbd>")}${item("ladder", "Ladder", "<kbd>the app's own</kbd>")}`,
         m => { m.onclick = ev => { const a = ev.target.closest("[data-act]"); if (a) { closeMenu(); newStrategy(a.dataset.act); } }; });
     };
     if ($("labDel")) $("labDel").onclick = del;
@@ -762,7 +801,7 @@
       grp("exit", "Exit", COL.exit, {on: r.exit_lo != null || r.exit_hi != null},
         num(r, "exit_lo", "Withdraw below (tick)", {hint: absHint, ph: "none", help: "exitp"}) + num(r, "exit_hi", "Withdraw above (tick)", {hint: absHint, ph: "none", help: "exitp"}) +
         num(r, "exit_delay_min", "Exit delay (min)", {step: 1, min: 0, help: "exitdelay"}) + exitToSel(r.exit_to) +
-        `<div class="full" data-help="lab-reenter"><label class="sw"><input type="checkbox" data-r="reenter" ${r.reenter ? "checked" : ""}><span class="t"></span>Re-enter when the price is back between the exits</label></div>`) +
+        parkSel(r.park)) +
       grp("guard", "Depeg guard", "var(--c4)", {on: r.guard != null},
         num(r, "guard", "Freeze when this many ticks from the 7-day median", {step: 1, min: 1, ph: "off", full: true, help: "guard"})) + costsBox();
     box.oninput = box.onchange = onRules;
@@ -770,6 +809,12 @@
   function exitToSel(v) {
     return `<div data-help="lab-exitto"><label class="f">Withdraw into</label><select data-r="exit_to">${[["keep", "both tokens, as withdrawn"], ["token0", "all " + esc(L.sym[0] || "token0")], ["token1", "all " + esc(L.sym[1] || "token1")]]
       .map(([x, l]) => `<option value="${x}" ${(v || "keep") === x ? "selected" : ""}>${l}</option>`).join("")}</select></div>`;
+  }
+  function parkSel(v) {
+    // the live switch (Settings › Options) off: the backtest still counts parking, the worker will not park
+    const live = typeof S !== "undefined" && S.settings && S.settings.parking && S.settings.parking.enabled;
+    return `<div class="full" data-help="lab-park"><label class="sw"><input type="checkbox" data-r="park" ${v ? "checked" : ""}><span class="t"></span>Park the waiting token in its pegged pool (Settings › Parking whitelist)</label>
+      ${live ? "" : `<div class="small" style="color:var(--warn);margin:4px 0 0 46px">⚠ Parking is switched off in Settings › Options: backtests count it, but the worker will not park until it is on.</div>`}</div>`;
   }
   function costsBox() {
     return `<details class="grp" data-help="lab-costs"><summary class="mute small">Costs &amp; haircuts: swap ${fmt(L.costs.swap_bps, 2)} bp · gas $${fmt(L.costs.gas_usd, 3)} · fees ×${fmt(L.costs.fee_haircut, 2)} · emissions ×${fmt(L.costs.emission_haircut, 2)}</summary>
@@ -832,23 +877,31 @@
         Hold the middle button (or drag the background) to move around; the wheel zooms.</div>
       <div class="tb" data-help="lab-toolbox"><button class="pri" id="neAdd" title="add a block: indicators, maths, conditions, outputs">＋ Blocks</button><span class="div"></span>
         <button id="neTidy" title="lay the blocks out in columns, sources left and outputs right">Tidy</button><span class="div"></span>
+        <button id="neAuto" class="opt" data-help="lab-auto" title="find which settings matter and suggest better ones, on its own (the selected blocks, or all)">✨ Auto</button>
+        <button id="neOpt" class="opt" data-help="lab-opt" title="find the best settings of the selected blocks (Ctrl/Shift+click blocks to select several)">⚡ Optimize</button><span class="div"></span>
         <button id="neZout" title="zoom out">−</button><button id="neFit" title="fit every block in view">100%</button><button id="neZin" title="zoom in">+</button></div>
       <div class="mm" id="neMm" title="minimap: click or drag to move the view, right click to see every block"><svg id="neMmSvg"></svg></div></div></div>
-      <div class="row" style="margin-top:10px">${exitToSel(L.cur.strategy.exit_to).replace("<div ", '<div style="min-width:220px" ')}<span class="sp"></span></div>` + costsBox();
+      <div class="row" style="margin-top:10px">${exitToSel(L.cur.strategy.exit_to).replace("<div ", '<div style="min-width:220px" ')}
+        ${parkSel(L.cur.strategy.park).replace('class="full" ', 'style="margin-top:18px" ')}<span class="sp"></span></div>` + costsBox();
     box.oninput = box.onchange = e => {
       const el = e.target;
       if (el.dataset.c) return onCost(el);
       if (el.dataset.r === "exit_to" && e.type === "change") { L.cur.strategy.exit_to = el.value; changed(); return; }
+      if (el.dataset.r === "park" && e.type === "change") { L.cur.strategy.park = el.checked; changed(); return; }
       const nd = el.closest(".nd");
       if (!nd) return;
       const n = node(nd.dataset.id);
       if (el.dataset.p) { const v = parseFloat(el.value); if (isFinite(v)) { n.p = n.p || {}; n.p[el.dataset.p] = v; changed(); } }
       if (el.dataset.unit && e.type === "change") { n.unit = el.value; changed(); }
+      if (el.dataset.tf && e.type === "change") { const v = +el.value; if (v === 5) delete n.tf; else n.tf = v; changed(); }
       if (el.dataset.label) { n.label = el.value; changed(); }
     };
     drawNodes();
     if (overlapping()) { tidy(); drawNodes(); }
     if (!L.cur.view) fit(); else applyView();
+    $("neOpt").onclick = () => optDialog();
+    $("neAuto").onclick = () => autoDialog();
+    optBtn();
     $("neTidy").onclick = () => { tidy(); L.dirty = true; drawNodes(); fit(); const d = $("labDirty"); if (d) d.textContent = "unsaved changes"; };
     $("neAdd").onclick = e => {
       const r = e.currentTarget.getBoundingClientRect(), cv = $("neCv"), v = view();
@@ -877,16 +930,20 @@
       const c = kcat(n.kind);
       if (!c) continue;
       const el = document.createElement("div");
-      el.className = "nd" + (L.sel === n.id ? " sel" : "") + (errs[n.id] ? " bad" : "");
+      el.className = "nd" + (L.sel === n.id || (L.selSet && L.selSet.has(n.id)) ? " sel" : "") + (errs[n.id] ? " bad" : "");
       el.dataset.id = n.id;
       el.dataset.help = "node-" + n.kind;
       el.style.left = (n.x || 0) + "px"; el.style.top = (n.y || 0) + "px";
       const ticks = c.params.some(p => p.ticks);
+      // every block but position conditions and outputs may run on longer candles
+      const tfOk = !c.stateful && !["range", "ladder", "rebalance", "exit", "hold"].includes(n.kind);
+      const tfSel = tfOk ? `<span data-help="lab-tf">candles</span><select data-tf="1" data-help="lab-tf">${TFS.map(([v, l]) => `<option value="${v}" ${(n.tf || 5) === v ? "selected" : ""}>${l}</option>`).join("")}</select>` : "";
+      const tok = n.kind === "token_price" ? `<span>token</span><button class="sec sm" data-tokpick="${esc(n.id)}" data-help="lab-token" title="pick the token to watch">${esc(n.tsym || (n.token ? n.token.slice(0, 8) + "…" : "pick…"))}</button>` : "";
       el.innerHTML = `<div class="hd" title="${esc(errs[n.id] || K[n.kind][2])}"><i style="background:${gcol(n.kind)}"></i><b>${esc(n.label || K[n.kind][0])}</b><span class="x" data-del="${esc(n.id)}" title="remove">×</span></div>
         <div class="bd">${c.inputs.map(p => `<div class="pr ${c.optional.includes(p) ? "opt" : ""}"><span>${p}${c.optional.includes(p) ? " (optional)" : ""}</span><span class="dot in" data-in="${p}" style="background:${n.in && n.in[p] ? "var(--fg2)" : "var(--line2)"}"></span></div>`).join("")}
-        ${c.outputs.map(p => `<div class="pr" style="justify-content:flex-end"><span>${p}</span><span class="dot out" data-out="${p}" style="background:${BOOL.has(n.kind) ? "var(--warn)" : c.price ? "var(--acc)" : "var(--info)"}"></span></div>`).join("")}
-        ${c.params.length || ticks ? `<div class="pm">${c.params.map(p => `<span>${PNAME[p.name] || p.name}</span><input type="number" step="any" data-p="${p.name}" value="${(n.p || {})[p.name] ?? p.default}" min="${p.min}" max="${p.max}">`).join("")}
-          ${ticks ? `<span>unit</span><select data-unit="1">${["ticks", "spacings", "percent"].map(u => `<option ${(n.unit || "ticks") === u ? "selected" : ""}>${u}</option>`).join("")}</select>` : ""}</div>` : ""}</div>`;
+        ${c.outputs.map(p => `<div class="pr" style="justify-content:flex-end"><span>${p}</span><span class="dot out" data-out="${p}" style="background:${BOOL.has(n.kind) || ["stale", "hot"].includes(p) ? "var(--warn)" : c.price ? "var(--acc)" : "var(--info)"}"></span></div>`).join("")}
+        ${c.params.length || ticks || tfSel || tok ? `<div class="pm">${tok}${c.params.map(p => `<span>${PNAME[p.name] || p.name}</span><input type="number" step="any" data-p="${p.name}" value="${(n.p || {})[p.name] ?? p.default}" min="${p.min}" max="${p.max}">`).join("")}
+          ${ticks ? `<span>unit</span><select data-unit="1">${["ticks", "spacings", "percent"].map(u => `<option ${(n.unit || "ticks") === u ? "selected" : ""}>${u}</option>`).join("")}</select>` : ""}${tfSel}</div>` : ""}</div>`;
       area.appendChild(el);
       W = Math.max(W, (n.x || 0) + 260); H = Math.max(H, (n.y || 0) + 260);
     }
@@ -1042,6 +1099,8 @@
   function ndDown(e) {
     const del = e.target.closest("[data-del]");
     if (del) { removeNode(del.dataset.del); return; }
+    const tp = e.target.closest("[data-tokpick]");
+    if (tp) { e.preventDefault(); e.stopPropagation(); const r = tp.getBoundingClientRect(); tokenMenu(r.left, r.bottom + 4, tp.dataset.tokpick); return; }
     const dot = e.target.closest(".dot");
     const nd = e.target.closest(".nd");
     if (dot && dot.dataset.out) {
@@ -1055,18 +1114,33 @@
     } else if (nd && e.target.closest(".hd")) {
       e.preventDefault();
       const n = node(nd.dataset.id), [x, y] = areaXY(e);
-      nodeDrag = {id: n.id, dx: x - (n.x || 0), dy: y - (n.y || 0), moved: false};
+      L.selSet = L.selSet || new Set();
+      if (e.ctrlKey || e.metaKey || e.shiftKey) {
+        // Ctrl/Shift+click: add the block to the selection, or take it out
+        if (L.selSet.has(n.id)) L.selSet.delete(n.id); else L.selSet.add(n.id);
+        L.sel = L.selSet.size ? n.id : null;
+        markSel();
+        return;
+      }
+      if (!L.selSet.has(n.id)) L.selSet = new Set([n.id]);
       L.sel = n.id;
-      document.querySelectorAll("#neArea .nd").forEach(el => el.classList.toggle("sel", el.dataset.id === n.id));
+      markSel();
+      // dragging a selected block moves the whole selection
+      const ids = [...L.selSet];
+      nodeDrag = {id: n.id, x0: x, y0: y, orig: Object.fromEntries(ids.map(id => [id, [node(id).x || 0, node(id).y || 0]])), moved: false};
       $("neArea").setPointerCapture(e.pointerId);
     }
     const area = $("neArea");
     area.onpointermove = ev => {
       if (nodeDrag) {
-        const [x, y] = areaXY(ev), n = node(nodeDrag.id);
-        n.x = Math.round((x - nodeDrag.dx) / 6) * 6; n.y = Math.round((y - nodeDrag.dy) / 6) * 6;
-        const el = area.querySelector(`.nd[data-id="${CSS.escape(n.id)}"]`);
-        el.style.left = n.x + "px"; el.style.top = n.y + "px"; nodeDrag.moved = true;
+        const [x, y] = areaXY(ev), dx = Math.round((x - nodeDrag.x0) / 6) * 6, dy = Math.round((y - nodeDrag.y0) / 6) * 6;
+        for (const [id, [ox, oy]] of Object.entries(nodeDrag.orig)) {
+          const n = node(id), el = area.querySelector(`.nd[data-id="${CSS.escape(id)}"]`);
+          if (!n || !el) continue;
+          n.x = ox + dx; n.y = oy + dy;
+          el.style.left = n.x + "px"; el.style.top = n.y + "px";
+        }
+        nodeDrag.moved = true;
         drawWires(); drawMinimap();
       } else if (wireDrag) drawWires([wireDrag.a, areaXY(ev)]);
     };
@@ -1089,7 +1163,7 @@
   // and every column is centred on the tallest one.
   function tidy() {
     const s = L.cur.strategy, nodes = s.nodes, by = Object.fromEntries(nodes.map(n => [n.id, n]));
-    const SINKS = ["range", "rebalance", "exit", "hold"];
+    const SINKS = ["range", "ladder", "rebalance", "exit", "hold"];
     const ins = n => Object.values(n.in || {}).map(src => by[src[0]]).filter(Boolean);
     const outs = {};
     nodes.forEach(n => ins(n).forEach(m => (outs[m.id] = outs[m.id] || []).push(n)));
@@ -1165,6 +1239,36 @@
     menu.oncontextmenu = e => e.preventDefault();
     bind(menu);
     setTimeout(() => { document.addEventListener("pointerdown", outside, true); document.addEventListener("keydown", menuKey, true); });
+  }
+  // the token picker of a token_price block: what can be watched on the pool's chain, and how deep
+  const SRC = {};
+  async function tokenMenu(x, y, id) {
+    const cid = L.chain || 8453;
+    openMenu(x, y, `<div class="mute small" style="padding:8px 10px">Loading the tokens that can be watched…</div>`, () => {});
+    try { SRC[cid] = SRC[cid] || await api("/api/price_sources/" + cid); }
+    catch (e) { closeMenu(); toast(e.message, true); return; }
+    const r = SRC[cid], k = d => d == null ? "" : "$" + (d >= 1e6 ? fmt(d / 1e6, 1) + "M" : d >= 1e3 ? fmt(d / 1e3, 1) + "k" : fmt(d, 0));
+    const row = t => {
+      const via = (t.route || []).map(h => h.map(p => `${esc(p.symbol)} ${k(p.active_usd)}`).join(" + ")).join(" → ");
+      return `<div class="ci ${t.ok ? "" : "dis"}" ${t.ok ? `data-tok="${esc(t.address)}" data-sym="${esc(t.symbol)}"` : ""} data-q="${esc(String(t.symbol).toLowerCase())}"
+        title="${esc(t.ok ? (t.stable ? "a dollar stable: always $1" : "priced by " + via) : t.error)}" style="${t.ok ? "" : "opacity:.45;cursor:not-allowed"}">
+        <b>${esc(t.symbol)}</b><span class="sp"></span><span class="mute small">${t.ok ? (t.stable ? "$1 stable" : `${k(t.active_usd)} active · ${via}`) : "not enough liquidity"}</span></div>`;
+    };
+    openMenu(x, y, `<input placeholder="Token to watch: type to search…" spellcheck="false">
+      <div class="mute small" style="padding:4px 10px">Pools need at least $${fmt(r.min_active_usd, 0)} of active liquidity on ${esc(chainOf(cid).name)}; greyed tokens have none.</div>
+      <div class="list">${r.tokens.map(row).join("")}</div>`, m => {
+      const inp = m.querySelector("input");
+      inp.focus();
+      inp.oninput = () => { const q = inp.value.trim().toLowerCase(); m.querySelectorAll(".list .ci").forEach(e => { e.style.display = !q || e.dataset.q.includes(q) ? "" : "none"; }); };
+      m.onclick = e => {
+        const it = e.target.closest("[data-tok]");
+        if (!it) return;
+        const n = node(id);
+        n.token = it.dataset.tok; n.tsym = it.dataset.sym;
+        if (!n.label) n.label = it.dataset.sym + " price";
+        closeMenu(); drawNodes(); changed();
+      };
+    });
   }
   const item = (act, label, extra = "") => `<div class="ci ${act === "delete" ? "bad" : ""}" data-act="${act}">${label}${extra}</div>`;
   function addMenu(cx, cy, at) {
@@ -1242,14 +1346,14 @@
   }
   function dupNode(id) {
     const n = node(id);
-    if (["range", "rebalance", "exit", "hold"].includes(n.kind)) return toast(`There can be only one ${K[n.kind][0]} block.`, true);
+    if (["range", "ladder", "rebalance", "exit", "hold"].includes(n.kind)) return toast(`There can be only one ${K[n.kind][0]} block.`, true);
     const c = JSON.parse(JSON.stringify(n));
     c.id = freeId(n.kind); c.x = (n.x || 0) + 24; c.y = (n.y || 0) + 24;
     L.cur.strategy.nodes.push(c); L.sel = c.id; changed(); drawNodes();
   }
   function pasteNode(at) {
     const c = JSON.parse(JSON.stringify(L.clip));
-    if (["range", "rebalance", "exit", "hold"].includes(c.kind) && L.cur.strategy.nodes.some(n => n.kind === c.kind)) return toast(`There can be only one ${K[c.kind][0]} block.`, true);
+    if (["range", "ladder", "rebalance", "exit", "hold"].includes(c.kind) && L.cur.strategy.nodes.some(n => n.kind === c.kind)) return toast(`There can be only one ${K[c.kind][0]} block.`, true);
     c.id = freeId(c.kind); c.x = Math.round(at[0]); c.y = Math.round(at[1]);
     // keep inputs that still exist
     for (const [p, src] of Object.entries(c.in || {})) if (!node(src[0])) delete c.in[p];
@@ -1269,6 +1373,7 @@
     cv.tabIndex = 0;
     cv.addEventListener("pointerdown", e => { if (!e.target.closest("input,select")) cv.focus({preventScroll: true}); });
     cv.addEventListener("keydown", e => {
+      if (e.target === cv && e.key === "Escape" && L.selSet && L.selSet.size) { L.selSet = new Set(); L.sel = null; markSel(); return; }
       if (e.target !== cv || !L.sel || !node(L.sel)) return;
       const k = e.key.toLowerCase();
       if (k === "delete" || k === "backspace") { e.preventDefault(); removeNode(L.sel); L.sel = null; }
@@ -1276,6 +1381,418 @@
       else if ((e.ctrlKey || e.metaKey) && k === "c") { L.clip = JSON.parse(JSON.stringify(node(L.sel))); toast("Copied: right-click the canvas to paste."); }
       else if ((e.ctrlKey || e.metaKey) && k === "v" && L.clip) { const v = view(); pasteNode([(cv.clientWidth / 2 - v.x) / v.z, (cv.clientHeight / 2 - v.y) / v.z]); }
     });
+  }
+  function markSel() {
+    document.querySelectorAll("#neArea .nd").forEach(el => el.classList.toggle("sel", el.dataset.id === L.sel || (L.selSet && L.selSet.has(el.dataset.id))));
+    drawMinimap(); optBtn();
+  }
+  function optBtn() {
+    const b = $("neOpt");
+    if (!b) return;
+    const n = L.selSet ? [...L.selSet].filter(id => node(id)).length : 0;
+    b.textContent = n ? `⚡ Optimize ${n} block${n > 1 ? "s" : ""}` : "⚡ Optimize";
+    b.disabled = !n;
+    const a = $("neAuto");
+    if (a) a.textContent = n ? `✨ Auto (${n} block${n > 1 ? "s" : ""})` : "✨ Auto";
+  }
+  // Auto: the server screens every setting of the selected blocks (all when none are), tunes the few
+  // that move the score and says whether the result is worth applying (optimize.rs `screen`, `pick`, `suggest`)
+  function autoDialog() {
+    if (!L.pool) return toast("Choose a pool first.", true);
+    if (!L.cur || L.cur.strategy.type !== "graph") return toast("Auto works on node strategies.", true);
+    const ids = L.selSet ? [...L.selSet].filter(id => node(id)) : [];
+    const pool = (L.res && L.res.symbols) ? L.res.symbols.join("/") : "this pool";
+    const el = document.createElement("div");
+    el.className = "optm";
+    el.innerHTML = `<div class="box" data-help="lab-auto"><div class="hd"><h3>✨ Auto-optimize</h3><span class="mute small">${esc(pool)} · last ${L.days} days · $${fmt(L.capital, 0)} · ${ids.length ? `${ids.length} selected block${ids.length > 1 ? "s" : ""}` : "every block"}</span><span class="sp"></span><button class="ghost sm" data-x="close">✕</button></div>
+      <div class="bd" id="optBody">
+        <div class="seg" id="autoMode" style="margin:0 0 10px"><button data-m="walk" class="on">Walk-forward</button><button data-m="tries">Rotating windows</button></div>
+        <div id="autoWalk">
+          <p class="small" style="margin:0 0 8px;line-height:1.6">The period is cut into equal periods (a month each by default). At every period, the settings that matter${ids.length ? " in the selected blocks" : ""} are tuned on the periods <b>before</b> it only, then run on it. Joined up, that is what re-tuning every period would have earned, with nothing ever seen in advance: the honest test of whether tuning helps. The current settings, the strategy without its exits and holding run on the same periods. New settings (tuned on the most recent periods) are suggested only if re-tuning beats the bar over most periods.</p>
+          <div class="row" style="gap:16px;flex-wrap:wrap">
+            <div><label class="f">Periods</label><input id="wfN" type="number" min="4" max="36" step="1" value="${Math.max(4, Math.min(36, Math.round(L.days / 30.4)))}" style="width:70px"> <span class="mute small" id="wfDays"></span></div>
+            <div><label class="f">Tune on the last</label><input id="wfTrain" type="number" min="0" max="35" step="1" value="${Math.max(2, Math.min(6, Math.round(Math.round(L.days / 30.4) / 4)))}" style="width:70px"> <span class="mute small">periods (0: all before)</span></div>
+            <div><label class="f">Runs per period</label><input id="wfRuns" type="number" min="10" max="400" step="10" value="60" style="width:80px"></div>
+          </div>
+          <label class="small" style="display:flex;gap:6px;align-items:flex-start;margin-top:10px"><input type="checkbox" id="wfIn" checked><span><b>The current settings were picked on this history</b> (built-ins were, on Jan 2024 – Oct 2026). Then every period is in-sample for them: their numbers are shown but are no fair bar, and re-tuning must beat the references nothing was tuned on instead. Untick only for settings chosen before this period began.</span></label>
+        </div>
+        <div id="autoTries" style="display:none">
+        <ol class="small" style="margin:0 0 10px;padding-left:18px;line-height:1.6">
+          <li><b>Screen.</b> Every setting${ids.length ? " of the selected blocks" : ""} is moved on its own over its range (half to twice its value, and the candle lengths) while the others stay put. A setting that moves the score by a point or more, and by a quarter of the most any did, is worth tuning.</li>
+          <li><b>Search.</b> Only those (at most 6) are tuned together, scored by their reliable return over walk-forward folds.</li>
+          <li><b>Try other ways.</b> When nothing holds up: wider ranges, small steps, single changes to the blocks (no exit, an input left to its default, EMA for SMA…), and the best change tuned. Up to five attempts.</li>
+          <li><b>Never the same check twice.</b> The last eighth of the period is the <b>exam</b>: nothing runs on it until the end. The rest is cut into five windows; each attempt is judged on a window of its own (the most recent first) and searches on the other four. A winner on its window must then beat the current settings on the exam (two candidates at most). The current settings may have been picked on this history: the table of every period shows them beside references nothing was tuned on.</li>
+        </ol>
+          <div><label class="f">Walk-forward folds</label><input id="optFolds" type="number" min="1" max="24" step="1" value="4" style="width:70px"></div>
+        </div>
+        <div class="row" style="gap:16px;flex-wrap:wrap;margin-top:10px">
+          <div><label class="f">Maximise</label><select id="optObj"><option value="return">return (P&amp;L)</option><option value="vs_hold">return over holding</option></select></div>
+        </div></div>
+      <div class="ft" id="optFoot"><span class="mute small" id="autoCost"></span><span class="sp" style="flex:1"></span><button class="sec" data-x="close">Cancel</button><button id="optGo">Start</button></div></div>`;
+    document.body.appendChild(el);
+    let mode = "walk";
+    const cost = () => {
+      if (mode !== "walk") { $("autoCost").textContent = "A few hundred backtests per attempt."; return; }
+      const n = Math.max(4, Math.min(36, +$("wfN").value || 12)), tr = Math.max(0, +$("wfTrain").value || 0), runs = Math.max(10, +$("wfRuns").value || 60);
+      const first = tr === 0 ? Math.max(2, Math.floor(n / 4)) : Math.max(2, tr);
+      $("wfDays").textContent = `of ${fmt(L.days / n, 1)} days`;
+      $("autoCost").textContent = first >= n ? "No period left to test: fewer periods to tune on." : `${n - first} periods tested, about ${((n - first + 1) * runs + 90).toLocaleString()} backtests.`;
+    };
+    for (const id of ["wfN", "wfTrain", "wfRuns"]) $(id).oninput = cost;
+    $("autoMode").onclick = e => {
+      const btn = e.target.closest("button"); if (!btn) return;
+      mode = btn.dataset.m;
+      el.querySelectorAll("#autoMode button").forEach(x => x.classList.toggle("on", x === btn));
+      $("autoWalk").style.display = mode === "walk" ? "" : "none";
+      $("autoTries").style.display = mode === "walk" ? "none" : "";
+      cost();
+    };
+    cost();
+    el.addEventListener("click", e => {
+      const x = e.target.closest("[data-x]");
+      if (x && x.dataset.x === "close") return optClose(el);
+      if (e.target === el && !OPT) optClose(el);
+    });
+    $("optGo").onclick = () => optStart(el, mode === "walk"
+      ? {auto: true, mode: "walk", nodes: ids, objective: $("optObj").value, holdout: true, periods: Math.max(4, Math.min(36, Math.round(+$("wfN").value || 12))),
+         train: Math.max(0, Math.round(+$("wfTrain").value || 0)), runs: Math.max(10, Math.min(400, Math.round(+$("wfRuns").value || 60))), current_in_sample: $("wfIn").checked}
+      : {auto: true, nodes: ids, objective: $("optObj").value, holdout: true, folds: Math.max(1, Math.min(24, Math.round(+$("optFolds").value || 4)))});
+  }
+
+  // ---------- dynamic optimization ----------
+  // The settings of the selected blocks to tune (each with a range, or candle lengths), then a run
+  // on the server (optimize.rs) that searches them on the pool's swaps, in parallel; the best
+  // settings can be applied to the strategy.
+  const TF_OK = n => { const c = kcat(n.kind); return c && !c.stateful && !["range", "ladder", "rebalance", "exit", "hold"].includes(n.kind); };
+  function optRange(p, v) {
+    const lo = p.min, hi = p.max;
+    let a, b;
+    if (v > 0) { a = v / 2; b = v * 2; } else if (v < 0) { a = v * 2; b = v / 2; } else { a = Math.max(lo, -10); b = Math.min(hi, 10); }
+    a = Math.max(lo, a); b = Math.min(hi, b);
+    if (!(a < b)) { a = lo; b = hi; }
+    const r = x => +Number(x).toPrecision(4);
+    return [r(a), r(b)];
+  }
+  let OPT = null;
+  function optDialog() {
+    const ids = L.selSet ? [...L.selSet].filter(id => node(id)) : [];
+    if (!ids.length) return toast("Select blocks first: Ctrl or Shift + click their titles.", true);
+    if (!L.pool) return toast("Choose a pool first.", true);
+    const nodes = ids.map(node);
+    const sections = nodes.map(n => {
+      const c = kcat(n.kind), rows = [];
+      for (const p of c.params) {
+        const v = (n.p || {})[p.name] ?? p.default, [a, b] = optRange(p, v);
+        rows.push(`<tr><td><label class="row" style="gap:6px"><input type="checkbox" data-on="${esc(n.id)}|${esc(p.name)}"><b>${esc(PNAME[p.name] || p.name)}</b></label></td>
+          <td class="mono">${esc(fmt(v, Math.abs(v) < 10 ? 2 : 0))}</td>
+          <td><input type="number" step="any" data-lo="${esc(n.id)}|${esc(p.name)}" value="${a}" min="${p.min}" max="${p.max}"></td>
+          <td><input type="number" step="any" data-hi="${esc(n.id)}|${esc(p.name)}" value="${b}" min="${p.min}" max="${p.max}"></td>
+          <td class="mute small">${p.min} to ${p.max}</td></tr>`);
+      }
+      if (TF_OK(n)) {
+        const cur = n.tf || 5;
+        rows.push(`<tr><td><label class="row" style="gap:6px"><input type="checkbox" data-on="${esc(n.id)}|tf"><b>candles</b></label></td>
+          <td class="mono">${esc((TFS.find(t => t[0] === cur) || [0, cur + " min"])[1])}</td>
+          <td colspan="3"><div class="tfs">${TFS.map(([v, l]) => `<label><input type="checkbox" data-tf="${esc(n.id)}" value="${v}" ${[cur, 5, 60].includes(v) ? "checked" : ""}>${l}</label>`).join("")}</div></td></tr>`);
+      }
+      return `<div class="node"><div class="nh"><i style="background:${gcol(n.kind)}"></i>${esc(n.label || K[n.kind][0])}<span class="mute small" style="font-weight:400">${esc(K[n.kind][0])}</span>
+          ${rows.length ? `<span class="sp" style="flex:1"></span><label class="row small" style="gap:6px;font-weight:400"><input type="checkbox" data-all="${esc(n.id)}">all in this block</label>` : ""}</div>
+        ${rows.length ? `<table><tr><th>setting</th><th>now</th><th>from</th><th>to</th><th>block limits</th></tr>${rows.join("")}</table>` : `<div class="mute small" style="padding:8px 10px">Nothing to tune in this block.</div>`}</div>`;
+    }).join("");
+    const pool = (L.res && L.res.symbols) ? L.res.symbols.join("/") : "this pool";
+    const el = document.createElement("div");
+    el.className = "optm";
+    el.innerHTML = `<div class="box" data-help="lab-opt"><div class="hd"><h3>⚡ Dynamic optimization</h3><span class="mute small">${esc(pool)} · last ${L.days} days · $${fmt(L.capital, 0)}</span><span class="sp"></span><button class="ghost sm" data-x="close">✕</button></div>
+      <div class="bd" id="optBody"><p class="mute small" style="margin-top:0">Tick the settings to tune and the range to search. The search tries settings across the ranges, then keeps narrowing around the best ones, many backtests at once.</p>
+        <label class="row small" style="gap:6px;margin:0 0 8px"><input type="checkbox" id="optAll"><b>Select all</b><span class="mute">every setting of every selected block</span></label>
+        ${sections}
+        <div class="row" style="gap:16px;flex-wrap:wrap;margin-top:6px">
+          <div><label class="f">Maximise</label><select id="optObj"><option value="return">return (P&amp;L)</option><option value="vs_hold">return over holding</option></select></div>
+          <div><label class="f">Backtests (budget)</label><input id="optRuns" type="number" min="10" max="2000" step="10" value="150" style="width:90px"></div>
+          <div><label class="f">Walk-forward folds</label><input id="optFolds" type="number" min="1" max="24" step="1" value="4" style="width:70px"></div>
+          <div style="flex:1;min-width:260px"><label class="sw" style="margin-top:22px"><input type="checkbox" id="optHold" checked><span class="t"></span>Keep the last quarter of the period for checking</label>
+            <div class="mute small" style="margin-left:46px">The search sees only the first three quarters; the best settings are then run on the last quarter. Settings that only fit noise fall apart there.</div></div>
+        </div>
+        <p class="mute small" style="margin:8px 0 0">Each setting is scored on every fold (consecutive slices of the period the search sees, each run on its own) by its <b>reliable return</b>: the average return less its spread across the folds (mean − 1.64·sd/√folds). Steady beats lucky. The finalists are then ranked the same way over all periods, the held-out quarter included.</p></div>
+      <div class="ft" id="optFoot"><span class="mute small" id="optCount"></span><span class="sp" style="flex:1"></span><button class="sec" data-x="close">Cancel</button><button id="optGo">Start</button></div></div>`;
+    document.body.appendChild(el);
+    const count = () => {
+      const n = el.querySelectorAll("[data-on]:checked").length;
+      // a search needs about ten backtests per setting to find its way; more settings than 48 is refused
+      const want = Math.min(2000, Math.ceil(n * 10 / 10) * 10), runs = +$("optRuns").value || 0;
+      $("optCount").innerHTML = !n ? "Tick at least one setting." : n > 48 ? `<span class="bad">${n} settings: at most 48 at once</span>`
+        : `${n} setting${n > 1 ? "s" : ""} to tune${runs < want ? ` · <span class="warn">a budget of ${want}+ backtests suits ${n} settings</span>` : ""}`;
+      $("optGo").disabled = !n || n > 48;
+      // the select-all boxes show what they cover: all, some (dash) or none
+      const sync = (box, cbs) => { if (!box) return; const on = cbs.filter(c => c.checked).length; box.checked = on > 0 && on === cbs.length; box.indeterminate = on > 0 && on < cbs.length; };
+      for (const a of el.querySelectorAll("[data-all]")) sync(a, [...el.querySelectorAll(`[data-on^="${CSS.escape(a.dataset.all)}|"]`)]);
+      sync($("optAll"), [...el.querySelectorAll("[data-on]")]);
+    };
+    el.addEventListener("input", e => { if (e.target.id === "optRuns") count(); });
+    el.addEventListener("change", e => {
+      const t = e.target;
+      if (t.id === "optAll") for (const c of el.querySelectorAll("[data-on]")) c.checked = t.checked;
+      else if (t.dataset && t.dataset.all != null) for (const c of el.querySelectorAll(`[data-on^="${CSS.escape(t.dataset.all)}|"]`)) c.checked = t.checked;
+      count();
+    });
+    count();
+    el.addEventListener("click", e => {
+      const x = e.target.closest("[data-x]");
+      if (x && x.dataset.x === "close") return optClose(el);
+      if (e.target === el && !OPT) optClose(el);
+    });
+    $("optGo").onclick = () => optStart(el);
+  }
+  function optClose(el) {
+    if (OPT && OPT.id && OPT.state === "running") { api(`/api/backtest/${OPT.id}/stop`, {}).catch(() => {}); }
+    OPT = null;
+    el.remove();
+  }
+  async function optStart(el, autoSpec) {
+    const params = [];
+    if (!autoSpec) {
+    for (const cb of el.querySelectorAll("[data-on]:checked")) {
+      const [nid, p] = cb.dataset.on.split("|");
+      if (p === "tf") {
+        const choices = [...el.querySelectorAll(`[data-tf="${CSS.escape(nid)}"]:checked`)].map(c => +c.value);
+        if (choices.length < 2) return toast(`${nid}: pick at least two candle lengths.`, true);
+        params.push({node: nid, param: "tf", choices});
+      } else {
+        const lo = parseFloat(el.querySelector(`[data-lo="${CSS.escape(cb.dataset.on)}"]`).value), hi = parseFloat(el.querySelector(`[data-hi="${CSS.escape(cb.dataset.on)}"]`).value);
+        if (!(lo < hi)) return toast(`${nid} ${p}: "from" must be below "to".`, true);
+        params.push({node: nid, param: p, min: lo, max: hi});
+      }
+    }
+    }
+    const spec = autoSpec || {params, objective: $("optObj").value, runs: Math.max(10, Math.min(2000, +$("optRuns").value || 150)), holdout: $("optHold").checked,
+                  folds: Math.max(1, Math.min(24, Math.round(+$("optFolds").value || 4)))};
+    const req = {chain_id: L.chain, pool: L.pool, days: L.days, capital_usd: L.capital, costs: L.costs, strategy: body(L.cur.strategy), optimize: spec};
+    OPT = {state: "starting", spec, base: JSON.parse(JSON.stringify(L.cur.strategy)), key: L.cur.id || L.cur.name, t0: Date.now()};
+    $("optFoot").innerHTML = `<span class="mute small" id="optStep">starting…</span><span class="sp" style="flex:1"></span><button class="sec" id="optStop">Stop</button>`;
+    $("optStop").onclick = () => { if (OPT && OPT.id) api(`/api/backtest/${OPT.id}/stop`, {}).then(() => { $("optStep").textContent = "stopping: finishing the runs in flight…"; }).catch(e => toast(e.message, true)); };
+    optRender(el, null);
+    for (let tries = 0; ; tries++) {
+      try { OPT.id = (await api("/api/backtest", req)).id; break; }
+      catch (e) {
+        if (/already running/.test(e.message) && tries < 60 && OPT) { $("optStep").textContent = "waiting for a free backtest slot…"; await new Promise(r => setTimeout(r, 1500)); continue; }
+        toast(e.message, true); if (OPT) OPT.state = "error"; return;
+      }
+    }
+    OPT.state = "running";
+    while (OPT && OPT.id) {
+      await new Promise(r => setTimeout(r, 700));
+      if (!OPT) return;
+      let j;
+      try { j = await api("/api/backtest/" + OPT.id); } catch (e) { toast(e.message, true); break; }
+      if (!OPT) return;
+      if (j.state === "running") { if ($("optStep")) $("optStep").textContent = j.step || "running"; if (j.partial) OPT.lastPartial = j.partial; optRender(el, OPT.lastPartial || null, !!OPT.lastPartial); continue; }
+      if (j.state === "error") { OPT.state = "error"; $("optBody").innerHTML = `<p class="bad">${esc(j.error)}</p>`; $("optFoot").innerHTML = `<span class="sp" style="flex:1"></span><button class="sec" data-x="close">Close</button>`; return; }
+      OPT.state = "done";
+      optRender(el, j.result.optimize, false);
+      return;
+    }
+  }
+  const dateSpan = w => w ? `${new Date(w.from * 1000).toLocaleDateString(undefined, {month: "short", day: "numeric"})} – ${new Date(w.to * 1000).toLocaleDateString(undefined, {month: "short", day: "numeric"})}` : "";
+  // auto: one line per attempt, with where it was judged (its window) on the period, and the exam
+  function attemptsHtml(r) {
+    const A = r.attempts || [], W = r.windows;
+    if (!A.length || !W) return "";
+    const pct = x => x == null || !isFinite(x) ? "–" : `<span class="${x > 0 ? "pos" : x < 0 ? "neg" : ""}">${x > 0 ? "+" : ""}${fmt(x, 1)}%</span>`;
+    const p0 = W.period.from, p1 = W.period.to, L0 = (p1 - p0) || 1;
+    const bar = a => {
+      const seg = (f, t, cls, tip) => `<i class="${cls}" title="${esc(tip)}" style="left:${(f - p0) / L0 * 100}%;width:${(t - f) / L0 * 100}%"></i>`;
+      return `<span class="awin">${seg(p0, W.exam.from, "f", "folds: searched on")}${a.window ? seg(a.window.from, a.window.to, "v", "its window: judged on, " + dateSpan(a.window)) : ""}${seg(W.exam.from, W.exam.to, a.exam && a.exam.look ? (a.exam.passed ? "e ok" : "e no") : "e", "the exam: " + dateSpan(W.exam))}</span>`;
+    };
+    const obj = OPT && OPT.spec.objective === "vs_hold" ? "vs_hold_apr" : "apr";
+    return `<table class="res small" style="margin:0 0 10px"><tr><th>#</th><th>way</th><th title="grey: searched on · blue: its window · last: the exam">period</th><th class="num" title="on its window: best vs current">window</th><th class="num" title="on the exam: best vs current">exam</th><th>verdict</th></tr>
+      ${A.map(a => `<tr${a.n === r.attempt ? ` class="cur"` : ""}><td>${a.n}</td><td>${esc(a.label)}</td><td>${bar(a)}</td>
+        <td class="num">${a.best ? `${pct(a.best.test)} <span class="mute">vs</span> ${pct(a.current && a.current.test)}` : "–"}</td>
+        <td class="num">${a.exam && a.exam.look ? `${pct(a.exam.best && a.exam.best[obj])} <span class="mute">vs</span> ${pct(a.exam.current && a.exam.current[obj])}` : "–"}</td>
+        <td class="small">${a.suggestion && a.suggestion.apply != null ? "✓ " : ""}${esc((a.suggestion && a.suggestion.why || "").replace(/^keep the current settings: /, ""))}</td></tr>`).join("")}</table>`;
+  }
+  // a table of periods: a row per strategy, a column per period, %/yr, with the reliable score
+  function periodsHtml(P, title, note) {
+    if (!P || !P.rows || !P.cols) return "";
+    const cell = x => x == null || !isFinite(x) ? `<td class="num">–</td>` : `<td class="num"><span class="${x > 0 ? "pos" : x < 0 ? "neg" : ""}">${x > 0 ? "+" : ""}${fmt(x, 0)}</span></td>`;
+    const d = t => new Date(t * 1000).toLocaleDateString(undefined, {month: "short", day: "numeric"});
+    const best = Math.max(...P.rows.map(r => r.score && isFinite(r.score.score) ? r.score.score : -Infinity));
+    return `<details open style="margin:0 0 10px"><summary class="small"><b>${esc(title)}</b></summary>
+      <p class="mute small" style="margin:4px 0">${esc(note)}</p>
+      <div style="overflow-x:auto"><table class="res small"><tr><th></th>${P.cols.map(c => `<th class="num" title="${d(c.from)} – ${d(c.to)}">${c.exam ? "exam" : d(c.from)}</th>`).join("")}<th class="num" title="mean − 1.64·sd/√n over the periods">reliable</th><th class="num">mean</th><th class="num">positive</th><th class="num">worst</th></tr>
+      ${P.rows.map(r => `<tr${r.score && r.score.score === best ? ` class="cur"` : ""}><td>${esc(r.name)}${r.in_sample ? ` <span class="mute" title="picked on this history: in-sample">(in-sample)</span>` : ""}</td>${r.values.map(cell).join("")}
+        ${cell(r.score && r.score.score)}${cell(r.score && r.score.mean)}<td class="num">${r.score && r.score.n ? `${r.score.positive}/${r.score.n}` : "–"}</td>${cell(r.score && r.score.worst)}</tr>`).join("")}</table></div></details>`;
+  }
+  // walk-forward: the verdict, every tested period for re-tuning, the current settings and the
+  // references, and how the tuned settings moved from period to period
+  function walkRender(b, r) {
+    const W = r.walk || {}, sg = r.suggestion || {};
+    const name = k => { const [nid, p] = k.split("."); const n = node(nid); return `${n ? (n.label || K[n.kind][0]) : nid} ${p === "tf" ? "candles" : PNAME[p] || p}`; };
+    const val = (k, v) => v == null ? "–" : k.endsWith(".tf") ? (TFS.find(t => t[0] === v) || [0, v + " min"])[1] : fmt(v, Math.abs(v) < 10 ? 3 : 1);
+    const rows = (W.rows || []).map(x => x.name === "current settings" && W.current_in_sample ? {...x, in_sample: true} : x);
+    const now = r.top && r.top[0];
+    const d = t => new Date(t * 1000).toLocaleDateString(undefined, {month: "short", day: "numeric"});
+    b.innerHTML = `<div class="${sg.apply != null ? "pos" : "warn"}" style="margin:0 0 10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px">
+        <b>${sg.apply != null ? "✓ Re-tuning holds up." : "Suggestion: no new settings."}</b> <span>${esc(sg.why || "")}</span>
+        ${sg.apply != null ? `<div style="margin-top:6px" class="small">Tuned on the last ${W.train || "all"} periods: ${Object.entries(now.values || {}).map(([k, v]) => `${esc(name(k))} <b>${esc(val(k, v))}</b>`).join(" · ")} <button class="sm" data-apply="0" style="margin-left:6px">Apply these settings</button></div>` : ""}</div>
+      <p class="mute small" style="margin:0 0 8px">${W.periods} periods of ${fmt(W.period_days, 1)} days; ${W.tested} tested, each tuned on ${W.train ? `the ${W.train} before it` : "all before it"} (${W.runs_per_period} runs per period), on ${(r.picked || []).length ? (r.picked || []).map(k => esc(name(k))).join(", ") : "no setting (none moved the score)"}. %/yr of the capital.${r.stopped ? " Stopped early." : ""}</p>
+      ${periodsHtml({cols: W.cols, rows}, "Out of sample, period by period", "Re-tuned every period: each period traded with settings tuned only on the periods before it. The current settings, the strategy without its exits and holding on the same periods; nothing was tuned for the last two.")}
+      ${(W.stability || []).length ? `<details style="margin:0 0 10px"><summary class="small"><b>How the tuned settings moved</b> from period to period (a large spread is tuning that chases noise)</summary>
+        <div style="overflow-x:auto"><table class="res small"><tr><th>setting</th><th class="num" title="standard deviation over the range, 0 to 1">spread</th>${(W.steps || []).map(s => `<th class="num">${d(s.test.from)}</th>`).join("")}</tr>
+        ${W.stability.map(x => `<tr><td>${esc(name(x.key))}</td><td class="num ${x.spread > 0.3 ? "warn" : ""}">${fmt(x.spread, 2)}</td>${x.values.map(v => `<td class="num mono">${esc(val(x.key, v))}</td>`).join("")}</tr>`).join("")}</table></div></details>` : ""}`;
+    $("optFoot").innerHTML = `<span class="mute small">${sg.apply != null ? "Apply writes the settings into the blocks (unsaved until you save) and reruns the backtest." : ""}</span><span class="sp" style="flex:1"></span><button class="sec" data-x="close">Close</button>`;
+    b.onclick = e => {
+      const a = e.target.closest("[data-apply]");
+      if (!a || !now || !now.strategy) return;
+      if ((L.cur.id || L.cur.name) !== OPT.key) return toast("Another strategy is open now: these settings belong to the one that was optimized.", true);
+      const was = Object.fromEntries(L.cur.strategy.nodes.map(n => [n.id, n]));
+      L.cur.strategy.nodes = JSON.parse(JSON.stringify(now.strategy.nodes)).map(n => was[n.id] && n.x == null ? {...n, x: was[n.id].x, y: was[n.id].y} : n);
+      optClose(document.querySelector(".optm"));
+      drawNodes(); changed();
+      toast("Settings applied: rerunning the backtest.");
+    };
+  }
+  function optRender(el, r, live) {
+    const b = $("optBody");
+    if (!b) return;
+    if (!r) {
+      const el = OPT && OPT.t0 ? Math.round((Date.now() - OPT.t0) / 1000) : 0;
+      b.innerHTML = `<p class="mute">Starting the search${el >= 3 ? ` (${el} s; a first long period downloads its history first)` : ""}…</p>`;
+      return;
+    }
+    const pct = (x, sign = true) => x == null || !isFinite(x) ? "–" : `<span class="${x > 0 ? "pos" : x < 0 ? "neg" : ""}">${sign && x > 0 ? "+" : ""}${fmt(x, 1)}%</span>`;
+    const obj = OPT && OPT.spec.objective === "vs_hold" ? "vs_hold_apr" : "apr";
+    const name = k => { const [nid, p] = k.split("."); const n = node(nid); return `${n ? (n.label || K[n.kind][0]) : nid} ${p === "tf" ? "candles" : PNAME[p] || p}`; };
+    const val = (k, v) => k.endsWith(".tf") ? (TFS.find(t => t[0] === v) || [0, v + " min"])[1] : fmt(v, Math.abs(v) < 10 ? 3 : 1);
+    const nname = id => { const n = node(id); return n ? (n.label || K[n.kind][0]) : id; };
+    const change = c => !c ? "" : c.op === "remove" ? `without ${esc(nname(c.node))}` : c.op === "unwire" ? `${esc(nname(c.node))} ${esc(c.port)} left to its default`
+      : c.op === "kind" ? `${esc(nname(c.node))} as ${esc((K[c.to] || [c.to])[0])}` : esc(JSON.stringify(c));
+    const vals = t => [t.change ? `<b class="warn">${change(t.change)}</b>` : "", ...Object.entries(t.values || {}).map(([k, v]) => `${esc(name(k))} <b>${esc(val(k, v))}</b>`)].filter(Boolean).join(" · ")
+      + (t.alike > 1 ? ` <span class="mute" title="other settings gave exactly the same result">(×${t.alike})</span>` : "");
+    const top = r.top || [];
+    const wfPos = t => t.wf && t.wf.n ? `${t.wf.positive}/${t.wf.n}` : "–";
+    const allSc = t => t.all && t.all.score != null ? pct(t.all.score) : "–";
+    const foldTip = t => t.wf && t.wf.folds ? t.wf.folds.map(v => fmt(v, 1) + "%").join(" · ") : "";
+    const att = live && r.attempt ? `<p style="margin:0 0 6px"><b>Attempt ${r.attempt} of ${r.of}</b>: ${esc(r.label || "")}</p>` : "";
+    // how far the whole run is (0 to 1), and the time it has taken and likely still takes
+    const part = (r.done || 0) / (r.total || 1);
+    const frac = !live ? 1 : r.mode === "walk" ? Math.min(1, ((r.step || 0) + part) / ((r.steps || 1) + 2))
+      : r.attempt ? Math.min(1, ((r.attempt - 1) + (r.phase === "screening" ? 0.35 * part : r.phase === "trying" ? part : r.attempt === 1 || r.attempt === 2 || r.attempt === 5 ? 0.35 + 0.65 * part : part)) / (r.of || 5))
+      : part;
+    const clock = sec => sec >= 3600 ? `${Math.floor(sec / 3600)} h ${Math.round(sec % 3600 / 60)} min` : sec >= 60 ? `${Math.floor(sec / 60)}:${String(Math.round(sec % 60)).padStart(2, "0")} min` : `${Math.round(sec)} s`;
+    const eta = () => {
+      const el = OPT && OPT.t0 ? (Date.now() - OPT.t0) / 1000 : 0;
+      const left = frac >= 0.02 && el >= 5 ? el * (1 - frac) / frac : null;
+      return `<div class="small" style="margin:4px 0 8px"><b>${clock(el)}</b> <span class="mute">elapsed</span>${left != null ? ` · <b>${r.attempt ? "up to " : ""}about ${clock(left)}</b> <span class="mute">left${r.attempt ? " (it stops at the first attempt that holds up)" : ""}</span>` : ` · <span class="mute">estimating…</span>`}</div>`;
+    };
+    const bar = `<div class="bar"><i style="width:${Math.round(frac * 100)}%"></i></div>${live ? eta() : ""}`;
+    if (live && r.mode === "walk") {
+      const done = r.done || 0, total = r.total || 1, st = r.step || 0, n = r.steps || 1;
+      const what = st === 0 ? "Screening which settings matter, on the first periods only" : st > n ? "Tuning on the most recent periods: the settings to use now" : `Period ${st} of ${n}: tuning on the periods before it, then trading it`;
+      b.innerHTML = `${bar}<div class="mute small">${what}: ${done} of ${total} runs.</div>`;
+      return;
+    }
+    if (live && (r.phase === "screening" || r.phase === "trying" || r.phase === "screen")) {
+      const done = r.done || 0, total = r.total || 1;
+      b.innerHTML = `${att}${bar}
+        <div class="mute small">${r.phase === "trying" ? `Trying changes to the blocks: ${done} of ${total}, each run as it is.` : `Screening which settings matter: ${done} of ${total} backtests, each setting moved on its own.`}</div>`;
+      return;
+    }
+    if (live) {
+      const done = r.done || 0, total = r.total || 1;
+      b.innerHTML = `${att}${bar}
+        <div class="mute small">${done} of ${total} backtests · best so far, %/yr on the period the search sees:</div>
+        <table class="res" style="margin-top:6px"><tr><th>#</th><th>settings</th><th class="num">reliable</th><th class="num">average ${obj === "apr" ? "return" : "vs hold"}</th><th class="num">folds +</th></tr>
+        ${top.slice(0, 5).map((t, i) => `<tr><td>${i + 1}</td><td class="vals">${vals(t)}</td><td class="num">${pct(t.score)}</td><td class="num">${pct(t[obj])}</td><td class="num">${wfPos(t)}</td></tr>`).join("")}</table>`;
+      return;
+    }
+    if (r.mode === "walk") { walkRender(b, r); return; }
+    const cur = r.current || {}, ho = !!r.test;
+    const best = top[0];
+    let verdict = "";
+    if (best && ho && best.test && cur.test && !r.auto) {
+      const gain = (best.test[obj] ?? NaN) - (cur.test[obj] ?? NaN);
+      verdict = gain > 0 ? `<p class="pos">On the held-out quarter the best settings beat the current ones by ${fmt(gain, 1)} points a year.</p>`
+        : `<p class="warn">⚠ On the held-out quarter the best settings did no better than the current ones (${fmt(gain, 1)} points a year): they likely fit noise in the first three quarters. Prefer a row that holds up there, or keep the current settings.</p>`;
+    }
+    // how much the best rows agree: a broad plateau is a safer pick than a lone peak
+    const keys = best ? Object.keys(best.values || {}) : [];
+    const spread = keys.map(k => {
+      const xs = top.slice(0, 5).map(t => t.values[k]).filter(v => v != null);
+      if (xs.length < 2) return null;
+      const mn = Math.min(...xs), mx = Math.max(...xs);
+      return `${esc(name(k))} ${esc(val(k, mn))}–${esc(val(k, mx))}`;
+    }).filter(Boolean).join(" · ");
+    // a best value on the edge of its range: the optimum may lie beyond it
+    const edges = best && !r.auto ? (r.dims || []).filter(dm => !dm.choices && best.values[dm.key] != null && (Math.abs(best.values[dm.key] - dm.min) <= Math.abs(dm.max - dm.min) * 0.01 || Math.abs(best.values[dm.key] - dm.max) <= Math.abs(dm.max - dm.min) * 0.01))
+      .map(dm => `${esc(name(dm.key))} (${Math.abs(best.values[dm.key] - dm.min) < Math.abs(best.values[dm.key] - dm.max) ? "at its lowest" : "at its highest"}, ${esc(val(dm.key, best.values[dm.key]))})`) : [];
+    if (edges.length) verdict += `<p class="warn">⚠ The best value is on the edge of its range for ${edges.join(", ")}: the optimum may lie beyond it. Widen that range and run again (within the block's limits).</p>`;
+    // auto: what the screening found, and the suggestion
+    let autoHtml = "";
+    if (r.auto) {
+      const sg = r.suggestion || {}, picked = new Set(r.picked || []);
+      const rows = (r.screen || []).slice().sort((x, y) => (y.importance || 0) - (x.importance || 0));
+      const shown = rows.filter((x, i) => i < 12 || picked.has(x.key));
+      const rng = x => x.choices ? x.choices.map(v => val(x.key, v)).join(" / ") : `${val(x.key, x.min)}–${val(x.key, x.max)}`;
+      autoHtml = `<div class="${sg.apply != null ? "pos" : "warn"}" style="margin:0 0 10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px">
+          <b>${sg.apply != null ? "✓ Suggested: row 1." : "Suggestion: keep the current settings."}</b> <span>${esc(sg.why || "")}</span>
+          ${sg.apply != null ? ` <button class="sm" data-apply="${sg.apply}" style="margin-left:6px">Apply the suggestion</button>` : ""}</div>
+        ${attemptsHtml(r)}
+        ${periodsHtml(r.periods, "Every period, side by side", "The windows and the exam (last). For the current settings every period is in-sample if they were picked on this history; for an attempt's best, the folds it searched on are too, only its own window and the exam are not. Holding and the strategy without its exits were tuned on nothing.")}
+        <details ${r.top && r.top.length ? "" : "open"}><summary class="small"><b>Screening</b> (attempt 1): ${rows.length} settings moved one at a time; ${picked.size ? `${picked.size} tuned` : "none worth tuning"}
+          (current settings: ${pct(r.screen_base)} reliable)</summary>
+          <table class="res" style="margin:6px 0 10px"><tr><th>setting</th><th>tried</th><th class="num" title="how far the reliable return moved over the range, points of %/yr">moves the score</th>
+            <th class="num">best tried</th><th class="num" title="best tried less the current settings">gain</th><th>tuned</th></tr>
+          ${shown.map(x => `<tr><td>${esc(name(x.key))}</td><td class="mono small">${esc(rng(x))}</td><td class="num">${fmt(x.importance || 0, 1)}</td>
+            <td class="num">${x.best != null && isFinite(x.best) ? esc(val(x.key, x.best)) : "–"}</td><td class="num">${pct(x.gain)}</td><td>${picked.has(x.key) ? "✓" : ""}</td></tr>`).join("")}</table>
+          ${rows.length > shown.length ? `<p class="mute small">${rows.length - shown.length} more moved it less.</p>` : ""}</details>`;
+      if (!r.top || !r.top.length) {
+        b.innerHTML = autoHtml;
+        $("optFoot").innerHTML = `<span class="sp" style="flex:1"></span><button class="sec" data-x="close">Close</button>`;
+        return;
+      }
+    }
+    const ww = r.windows, hoName = r.auto ? "its window" : "held out";
+    b.innerHTML = autoHtml + (r.auto ? `<p class="mute small" style="margin-top:0">${r.runs_total} backtests in all${r.stopped ? " (stopped)" : ""}. Rows: attempt ${r.attempt} (${esc(r.label || "")}), searched on ${r.folds.n} folds of ${fmt(r.folds.days, 1)} days, judged on its window ${dateSpan(r.test)}; the exam is the last ${fmt(ww.exam.days, 0)} days. Returns are %/yr of the capital; rows are ranked by the reliable return over the folds and the window together.</p>` : "") + `<p class="mute small" style="margin-top:0;${r.auto ? "display:none" : ""}">${r.runs} backtests in ${r.rounds} rounds${r.stopped ? " (stopped)" : ""}${r.invalid ? `, ${r.invalid} refused${r.first_error ? ` (e.g. ${esc(r.first_error)})` : ""}` : ""}.
+        Searched ${fmt(r.train.days, 0)} days in ${r.folds ? r.folds.n : 1} fold${r.folds && r.folds.n > 1 ? "s" : ""} of ${fmt(r.folds ? r.folds.days : r.train.days, 1)} days${ho ? `; checked on the last ${fmt(r.test.days, 0)}` : ""}. Returns are %/yr of the capital.
+        <b>Reliable</b>: the average over the folds less its spread; ${ho ? "rows are ranked by it over all periods, the held-out quarter included" : "rows are ranked by it"}.</p>
+      ${verdict}${spread ? `<p class="mute small">Top 5 range: ${spread}</p>` : ""}
+      <table class="res"><tr><th>#</th><th>settings</th>${ho ? `<th class="num" title="reliable return over every period: the folds and the ${r.auto ? "attempt's window" : "held-out quarter"}">all periods</th>` : ""}<th class="num" title="reliable return over the folds the search saw">reliable</th>
+        <th class="num">average</th><th class="num" title="folds with a positive ${obj === "apr" ? "return" : "return over holding"}">folds +</th><th class="num">worst fold</th>${ho ? `<th class="num">${hoName}</th>` : ""}<th class="num">moves</th><th></th></tr>
+      <tr class="cur"><td>now</td><td class="vals">current settings</td>${ho ? `<td class="num">${allSc(cur)}</td>` : ""}<td class="num">${pct(cur.score)}</td><td class="num">${pct(cur[obj])}</td><td class="num" title="${esc(foldTip(cur))}">${wfPos(cur)}</td>
+        <td class="num">${pct(cur.wf && cur.wf.worst)}</td>${ho ? `<td class="num">${pct(cur.test && cur.test[obj])}</td>` : ""}<td class="num">${cur.actions ?? "–"}</td><td></td></tr>
+      ${top.map((t, i) => `<tr><td>${i + 1}</td><td class="vals">${vals(t)}</td>${ho ? `<td class="num"><b>${allSc(t)}</b></td>` : ""}<td class="num">${pct(t.score)}</td><td class="num">${pct(t[obj])}</td>
+        <td class="num" title="${esc(foldTip(t))}">${wfPos(t)}</td><td class="num">${pct(t.wf && t.wf.worst)}</td>${ho ? `<td class="num">${t.test && !t.test.error ? pct(t.test[obj]) : "–"}</td>` : ""}<td class="num">${t.actions ?? "–"}</td>
+        <td><button class="sm" data-apply="${i}">Apply</button></td></tr>`).join("")}</table>`;
+    $("optFoot").innerHTML = `<span class="mute small">Apply writes the settings into the blocks (unsaved until you save) and reruns the backtest.</span><span class="sp" style="flex:1"></span><button class="sec" data-x="close">Close</button>`;
+    b.onclick = e => {
+      const a = e.target.closest("[data-apply]");
+      if (!a) return;
+      const t = top[+a.dataset.apply];
+      if ((L.cur.id || L.cur.name) !== OPT.key) return toast("Another strategy is open now: these settings belong to the one that was optimized.", true);
+      if (t.strategy && Array.isArray(t.strategy.nodes)) {
+        // the whole strategy the row stands for (a change to the blocks too), placed where the blocks were
+        const was = Object.fromEntries(L.cur.strategy.nodes.map(n => [n.id, n]));
+        const nodes = JSON.parse(JSON.stringify(t.strategy.nodes));
+        for (const n of nodes) {
+          if (n.x != null || was[n.id]) continue;
+          const user = nodes.find(m => m.in && Object.values(m.in).some(src => Array.isArray(src) && src[0] === n.id));
+          n.x = Math.max(0, ((user && user.x) || 0) - 240); n.y = (user && user.y) || 0;
+        }
+        L.cur.strategy.nodes = nodes;
+        optClose(el);
+        drawNodes(); changed();
+        return toast(t.change ? "Change applied: rerunning the backtest." : "Settings applied: rerunning the backtest.");
+      }
+      for (const [k, v] of Object.entries(t.values)) {
+        const [nid, p] = k.split("."), n = node(nid);
+        if (!n) continue;
+        if (p === "tf") { if (v === 5) delete n.tf; else n.tf = v; }
+        else { n.p = n.p || {}; n.p[p] = v; }
+      }
+      optClose(el);
+      drawNodes(); changed();
+      toast("Settings applied: rerunning the backtest.");
+    };
   }
   function removeNode(id) {
     const s = L.cur.strategy;
@@ -1310,7 +1827,7 @@
   }
   function addNode(kind, x, y) {
     const s = L.cur.strategy, c = kcat(kind);
-    if (["range", "rebalance", "exit", "hold"].includes(kind) && s.nodes.some(n => n.kind === kind)) return toast(`There is already a ${K[kind][0]} block.`, true);
+    if (["range", "ladder", "rebalance", "exit", "hold"].includes(kind) && s.nodes.some(n => n.kind === kind)) return toast(`There is already a ${K[kind][0]} block.`, true);
     const n = {id: freeId(kind), kind, x: Math.round(x / 6) * 6, y: Math.round(y / 6) * 6, p: {}, in: {}};
     for (const p of c.params) n.p[p.name] = p.default;
     s.nodes.push(n);
@@ -1346,21 +1863,37 @@
       for (const k of ["cutoff_lo", "cutoff_hi", "exit_lo", "exit_hi"]) if (r[k] != null) lines.push(r[k]);
     }
     const ticks = pts.map(p => p[1]);
-    let lo = Math.min(...lines, ...ticks), hi = Math.max(...lines, ...ticks);
+    // everything the chart draws fits: the backtested ranges, the wanted range and the indicator lines shown
+    const res = L.res, main = res && res.runs && res.runs.main, ov = res && res.overlays;
+    if (main && main.segments) for (const sg of main.segments) lines.push(sg[2], sg[3]);
+    if (ov && !rules) {
+      for (const w of ov.wanted || []) if (w) lines.push(w[0], w[1]);
+      for (const l of ov.lines || []) if (ovOn(l) && frameOf(l) === "pool") for (const v of l.v) if (v != null) lines.push(v);
+    }
+    // lines in a watched token's USD price get their own scale, on the right
+    const usd = [];
+    if (ov && !rules) for (const l of ov.lines || []) if (ovOn(l) && frameOf(l) === "usd") for (const v of l.v) if (v != null && Number.isFinite(v)) usd.push(v);
+    const fin = lines.filter(Number.isFinite);
+    let lo = Math.min(...fin, ...ticks), hi = Math.max(...fin, ...ticks);
     const pad = Math.max((hi - lo) * 0.08, 2 * sp());
     if (!drag) L.yr = [lo - pad, hi + pad]; else L.yr = [Math.min(L.yr[0], lo - pad / 2), Math.max(L.yr[1], hi + pad / 2)];
     const [y0, y1] = L.yr;
-    const left = 64, right = rules ? 176 : 16, top = 10, bot = 26;
+    const left = 64, right = rules ? 176 : usd.length ? 70 : 16, top = 10, bot = 26;
     const x0 = pts.length ? pts[0][0] : 0, x1 = pts.length ? pts[pts.length - 1][0] : 1;
     const X = t => left + (t - x0) / (x1 - x0 || 1) * (W - left - right);
     const Y = t => top + (y1 - t) / (y1 - y0 || 1) * (H - top - bot);
     const T = y => y1 - (y - top) / (H - top - bot) * (y1 - y0);
+    let u0 = Math.min(...usd), u1 = Math.max(...usd);
+    if (usd.length) { const up = Math.max((u1 - u0) * 0.08, 5); u0 -= up; u1 += up; }
+    const Y2 = t => top + (u1 - t) / (u1 - u0 || 1) * (H - top - bot);
     if (rules && (!drag || !L.zs)) { const hs = Math.max(c - blo, bhi - c, 2 * sp()) * 1.9; L.zs = [c - hs, c + hs]; }
     const [s0, s1] = L.zs || [0, 1];
     const Ys = t => top + 22 + (s1 - t) / (s1 - s0) * (H - top - bot - 44);
     const Ts = y => s1 - (y - top - 22) / (H - top - bot - 44) * (s1 - s0);
-    return {svg, W, H, pts, r, c, tl, tu, blo, bhi, X, Y, T, Ys, Ts, left, right, top, bot, x0, x1, rules};
+    return {svg, W, H, pts, r, c, tl, tu, blo, bhi, X, Y, T, Ys, Ts, left, right, top, bot, x0, x1, rules, Y2, usd: usd.length ? [u0, u1] : null};
   }
+  // a tick of a USD price as dollars, rounded to what the scale needs
+  const fmtUsdTick = t => { const v = Math.pow(1.0001, t); return v >= 1000 ? Math.round(v).toLocaleString() : v >= 1 ? v.toFixed(2) : v.toPrecision(3); };
   const OVC = ["var(--c4)", "var(--c3)", "var(--c6)", "var(--c1)", "var(--c5)", "var(--info)"];
   // indicator lines start shown, intermediate maths (offsets, switches…) start hidden
   function ovOn(l) {
@@ -1368,20 +1901,27 @@
     const n = L.cur && L.cur.strategy.nodes && L.cur.strategy.nodes.find(x => x.id === l.node);
     return !n || (K[n.kind] || [])[1] === "ind";
   }
+  // the price a line is in: the pool's own, a watched token's USD price (right-hand scale), or a mix
+  // of both that no one scale can show (overlays from graph.rs)
+  const frameOf = l => l.frame || "pool";
+  const FRAME_TIP = {usd: "in the watched token's USD price: drawn against the $ scale on the right", mixed: "mixes the pool's price with a USD price: there is no scale to draw it on"};
   function renderOverlayChips() {
     const ov = L.res && L.res.overlays;
-    $("labOv").innerHTML = ov && ov.lines.length ? ov.lines.map((l, i) => `<button data-ov="${esc(l.name)}" class="${ovOn(l) ? "on" : ""}"><i style="background:${OVC[i % OVC.length]}"></i>${esc(l.name)}</button>`).join("") : "";
+    $("labOv").innerHTML = ov && ov.lines.length ? ov.lines.map((l, i) => `<button data-ov="${esc(l.name)}" class="${ovOn(l) && frameOf(l) !== "mixed" ? "on" : ""}" ${FRAME_TIP[frameOf(l)] ? `title="${esc(FRAME_TIP[frameOf(l)])}"` : ""} ${frameOf(l) === "mixed" ? "disabled" : ""}><i style="background:${OVC[i % OVC.length]}"></i>${esc(l.name)}${frameOf(l) === "usd" ? " ($)" : ""}</button>`).join("") : "";
   }
   function chartRange() {
     const g = geom(), svg = $("labSvg");
     if (!g) { svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="yl">${L.pool ? (L.job ? "loading the pool's history…" : "no price yet") : "choose a pool"}</text>`; $("labNow").textContent = ""; $("labLegend").innerHTML = ""; return; }
-    const {W, H, pts, r, c, tl, tu, blo, bhi, X, Y, Ys, left, right, top, bot, rules} = g;
+    const {W, H, pts, r, c, tl, tu, blo, bhi, X, Y, Ys, left, right, top, bot, rules, Y2} = g;
     const xr = W - right, strip = [xr + 8, W - 4];
     let h = "";
     for (let i = 0; i <= 5; i++) {
       const t = L.yr[0] + (L.yr[1] - L.yr[0]) * i / 5, y = Y(t);
       h += `<line x1="${left}" x2="${xr}" y1="${y}" y2="${y}" stroke="var(--line)"/><text class="yl" x="${left - 6}" y="${y + 4}" text-anchor="end">${pfmt(t)}</text>`;
+      if (g.usd) { const u = g.usd[0] + (g.usd[1] - g.usd[0]) * i / 5; h += `<text class="yl" x="${xr + 6}" y="${Y2(u) + 4}" text-anchor="start">$${fmtUsdTick(u)}</text>`; }
     }
+    // the plot area clips what is drawn in it (a range dragged past the scale stays inside the box)
+    h += `<defs><clipPath id="labClip"><rect x="${left}" y="${top}" width="${Math.max(0, xr - left)}" height="${Math.max(0, H - top - bot)}"/></clipPath></defs><g clip-path="url(#labClip)">`;
     const main = L.res && L.res.runs.main;
     h += ((main && main.segments) || []).map(s => `<rect x="${X(s[0])}" width="${Math.max(1, X(s[1]) - X(s[0]))}" y="${Y(s[3])}" height="${Math.max(1, Y(s[2]) - Y(s[3]))}" fill="var(--acc)" opacity=".16"/>`).join("");
     if (rules) {
@@ -1398,8 +1938,14 @@
     if (ov && !rules && pts.length) {
       const seg = (vals, f) => { let d = "", on = false; vals.forEach((v, i) => { if (v == null || i >= pts.length) { on = false; return; } d += `${on ? "L" : "M"}${X(pts[i][0]).toFixed(1)},${Y(f(v)).toFixed(1)}`; on = true; }); return d; };
       h += `<path d="${seg(ov.wanted, v => v[0])}" fill="none" stroke="var(--acc)" stroke-width="1.2" stroke-dasharray="5 4" opacity=".9"/><path d="${seg(ov.wanted, v => v[1])}" fill="none" stroke="var(--acc)" stroke-width="1.2" stroke-dasharray="5 4" opacity=".9"/>`;
-      ov.lines.forEach((l, i) => { if (ovOn(l)) h += `<path d="${seg(l.v, v => v)}" fill="none" stroke="${OVC[i % OVC.length]}" stroke-width="1.3" opacity=".9"/>`; });
+      const segU = vals => { let d = "", on = false; vals.forEach((v, i) => { if (v == null || i >= pts.length) { on = false; return; } d += `${on ? "L" : "M"}${X(pts[i][0]).toFixed(1)},${Y2(v).toFixed(1)}`; on = true; }); return d; };
+      ov.lines.forEach((l, i) => {
+        if (!ovOn(l) || frameOf(l) === "mixed") return;
+        h += frameOf(l) === "usd" ? `<path d="${segU(l.v)}" fill="none" stroke="${OVC[i % OVC.length]}" stroke-width="1.3" stroke-dasharray="1 0" opacity=".9"/>`
+          : `<path d="${seg(l.v, v => v)}" fill="none" stroke="${OVC[i % OVC.length]}" stroke-width="1.3" opacity=".9"/>`;
+      });
     }
+    h += `</g>`;
     const ev = (main && main.events) || [];
     h += ev.map(e => `<line x1="${X(e.ts)}" x2="${X(e.ts)}" y1="${H - bot}" y2="${H - bot - 6}" stroke="${e.kind === "exit" ? COL.exit : COL.range}" stroke-width="1.5"/>`).join("");
     if (rules) {
@@ -1429,7 +1975,7 @@
       const w = ov && ov.wanted && ov.wanted[ov.wanted.length - 1];
       $("labNow").innerHTML = w ? `wanted now <b class=mono>${pfmt(w[0])} – ${pfmt(w[1])}</b> · ${w[1] - w[0]} ticks · price ${pfmt(c)}` : `price ${pfmt(c)}`;
       $("labLegend").innerHTML = `<span><i style="background:var(--fg2)"></i>price</span><span><i style="background:var(--acc);opacity:.8"></i>┅ range the strategy wants</span>
-        <span><i style="background:color-mix(in srgb,var(--acc) 35%,transparent);height:9px"></i>backtested ranges</span>${ov && ov.lines.length ? "<span>indicator lines: toggle them above</span>" : ""}`;
+        <span><i style="background:color-mix(in srgb,var(--acc) 35%,transparent);height:9px"></i>backtested ranges</span>${ov && ov.lines.length ? "<span>indicator lines: toggle them above</span>" : ""}${g.usd ? "<span>($) lines: the watched token's USD price, scale on the right</span>" : ""}`;
     }
     const {x0, x1} = g;
     if (pts.length) h += [0, .5, 1].map(f => `<text class="yl" x="${left + f * (xr - left)}" y="${H - 6}" text-anchor="${f === 0 ? "start" : f === 1 ? "end" : "middle"}">${new Date((x0 + (x1 - x0) * f) * 1000).toLocaleDateString(undefined, {month: "short", day: "numeric"})}</text>`).join("");
@@ -1789,11 +2335,11 @@
         <div class="t">${grip(c)}<i style="background:${c.col}"></i><span class="n">${esc(c.name)}<br><span class="sub">${esc(c.sub)}</span></span>
           ${c.main ? "" : `<span class="cx" ${c.hold ? "data-unhold" : `data-unpick="${esc(c.r.id)}"`} title="remove from the comparison">×</span>`}
           <span data-help="lab-r-pnl"><div class="big ${c.r.pnl === B.pnl ? "best" : ""}">${sg(c.r.pnl)}</div><div class="apr">${fmt(c.r.pnl / res.capital * 100 * 365 / (res.span_days || res.days), 2)}% a year</div></span></div>
-        <div class="g">${cell("vs hold", c.hold ? null : c.r.vs_hodl, "hodl", "lab-r-hodl")}${cell("fees", c.r.fees, "fees", "lab-r-fees")}${cell("emissions", c.r.emissions, "emis", "lab-r-emis")}${cell("costs", -(c.r.swap_costs + c.r.gas), "costs", "lab-r-costs")}
+        <div class="g">${cell("vs hold", c.hold ? null : c.r.vs_hodl, "hodl", "lab-r-hodl")}${cell("fees", c.r.fees, "fees", "lab-r-fees", c.r.park_yield > 0 ? `${sg(c.r.fees)} <span class="mute small" data-help="lab-r-park">+ ${sg(c.r.park_yield)} parked</span>` : undefined)}${cell("emissions", c.r.emissions, "emis", "lab-r-emis")}${cell("costs", -(c.r.swap_costs + c.r.gas), "costs", "lab-r-costs")}
           ${cell("IL", c.hold ? null : c.r.il, "il", "lab-r-il")}${cell("moves", null, null, "lab-r-moves", String(c.r.actions))}${cell("in range", null, null, "lab-r-tir", c.hold ? "–" : fmt(c.r.time_in_range * 100, 1) + "%")}${cell("end value", null, null, "lab-r-value", "$" + fmt(c.r.value * U, dec))}</div>
         ${c.main ? `<div class="of" id="labOf">${overfitHtml()}</div>` : ""}</div>`).join("") +
       `<div class="mute small" style="margin:-2px 0 8px">Amounts in USD${sym && !/^(USDC|USDT|USDC\.E|USDBC|DAI)$/i.test(sym) ? ` (counted in ${esc(sym)} at $${fmt(U, U > 100 ? 0 : 4)})` : ""}. Green is the best of the runs.</div>`;
-    $("labMeta").innerHTML = `${new Date(res.from * 1000).toLocaleDateString()} – ${new Date(res.to * 1000).toLocaleDateString()} · ${res.swaps.toLocaleString()} swaps · capital $${fmt(res.capital_usd ?? res.capital * U, 0)}${res.entry_cost > 0 ? ` (buying ${esc(sym)} with it cost $${fmt(res.entry_cost * U, 2)})` : ""}`;
+    $("labMeta").innerHTML = `${new Date(res.from * 1000).toLocaleDateString()} – ${new Date(res.to * 1000).toLocaleDateString()}${res.span_days != null && res.span_days < res.days - 1 ? ` <span class="warn" title="the pool has no swaps before this: the period starts at its history">(all the pool's history: ${fmt(res.span_days, 0)} of ${res.days} days)</span>` : ""} · ${res.swaps.toLocaleString()} swaps · capital $${fmt(res.capital_usd ?? res.capital * U, 0)}${res.entry_cost > 0 ? ` (buying ${esc(sym)} with it cost $${fmt(res.entry_cost * U, 2)})` : ""}`;
     const short = res.span_days && res.span_days < res.days - 1;
     $("labNotes").textContent = (short ? `The pool's history covers only ${fmt(res.span_days, 0)} of the ${res.days} days asked for; yearly rates use the days covered. ` : "") + res.notes.join(" ") + (res.runs.main.guard_bars ? ` The strategy held still (guard or hold) for ${fmt(res.runs.main.guard_bars * 5 / 60, 1)} hours.` : "")
       + elasticityNote(res.elasticity)
@@ -1829,21 +2375,6 @@
     $("labEqAxis").innerHTML = `Value over time, $${fmt(lo * (res.numeraire_usd || 1), 2)} to $${fmt(hi * (res.numeraire_usd || 1), 2)} · <span style="color:var(--fg2)">┅</span> holding the first deposit`;
   }
 
-  // ---------- re-arm ----------
-  async function loadCustomState() {
-    const box = $("labRearm");
-    box.innerHTML = "";
-    const cfg = cfgOf();
-    if (!cfg || !cfg.strategy || !["custom", "graph"].includes(cfg.strategy.type)) return;
-    try {
-      const st = await api(`/api/custom/state/${L.chain}/${L.pool}`);
-      const s = S.settings.execute ? st.live : st.dry;
-      if (s.exited) box.innerHTML = `<div class="rearm" data-help="lab-rearm"><span>● ${esc(cfg.name)} exited and stays out until its re-entry condition holds.</span><span class="sp"></span><button class="sm" id="labRearmBtn">Re-arm</button></div>`;
-      const b = $("labRearmBtn");
-      if (b) b.onclick = async () => { try { await api("/api/custom/rearm", {chain_id: L.chain, pool: L.pool}); toast("Re-armed: the next cycle deposits again."); loadCustomState(); } catch (e) { toast(e.message, true); } };
-    } catch (e) { /* no state yet */ }
-  }
-
   // ---------- the library for the Pools view's strategy picker ----------
   // a library strategy as a pool's strategy: simple rules in spacings become this pool's ticks, a
   // ladder gets the app's defaults for the pool (as adding the pool would), a node strategy its name
@@ -1876,6 +2407,7 @@
     paramName: k => PNAME[k] || k,
     forPool: forPoolCfg,
     reload: () => loadLib(),
+    refresh: () => refreshLib(),
   };
 
   // ---------- boot ----------

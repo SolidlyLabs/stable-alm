@@ -80,6 +80,7 @@ button{background:var(--acc);color:var(--acc-ink);border:0;border-radius:9px;pad
 button:hover{filter:brightness(1.08)}button:active{transform:translateY(1px)}button:disabled{opacity:.45;cursor:default}
 button.sec{background:transparent;color:var(--fg);border:1px solid var(--line2)}button.sec:hover{background:var(--card2)}
 button.danger{background:var(--bad);color:#fff}button.sm{padding:5px 10px;font-size:12px;border-radius:8px}button.ghost{background:none;color:var(--mute);border:0;padding:4px 6px}
+.parkopt:hover{background:var(--card2)}#parkList button.ghost:hover{color:var(--bad)}
 input,select{background:var(--card2);color:var(--fg);border:1px solid var(--line);border-radius:9px;padding:8px 10px;font:inherit;width:100%;transition:border-color .15s,box-shadow .15s}
 input:focus,select:focus{outline:0;border-color:color-mix(in srgb,var(--acc) 60%,var(--line));box-shadow:0 0 0 3px var(--acc-soft)}
 input[type=checkbox]{width:auto;accent-color:var(--acc)}input[type=range]{padding:0;accent-color:var(--acc);background:none;border:0;box-shadow:none}
@@ -258,6 +259,14 @@ svg.chart{width:100%;height:210px;display:block}
           calls for tokens the wallet does not hold (largest balance first). Each chain starts with its USDC and USDT; an empty list turns
           funding off on that chain.</p>
         <div id="fundList"></div></div>
+      <div class="card" id="parkCard" data-help="set-parking"><h2>Parking whitelist</h2>
+        <p class="mute small" style="margin-top:0">While a strategy with parking on waits out of its pool in one token, that token earns in
+          the pegged pool listed for it here, until the strategy needs it again. Parked tokens are kept apart from that pool's own
+          positions. Turn parking on under Options, then on each strategy (Strategy lab).</p>
+        <input id="parkQ" type="search" placeholder="Add a token: search pegged pools by token, pair or chain…" spellcheck="false" oninput="renderParking()" style="width:100%;margin-bottom:6px">
+        <div id="parkAdd" style="display:none;max-height:260px;overflow-y:auto;border:1px solid var(--line);border-radius:10px;margin-bottom:8px"></div>
+        <div id="parkList" style="max-height:320px;overflow-y:auto;border:1px solid var(--line);border-radius:10px;padding:2px 10px"></div>
+        <div class="mute small" id="parkSum" style="margin-top:6px"></div></div>
       <div class="card" id="rpcCard"><h2>Chains &amp; RPC</h2>
         <p class="mute small" style="margin-top:0">Where the app reads chain data and sends transactions. Defaults are dRPC's free public
           endpoints (3 requests per batch, about 40 requests a minute, reads grouped with Multicall3). Use your own endpoint for more speed or privacy; it is checked
@@ -373,6 +382,8 @@ function show(t) {
   try { localStorage.setItem("alm.tab", t); } catch (e) {}
   if (t === "pools" && !MARKET) loadMarket();
   if (t === "settings" && !TOKENS) loadTokens();
+  // the strategy library as the app has it now: strategies saved or edited outside this page show up
+  if ((t === "pools" || t === "lab") && window.LABLIB && LABLIB.refresh) LABLIB.refresh();
 }
 document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => show(b.dataset.t));
 // ---------- status ----------
@@ -464,6 +475,7 @@ function renderOverview(acct, w) {
         <div><div>Tick · fee</div><b>${a.tick ?? "–"}</b> <span class="mute small">· ${a.fee_pips ?? "–"} pips</span></div>
         <div data-help="flvr"><div title="fee income ÷ loss to arbitrage, trailing 7 days; good above 10, warning below 2">Fee / arb loss (7d)</div>${flvrFig(st.flvr)}</div></div>
       <div class="ladder pos-list">${pos}</div>
+      ${(st.parked || []).length ? `<div class="small" style="margin-top:8px" data-help="lab-park">Parked while waiting: ${st.parked.map(l => `<b>${esc(l.symbol || "?")}</b> $${fmt(l.usd || 0, 2)} in <span class=mono>${esc((l.pool || "").slice(0, 10))}</span>`).join(", ")}${S.mode === "dry run" || (S.worker || {}).mode === "dry run" ? " <span class=mute>(dry run)</span>" : ""}</div>` : ""}
       <div class="small" style="margin-top:10px">Last decision: <b>${esc(st.mode || "–")}</b>${st.error ? ` <span class=bad>${esc(st.error)}</span>` : ""}
         ${st.report ? `<details style="margin-top:4px"><summary>cycle log</summary><pre class="mute">${esc(st.report.join("\n"))}</pre></details>` : ""}</div></div>`;
   });
@@ -555,7 +567,7 @@ async function toggleChain(id, on) {
 async function loadMarket(force) {
   if (force) MARKET = null;
   if (!MARKET) renderPools();
-  try { MARKET = (await api("/api/market")).pools; renderChainBar(); if (S && !$("pools").contains(document.activeElement)) renderPools(); }
+  try { MARKET = (await api("/api/market")).pools; renderChainBar(); renderParking(); if (S && !$("pools").contains(document.activeElement)) renderPools(); }
   catch (e) { MARKET = []; $("pools").innerHTML = `<tr><td class="bad empty">${esc(e.message)}</td></tr>`; }
 }
 function estApr(win, dep) {
@@ -797,6 +809,8 @@ const SETTINGS = [
   ["solid_lp.max_price_dev_pct", "SOLID LP: max pool price deviation (%)", "number"], ["solid_lp.slippage_bps", "SOLID LP: mint slippage (bp)", "number"],
   ["solid_lp.max_swap_cost_bps", "SOLID LP: max cost buying the pair (bp)", "number"], ["retries.attempts", "Retries per step", "number"], ["retries.backoff_s", "Retry backoff (s)", "number"],
   ["wallet", "Managed wallet", "text"], ["ui_port", "Dashboard port (127.0.0.1)", "number"],
+  ["parking.enabled", "Park waiting tokens in pegged pools", "checkbox"], ["parking.min_usd", "Min value to park ($)", "number"],
+  ["parking.range_pct", "Parking range (± % of the price)", "number"],
 ];
 const getp = (o, k) => k.split(".").reduce((a, b) => a?.[b], o);
 function renderRpc() {
@@ -846,6 +860,7 @@ function renderSettings() {
     ? `<div><label class="sw" style="margin-top:22px"><input type=checkbox data-k="${k}" ${getp(S.settings, k) ? "checked" : ""}><span class="t"></span>${l}</label></div>`
     : `<div ${k === "wallet" ? 'style="grid-column:1/-1"' : ""}><label class=f>${l}</label><input data-k="${k}" type=${t} step=any value="${esc(getp(S.settings, k) ?? "")}"></div>`).join("");
   renderFunding();
+  if (!$("parkCard") || !$("parkCard").contains(document.activeElement)) renderParking();
   const sg = S.signer || {};
   $("keyStatus").innerHTML = sg.error ? `<span class=bad>${esc(sg.error)}</span>` : sg.stored ? `Key set for <b class=mono>${esc(sg.address)}</b>` +
     (sg.address && sg.address.toLowerCase() !== S.settings.wallet.toLowerCase() ? ` <span class=bad>(≠ managed wallet ${esc(S.settings.wallet)})</span>` : " <span class=ok>(matches the managed wallet)</span>")
@@ -853,6 +868,94 @@ function renderSettings() {
   const where = {"Windows DPAPI": "Encrypted for your Windows account (DPAPI, secrets/private_key.dpapi)",
                  "macOS Keychain": "Kept in your macOS login Keychain"}[sg.storage];
   $("keyStore").textContent = where || "Stored as a plain file (secrets/private_key, mode 600)";
+}
+// Parking whitelist: token -> pegged pool, per chain (parking.rs). Candidates are the pegged pools of
+// the market list, one entry per token of each.
+const parkPools = () => (S.settings.parking || {}).pools || [];
+// names of the whitelisted entries from the server's cached token metadata, until the market list loads
+let PARKNAMES = [], parkNamesFor = "";
+const parkName = (cid, token, pool) => PARKNAMES.find(n => n.chain_id === cid && n.token === token && (!pool || n.pool === pool));
+const symOf = (cid, addr) => { for (const m of MARKET || []) for (const t of [m.token0, m.token1]) if (m.chain_id === cid && t.address === addr) return t.symbol;
+  const n = PARKNAMES.find(n => n.chain_id === cid && (n.token === addr)); return (n && n.symbol) || addr.slice(0, 8); };
+const poolOf = (cid, addr) => (MARKET || []).find(m => m.chain_id === cid && m.pool === addr);
+async function loadParkNames() {
+  const key = JSON.stringify(parkPools());
+  if (key === parkNamesFor) return;
+  parkNamesFor = key;
+  try { PARKNAMES = (await api("/api/parking/names")).names || []; renderParking(); } catch (e) { parkNamesFor = ""; }
+}
+function renderParking() {
+  if (!$("parkList")) return;
+  loadParkNames();
+  const list = parkPools(), q = ($("parkQ") ? $("parkQ").value : "").trim().toLowerCase();
+  const on = r => list.some(e => e.chain_id === r.chain_id && e.token === r.token && e.pool === r.pool);
+  const pair = r => { if (r.m) return r.m.token0.symbol + "/" + r.m.token1.symbol;
+    const n = parkName(r.chain_id, r.token, r.pool); return n && n.pair && n.pair[0] && n.pair[1] ? n.pair.join("/") : r.pool.slice(0, 10); };
+  const stats = r => esc(chainOf(r.chain_id).name) + (r.m ? " · TVL " + usd(r.m.tvl_usd, 0) + " · fee APR " + fmt(r.m.processor_apr_24h || 0, 1) + "%" : "");
+  // search: every token of every pegged pool not whitelisted yet, best first; a pick adds it
+  const add = $("parkAdd");
+  if (add) {
+    const cands = [];
+    if (q) for (const m of (MARKET || []).filter(m => m.pegged)) for (const t of [m.token0, m.token1]) {
+      const r = {chain_id: m.chain_id, token: t.address, pool: m.pool, sym: t.symbol, m};
+      if (!on(r) && [r.sym, pair(r), chainOf(r.chain_id).name, r.token, r.pool].some(x => String(x).toLowerCase().includes(q))) cands.push(r);
+    }
+    cands.sort((a, b) => (b.m.tvl_usd || 0) - (a.m.tvl_usd || 0));
+    const taken = r => list.find(e => e.chain_id === r.chain_id && e.token === r.token);
+    add.innerHTML = !q ? "" : cands.length ? cands.slice(0, 8).map(r => `<div class="row parkopt" style="gap:8px;padding:6px 10px;cursor:pointer;border-bottom:1px solid var(--line)"
+        onclick="addPark(${r.chain_id},'${esc(r.token)}','${esc(r.pool)}')" title="${taken(r) ? "replaces its current pool: one per token and chain" : "add to the whitelist"}">
+        <span class="cdot" style="--cc:${cc(r.chain_id)}"></span><b>${esc(r.sym)}</b><span class="mute">→</span><span>${esc(pair(r))}</span>
+        <span class="sp"></span><span class="mute small">${stats(r)}${taken(r) ? " · replaces " + esc(pair({...taken(r), m: poolOf(r.chain_id, taken(r).pool)})) : ""}</span><b class="ok">+</b></div>`).join("")
+      : `<p class="mute small" style="padding:6px 10px;margin:0">${MARKET ? "No pegged pool has a token like that." : "Loading pools…"}</p>`;
+    add.style.display = q ? "" : "none";
+  }
+  // the whitelist itself, each entry with how its lots are held and a delete button
+  const rows = list.map(e => ({...e, sym: symOf(e.chain_id, e.token), m: poolOf(e.chain_id, e.pool)}));
+  $("parkList").innerHTML = rows.length ? rows.map(r => `<div style="padding:6px 0;border-bottom:1px solid var(--line)"><div class="row" style="gap:8px">
+      <span class="cdot" style="--cc:${cc(r.chain_id)}"></span><b>${esc(r.sym)}</b><span class="mute">→</span><span>${esc(pair(r))}</span>
+      <span class="sp"></span><span class="mute small">${stats(r)}</span>
+      <button class="ghost icon" title="Remove ${esc(r.sym)} from the whitelist" aria-label="Remove ${esc(r.sym)}" onclick="removePark(${r.chain_id},'${esc(r.token)}')"
+        style="padding:4px 6px;line-height:0"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/></svg></button></div>
+      ${parkHow(r, pair(r))}</div>`).join("")
+    : `<p class="mute small" style="margin:8px 0">Nothing whitelisted: no token is parked. Search above to add one.</p>`;
+  $("parkSum").textContent = list.length ? `${list.length} whitelisted: ${list.map(e => symOf(e.chain_id, e.token)).join(", ")}` : "";
+}
+async function saveParking(list) {
+  try { await api("/api/settings", {parking: {pools: list}}); S.settings.parking = {...(S.settings.parking || {}), pools: list}; renderParking(); toast("Parking whitelist saved."); }
+  catch (e) { toast(e.message, true); renderParking(); }
+}
+// How a whitelisted token's lots are held: a pool with an ALM of its own keeps them apart from it on
+// a fixed range; any other pool lets the entry pick fixed or re-centre, and its range width.
+function parkHow(r, name) {
+  const e = parkPools().find(e => e.chain_id === r.chain_id && e.token === r.token && e.pool === r.pool) || {};
+  const alm = S.pools.find(p => pchain(p) === r.chain_id && (p.pool || "").toLowerCase() === r.pool.toLowerCase());
+  const pct = (S.settings.parking || {}).range_pct ?? 0.5, arg = `${r.chain_id},'${esc(r.token)}'`;
+  if (alm) return `<div class="mute small" style="margin:4px 0 0 26px">${esc(name)} runs its own ALM (<b>${esc(alm.name)}</b>${alm.enabled ? "" : ", off"}): parked lots stay apart from its positions, on a fixed range ±${fmt(e.range_pct ?? pct, 2)}%.</div>`;
+  const rec = e.strategy === "recentre";
+  return `<div class="row small" data-help="set-parking-how" style="gap:8px;margin:4px 0 0 26px;flex-wrap:wrap">
+      <span class="mute">held as</span>
+      <select style="width:auto" onchange="setParkOpt(${arg},'strategy',this.value)"><option value="fixed" ${rec ? "" : "selected"}>Fixed range</option><option value="recentre" ${rec ? "selected" : ""}>Re-centre when out of range</option></select>
+      <span class="mute">±</span><input type="number" step="0.05" min="0.01" max="20" style="width:70px" value="${esc(e.range_pct ?? "")}" placeholder="${fmt(pct, 2)}" onchange="setParkOpt(${arg},'range_pct',this.value)"><span class="mute">%</span>
+      ${rec ? `<span class="mute">after</span><input type="number" step="5" min="0" max="10080" style="width:70px" value="${esc(e.recentre_after_min ?? 60)}" onchange="setParkOpt(${arg},'recentre_after_min',this.value)"><span class="mute">min out</span>` : ""}</div>`;
+}
+function setParkOpt(cid, token, k, v) {
+  const list = parkPools().map(e => {
+    if (e.chain_id !== cid || e.token !== token) return e;
+    const n = {...e};
+    if (v === "" || v == null) delete n[k]; else n[k] = k === "strategy" ? v : Number(v);
+    if (k === "strategy" && v === "fixed") { delete n.strategy; delete n.recentre_after_min; }
+    return n;
+  });
+  saveParking(list);
+}
+// a token parks in one pool per chain: adding another pool for it moves it there
+function addPark(cid, token, pool) {
+  const list = parkPools().filter(e => !(e.chain_id === cid && e.token === token));
+  $("parkQ").value = "";
+  saveParking([...list, {chain_id: cid, token, pool}]);
+}
+function removePark(cid, token) {
+  saveParking(parkPools().filter(e => !(e.chain_id === cid && e.token === token)));
 }
 async function loadTokens() {
   if (tokensLoading) return;

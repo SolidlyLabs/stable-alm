@@ -288,6 +288,17 @@ def run(m: Market, strat, capital: float = 10_000.0, costs: Costs = None, start_
                 st.ranges = ranges
             else:
                 st.x, st.y, st.ranges = X, Y, []
+            # idle tokens held in a chosen mix (directional strategies wait part of the capital in a token)
+            w0 = getattr(strat, "idle_w0", None)
+            if w0 is not None:
+                Vi = m.value(st.x, st.y, pp)
+                want_x = w0 * Vi / pp if m.pool.numeraire == 1 else w0 * Vi
+                sv = abs(m.value(st.x - want_x, 0.0, pp))
+                if sv > 1e-9:
+                    ci = sv * costs.swap_bps / 1e4 + costs.gas
+                    c += ci  # booked in `cost` (equity subtracts it), not taken from the tokens
+                    st.x = w0 * Vi / pp if m.pool.numeraire == 1 else w0 * Vi
+                    st.y = (1 - w0) * Vi if m.pool.numeraire == 1 else (1 - w0) * Vi * pp
             c += n_tx * costs.gas
             cost += c
             alpha -= c

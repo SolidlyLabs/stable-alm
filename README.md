@@ -41,40 +41,113 @@ the help panel explains how to read it.
 ### Your own strategies: the Strategy lab
 
 Instead of the ladder, a pool can run a strategy you build in the **Strategy lab** tab. The lab has a
-**library**: built-in strategies (the ladder, simple one-range rules, and strategies built on
-indicators such as Bollinger bands, ATR, Keltner and Donchian channels, an EMA trend, a peg band, a
-volatility freeze, mean reversion, an ADX calm-market filter, the Ichimoku base line, a trend lean and
-a MACD momentum pause), plus the ones you saved under your own names
+**library**: five built-in strategies, the ones that earned their place in a two-year audit of Base
+pools (`reports/LIBRARY.md`): the ladder, the ladder as a block, a Bollinger band range, and two
+"wait out the move" strategies for volatile pairs (the plain one and one that also watches WETH's
+moves; research in `reports/DIRECTIONAL.md`), plus the ones you saved under your own names
 (`config/strategies.json`). **Select strategy** lists them all with the APR each would have earned on the
 chosen pool and period (backtested four at a time when the list opens), so you can sort by it, open
 one, or add it to the comparison. **New**, **Save** and **Save as…** manage your own.
 
 There are two kinds of strategy you can edit:
 
-- **Simple rules**: one range of a set width, centred on the price or following it from the edge it
-  crossed; a trigger band (buffers), a delay and a cooldown; cutoff prices beyond which it waits; and
-  exit prices that withdraw everything, optionally into one token, with an optional re-entry. You can
-  drag the range, trigger, cutoff and exit handles on the chart.
+- **Simple rules** (strategies saved before node strategies could do the same; new ones are node
+  strategies): one range of a set width, a trigger band, a delay and a cooldown, cutoffs and exits.
+  You can drag the range, trigger, cutoff and exit handles on the chart.
 - **Node strategies**: add blocks from the toolbox (or a right-click) and wire them together on a
   canvas you can pan (middle mouse button) and zoom (wheel), with a minimap; a right-click on a block
   renames, duplicates, copies or deletes it. Sources (price, bar
   high/low, fees) feed indicators (SMA, EMA, median, percentile, highest/lowest, standard deviation,
   z-score, Bollinger bands, ATR, Keltner, Donchian, Gaussian channel, RSI, stochastic, stochastic RSI,
-  CCI, ADX/DI, MACD, TRIX, parabolic SAR, Ichimoku, Heikin-Ashi, a trend score and a momentum z-score)
+  CCI, ADX/DI, MACD, TRIX, parabolic SAR, Ichimoku, Heikin-Ashi, a trend score, a momentum z-score,
+  a breakout channel with its side and "hot" window, volatility, and the pool's fee vs arbitrage)
   and maths; conditions (above, below, crosses, between, distance, and/or/not,
-  price out of range, range shifted) drive the outputs: the **range** to hold, when to **rebalance**,
-  when to **exit** and when to **hold** still. Widths can be given in ticks, tick spacings or percent,
+  price out of range, range shifted) drive the outputs: the **range** to hold (or, instead, the
+  **ladder**: the app's own solve over single ticks, re-solved on its schedule and whenever the
+  rebalance condition holds, so the ladder can be combined with exits, holds, parking and the
+  optimizer), when to **rebalance**, when to **exit** and when to **hold** still. Widths can be given in ticks, tick spacings or percent,
   and periods in hours. Indicators only use bars that have closed, so a backtest never looks ahead
   (`rs/src/ta.rs` lists the pitfalls it avoids: warm-up, seeding, flat prices, rounding drift).
+  Any source or indicator can run on **candles** of 1 minute to a day (built in memory from the stored
+  swaps; a value holds from one candle close to the next), so one strategy can mix timeframes. A
+  strategy is checked as often as its data can change: every minute when any block works on 1-minute
+  candles, else every 5 minutes. The backtest replays it on bars of that length and the worker checks
+  such a pool every minute between its regular cycles, so both decide at the same moments.
+  **⚡ Optimize** finds the best settings of the blocks you select (Ctrl or Shift + click): pick the
+  settings and their ranges, and a search runs many backtests in parallel, spreading over the ranges
+  first, then narrowing around the best and polishing one setting at a time (**Select all** ticks every
+  setting of one block or of all of them). It is walk-forward: the period it searches is cut into folds
+  (4 by default, up to 24), every setting runs on each on its own, and it is scored by its **reliable return**,
+  the average yearly return over the folds less 1.64 × their spread ÷ √folds, so a setting that earns
+  steadily beats one that made its money in a single stretch. By default the last quarter is held out:
+  the search never sees it, the best twelve are run on it and ranked by the same score over all
+  periods, and the verdict compares the best with the current settings there; **Apply** writes a
+  result into the blocks.
+  **✨ Auto** does the picking. Its default check is a **walk-forward of the tuning itself**: the period
+  is cut into equal periods (a month each by default, up to 36), and each period from the first tested
+  one on is traded with settings tuned only on the periods before it (the last few, or all). Joined up,
+  that is what re-tuning every period would have earned with nothing seen in advance; the current
+  settings, the strategy without its exits and holding run on the same periods, and the dialog shows
+  every period side by side and how far the tuned settings moved between periods. Settings picked on
+  the same history (the built-ins were) are in-sample everywhere, so by default the bar is the
+  references nothing was tuned on; new settings, tuned on the most recent periods, are suggested only
+  when re-tuning beats it over most periods and its edge per period (re-tuning less the bar) is
+  reliably above zero, its mean less 1.64 × its spread ÷ √periods: months swing by more than most
+  edges, so a higher average alone can be luck. The other check, rotating windows: the last eighth of
+  the period is an exam nothing runs on until the end, and the rest is cut into five windows, each
+  attempt judged on one of its own (most recent first) and searching on the other four. Attempt 1
+  screens every setting of the selected blocks (all when none are) over half to twice its value and
+  the candle lengths and tunes the few (at most six) that move the reliable return. When its best
+  does not hold up on its window, it tries other ways: wider ranges (dropping settings that changed
+  nothing, adding any whose best sat at an edge), small steps on the three that matter most, single
+  changes to the blocks (no exit or hold, an optional input left to its default, EMA for SMA, Keltner
+  for Bollinger, or for and), and the best change tuned. A winner on its window must then beat the
+  current settings on the exam (two candidates at most, the second in each half) to be suggested;
+  otherwise it says to keep the current settings, with what each attempt found.
+  A **token price** block watches another token: its dollar price from Solidly pools with at least $500
+  of active liquidity, against a stable or through a paired token (for example a token/WETH pool times
+  WETH/USDC); every qualifying pool is used and the freshest one sets the price. The picker shows which
+  tokens can be watched and how much liquidity backs each. Its **stale** output is true while there is
+  no reliable price, so it can drive Hold or Exit. Those pools are read from the same local history
+  store as everything else, which the worker keeps current.
+- **Parking** (opt-in, Settings › Parking whitelist and per strategy): whatever a pool holds and does
+  not use waits in a whitelisted pegged pool (USDC → USDC/USDT, WETH → cbETH/WETH…) until a move needs
+  it: out of its pool, the token it waits in (both, after an exit that keeps them as they are, an F/LVR
+  gate, say); in its pool, what its ranges left over; and the share of its budget it has not drawn
+  from the funding tokens (USDT → USDC/USDT). Always within the pool's budget, never into the pool
+  itself. The whitelist is edited by searching the pegged pools and adding a token; each entry has a
+  delete button. Every park and unpark step is written to the ledger before it runs, so one cut short
+  (a crash, a failed mint, a failed swap back) is finished or undone on the next cycle. When the
+  pegged pool runs a strategy of its own here (the USDC/USDT ladder, say), nothing gets a range of
+  its own: the tokens are handed to that strategy as a **claim**. Its budget grows by the claim and it
+  places them with its own (the ladder over its ticks), the parking pool's budget shrinks by it, and
+  an unpark pays the claim back (from the wallet first, the rest withdrawn from the host's positions
+  in proportion). The claim is the token amount: on Solidly V3 fees are paid to the wallet through
+  reward claims, not into positions, so a pegged host adds or takes nothing measurable on top. In a
+  pegged pool with no strategy here, a lot gets a range of its own, which that pool never counts or
+  moves; a lot that cannot be valued holds the cycle rather than shrink the budgets. When the pool a
+  lot came from is switched off or set to 0%, the lot is handed over to the pool it sits in, if that
+  pool runs a strategy: it counts as deployed there and that strategy re-solves on the same cycle,
+  whatever its turnover, so the lot is folded into its own ranges; otherwise it stays parked, earning.
+  In backtests a parked token earns what its pegged pool paid each day, and nothing before that
+  pool's history begins (it parks the day the pool appears); every pool a run depends on (the main
+  pool, the pools a token price block reads, the parking pools) is downloaded over its period.
+  Each whitelist entry without an ALM of its own picks how its lots are held: a fixed range, or
+  re-centred once the price has been outside it for a set time, with its own width. An unpark withdraws
+  only what is still on the lot's range, so liquidity removed elsewhere drops the lot instead of
+  blocking the strategy. Parked amounts are kept as lots tagged with the pool they came from, apart from that
+  pool's own positions, and only those lots come back when the strategy needs them. Backtests count
+  parking for strategies with it on whenever the token is whitelisted (the parking pool's fees and
+  emissions over its active liquidity plus ours), even while live parking is still switched off.
 
-Every change (saved or not) re-runs a backtest of the period you chose (7 days to a year) on the
+Every change (saved or not) re-runs a backtest of the period you chose (7 days to two years, or all of a younger pool's history) on the
 pool's real swaps, next to up to four strategies you pick from the library and to simply holding, in a
 results column that stays in view while you edit. An edit reruns only the strategy being edited; adding
 a comparison runs only that one, removing one runs nothing. The results are split into
 fees, emissions, swap costs, gas and IL, and node strategies draw their indicators and wanted range on
 the price chart. The backtest calls the same decision code the worker runs, so picking the saved
-strategy for a pool under **Pools** gives you exactly what you tested. A pool whose exit fired can be
-**re-armed** there.
+strategy for a pool under **Pools** gives you exactly what you tested. There are no manual overrides:
+after an exit a strategy deposits again when its own re-entry rule says so.
 
 After each backtest an **overfit check** runs for the strategy being edited (`rs/src/overfit.rs`): the
 same swaps replayed with every setting nudged between half and double (24 neighbours), the period cut
@@ -142,7 +215,7 @@ It is a single file of about 2.3 MB; copy it anywhere and run it.
 To build the Windows installer, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run, from `rs/`:
 
 ```bash
-ISCC /DAppVersion=0.3.0 installer/StableALM.iss     # -> rs/dist/StableALM-Setup-0.3.0.exe
+ISCC /DAppVersion=0.4.0 installer/StableALM.iss     # -> rs/dist/StableALM-Setup-0.4.0.exe
 ```
 
 Useful command-line options:

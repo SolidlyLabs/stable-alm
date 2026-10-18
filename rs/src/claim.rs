@@ -23,6 +23,19 @@ pub fn last_claim(cid: u64) -> u64 {
     std::fs::read_to_string(state_path(cid)).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()).and_then(|v| v["ts"].as_f64()).unwrap_or(0.0) as u64
 }
 
+/// Whether `snap` is the claim snapshot this wallet's last claim on the chain already claimed: the
+/// same tokens and the same cumulative amounts in its proof.
+fn already_claimed(cid: u64, snap: &Value) -> bool {
+    let Some(last) = std::fs::read_to_string(state_path(cid)).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()) else { return false };
+    same_snapshot(&last, &snap["claim"])
+}
+
+fn same_snapshot(last: &Value, claim: &Value) -> bool {
+    let norm = |v: &Value| -> Vec<String> { v.as_array().map(|a| a.iter().map(|x| x.as_str().map(|s| s.to_lowercase()).unwrap_or_else(|| x.to_string())).collect()).unwrap_or_default() };
+    let (t, a) = (norm(&last["tokens"]), norm(&last["amounts"]));
+    !t.is_empty() && !a.is_empty() && t == norm(&claim["tokens"]) && a == norm(&claim["amounts"])
+}
+
 pub fn snapshot(cid: u64, wallet: &str) -> Result<Value, String> {
     let url = format!("https://solidly.com/api/rewards/{wallet}/?chainId={cid}&version=1");
     for attempt in 0..4 {
@@ -50,20 +63,37 @@ pub fn claimable(cid: u64, wallet: &str) -> Value {
     }
     let res = (|| -> Result<Value, String> {
         let snap = snapshot(cid, wallet)?;
+        // the API may serve the snapshot this wallet already claimed until it sees the claim: its
+        // claimable is then in the claims already, and counting it again would double the earnings
+        let claimed = already_claimed(cid, &snap);
         let mut data = vec![];
         let (mut total, mut pending) = (0.0, 0.0);
+        // the API has one row per pool and token: one line per token (SOLID is earned in every pool)
+        let mut by_token: Vec<(String, f64, f64)> = vec![];
         for r in snap["rewards"].as_array().cloned().unwrap_or_default() {
-            let t = r["token"].as_str().unwrap_or("");
-            let m = prices::meta(cid, t)?;
-            let amt = prices::fnum(&r["claimable"]) / 10f64.powi(m.decimals as i32);
-            let pend = prices::fnum(&r["pending"]).max(0.0) / 10f64.powi(m.decimals as i32);
-            let px = prices::usd(cid, t).ok();
+            let t = r["token"].as_str().unwrap_or("").to_lowercase();
+            let (c, p) = (prices::fnum(&r["claimable"]), prices::fnum(&r["pending"]).max(0.0));
+            match by_token.iter_mut().find(|x| x.0 == t) {
+                Some(x) => {
+                    x.1 += c;
+                    x.2 += p;
+                }
+                None => by_token.push((t, c, p)),
+            }
+        }
+        for (t, c, p) in by_token {
+            let m = prices::meta(cid, &t)?;
+            let c = if claimed { 0.0 } else { c };
+            let amt = c / 10f64.powi(m.decimals as i32);
+            let pend = p / 10f64.powi(m.decimals as i32);
+            let px = prices::usd(cid, &t).ok();
             let usd = px.map(|p| p * amt);
             total += usd.unwrap_or(0.0);
             pending += px.map(|p| p * pend).unwrap_or(0.0);
             data.push(json!({"symbol": m.symbol, "amount": amt, "usd": usd, "pending": pend, "pending_usd": px.map(|p| p * pend)}));
         }
-        Ok(json!({"claimable": data, "can_claim": snap["claimState"]["canClaim"].as_bool().unwrap_or(false), "usd": total, "pending_usd": pending}))
+        Ok(json!({"claimable": data, "can_claim": !claimed && snap["claimState"]["canClaim"].as_bool().unwrap_or(false), "usd": total, "pending_usd": pending,
+                  "snapshot_claimed": claimed}))
     })();
     let last_path = crate::paths::logs().join(format!("rewards_last_{cid}.json"));
     let res = match res {
@@ -242,7 +272,23 @@ fn run_inner(cid: u64, wallet: &str, execute: bool, every_days: f64, force: bool
     };
     crate::info!("claim", "claim: sent {}; rewards compound at the next rebalance", res.hash);
     log(json!({"chain_id": cid, "kind": "sent", "what": "claim", "rewards": rewards, "hash": res.hash, "block": res.block, "gas_used": res.gas_used}));
-    let _ = std::fs::write(state_path(cid), json!({"ts": now(), "hash": res.hash, "rewards": rewards}).to_string());
+    let _ = std::fs::write(state_path(cid), json!({"ts": now(), "hash": res.hash, "rewards": rewards, "tokens": c["tokens"], "amounts": c["amounts"]}).to_string());
+    crate::ledger::invalidate();
     CACHE.lock().unwrap().as_mut().map(|m| m.remove(&(cid, wallet.to_lowercase())));
     Ok(json!({"status": "claimed", "hash": res.hash, "rewards": rewards}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_claimed_snapshot_is_recognised_until_the_next_one() {
+        let last = json!({"tokens": ["0xAA", "0xbb"], "amounts": ["100", "7"]});
+        assert!(same_snapshot(&last, &json!({"tokens": ["0xaa", "0xbb"], "amounts": ["100", "7"]})));
+        // the next snapshot: more accrued, a different proof
+        assert!(!same_snapshot(&last, &json!({"tokens": ["0xaa", "0xbb"], "amounts": ["130", "9"]})));
+        // a claim from before amounts were recorded is never taken for one
+        assert!(!same_snapshot(&json!({"rewards": []}), &json!({"tokens": [], "amounts": []})));
+    }
 }

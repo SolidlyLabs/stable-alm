@@ -44,8 +44,9 @@ pub struct Rules {
     pub exit_hi: Option<i64>,
     pub exit_delay_s: i64,
     pub exit_to: ExitTo,
-    pub reenter: bool,
     pub guard: Option<f64>,
+    /// the token an exit waits in is parked in a pegged pool meanwhile (parking.rs)
+    pub park: bool,
 }
 
 fn opt_i(s: &Map<String, Value>, k: &str) -> Option<i64> {
@@ -83,8 +84,8 @@ impl Rules {
             exit_hi: opt_i(s, "exit_hi"),
             exit_delay_s: (n("exit_delay_min", 0.0) * 60.0) as i64,
             exit_to,
-            reenter: s.get("reenter").and_then(|v| v.as_bool()).unwrap_or(false),
             guard: s.get("guard").and_then(|v| v.as_f64()).filter(|g| *g > 0.0),
+            park: s.get("park").and_then(|v| v.as_bool()).unwrap_or(false),
         };
         if let (Some(a), Some(b)) = (r.exit_lo, r.exit_hi) {
             if a >= b {
@@ -171,6 +172,12 @@ pub struct State {
     pub exit_since: Option<i64>,
     pub exited: bool,
     pub last_move: i64,
+    /// the token an exit waits in (graph.rs side_code: 1 token0, -1 token1, 0 as it was)
+    #[serde(default)]
+    pub exit_side: i8,
+    /// re-solve on the next decision whatever the turnover (a parked lot was handed over)
+    #[serde(default)]
+    pub force_solve: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -205,9 +212,7 @@ pub fn decide(r: &Rules, st: &mut State, now: i64, tick: i64, range: Option<(i64
     }
     st.exit_since = None;
     if st.exited {
-        if !r.reenter {
-            return Keep("exited; re-entry is off (turn it on, or re-arm the pool, to deposit again)".into());
-        }
+        // the strategy deposits again by its own rule, never by hand: back between the exit triggers
         if r.beyond_cutoff(tick) {
             return Decision::Wait("exited; price is back inside the exit triggers but beyond a cutoff".into());
         }
@@ -251,8 +256,14 @@ use Decision::Keep;
 impl State {
     pub fn moved(&mut self, now: i64) {
         self.last_move = now;
+        self.force_solve = false;
         self.outside_since = None;
         self.exited = false;
+    }
+    /// An exit that waits in `to` is done.
+    pub fn exited_to(&mut self, to: ExitTo) {
+        self.exited();
+        self.exit_side = crate::graph::side_code(to);
     }
     pub fn exited(&mut self) {
         self.exited = true;
@@ -275,20 +286,6 @@ pub fn save_state(cid: u64, pool: &str, live: bool, st: &State) {
     let _ = std::fs::write(p, serde_json::to_string(st).unwrap());
 }
 
-/// Clear the exited flag (the dashboard's "Re-arm").
-pub fn rearm(cid: u64, pool: &str) {
-    for live in [true, false] {
-        let mut st = load_state(cid, pool, live);
-        st.exited = false;
-        st.exit_since = None;
-        save_state(cid, pool, live, &st);
-    }
-}
-
-pub fn state_json(cid: u64, pool: &str, live: bool) -> Value {
-    let st = load_state(cid, pool, live);
-    json!({"exited": st.exited, "outside_since": st.outside_since, "exit_since": st.exit_since, "last_move": st.last_move})
-}
 
 #[cfg(test)]
 mod tests {
@@ -350,7 +347,7 @@ mod tests {
 
     #[test]
     fn cutoff_and_exit() {
-        let r = rules(json!({"width": 10, "cutoff_hi": 130, "exit_lo": 50, "reenter": true}));
+        let r = rules(json!({"width": 10, "cutoff_hi": 130, "exit_lo": 50}));
         let mut st = State::default();
         assert!(matches!(decide(&r, &mut st, 0, 135, Some((100, 110)), 1), Decision::Wait(_)));
         assert!(matches!(decide(&r, &mut st, 0, 40, Some((100, 110)), 1), Decision::Exit(_)));

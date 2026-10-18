@@ -35,7 +35,8 @@ impl From<String> for TxError {
     }
 }
 
-const HINTS: [(&str, &str); 14] = [
+const HINTS: [(&str, &str); 15] = [
+    ("AL", "amounts below the minimums: the price moved (slippage)"),
     ("Price slippage check", "pool price moved past the min amounts (slippage)"),
     ("STF", "token transferFrom failed (balance or allowance too low)"),
     ("TF", "token transfer failed"),
@@ -74,7 +75,9 @@ pub fn revert_reason(e: &Value) -> String {
         }
     }
     for (k, hint) in HINTS {
-        if text.contains(k) || msg.contains(k) {
+        // a short code (TF, AL, LOK…) is the whole revert string, never a part of another word
+        let hit = if k.len() <= 3 { text.trim() == k || msg.trim_end().ends_with(&format!("reverted: {k}")) } else { text.contains(k) || msg.contains(k) };
+        if hit {
             return format!("{text} ({hint})");
         }
     }
@@ -469,6 +472,7 @@ pub fn send(cid: u64, acct: &Account, to: &str, data: &str, gas: u64) -> Result<
                     }
                     let block = hex_u64(&rc["blockNumber"]);
                     note_mined(cid, block);
+                    crate::ledger::invalidate();
                     return Ok(Sent { hash: h.clone(), gas_used: hex_u64(&rc["gasUsed"]), block, receipt: rc });
                 }
             }
@@ -483,4 +487,19 @@ pub fn send(cid: u64, acct: &Account, to: &str, data: &str, gas: u64) -> Result<
 
 pub fn int(v: i64) -> Tok {
     Tok::Int(BigInt::from(v))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_revert_codes_match_only_themselves() {
+        assert!(revert_reason(&json!({"message": "execution reverted: AL"})).contains("slippage"));
+        assert!(revert_reason(&json!({"message": "execution reverted: TF"})).contains("token transfer failed"));
+        assert!(revert_reason(&json!({"message": "execution reverted: STF"})).contains("transferFrom"));
+        // a longer message that merely contains the letters gets no code's hint
+        let r = revert_reason(&json!({"message": "execution reverted: INSUFFICIENT_ALLOWANCE"}));
+        assert!(!r.contains("slippage") && !r.contains("token transfer failed"), "{r}");
+    }
 }

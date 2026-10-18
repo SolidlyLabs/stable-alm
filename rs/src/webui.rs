@@ -324,18 +324,37 @@ fn get(path: &str, w: &Arc<Worker>) -> (u16, Value) {
             (200, json!({"pools": rows}))
         }
         "/api/strategies" => (200, crate::library::get()),
+        "/api/parking/names" => {
+            // the whitelist's tokens and pools by name, from the cached token metadata, so the list
+            // reads before the market list has loaded
+            let sym = |cid: u64, a: &str| crate::prices::meta(cid, a).map(|m| m.symbol).ok();
+            let names: Vec<Value> = s["parking"]["pools"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|e| {
+                    let cid = e["chain_id"].as_u64()?;
+                    let (token, pool) = (e["token"].as_str()?, e["pool"].as_str()?);
+                    let pair = crate::chain::pool_tokens(cid, pool).ok().map(|(a, b)| [sym(cid, &a), sym(cid, &b)]);
+                    Some(json!({"chain_id": cid, "token": token, "pool": pool, "symbol": sym(cid, token), "pair": pair}))
+                })
+                .collect();
+            (200, json!({"names": names}))
+        }
+        p if p.starts_with("/api/price_sources/") => {
+            // /api/price_sources/<chain>: tokens a node strategy can watch there, their pools and active liquidity
+            match p["/api/price_sources/".len()..].parse::<u64>() {
+                Ok(cid) => match crate::external::sources(cid) {
+                    Ok(v) => (200, v),
+                    Err(e) => (502, json!({"error": e})),
+                },
+                Err(_) => (400, json!({"error": "use /api/price_sources/<chain id>"})),
+            }
+        }
         p if p.starts_with("/api/backtest/") => match p["/api/backtest/".len()..].parse::<u64>().ok().and_then(crate::backtest::job) {
             Some(j) => (200, j),
             None => (404, json!({"error": "no such backtest"})),
         },
-        p if p.starts_with("/api/custom/state/") => {
-            // /api/custom/state/<chain>/<pool>: the live and dry-run timers of a custom-mode pool
-            let mut it = p["/api/custom/state/".len()..].splitn(2, '/');
-            match (it.next().and_then(|c| c.parse::<u64>().ok()), it.next()) {
-                (Some(cid), Some(pool)) if is_addr(pool) => (200, json!({"live": crate::custom::state_json(cid, pool, true), "dry": crate::custom::state_json(cid, pool, false)})),
-                _ => (400, json!({"error": "use /api/custom/state/<chain id>/<pool>"})),
-            }
-        }
         p if p.starts_with("/api/tokens") => {
             // (chain, token) pairs to list even without a pool: funding tokens per chain, reward tokens on Base
             let mut extra: Vec<(u64, String)> = vec![];
@@ -514,20 +533,16 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
             w.request(false);
             Ok(json!({"ok": true, "chains": crate::chains::as_json()}))
         }
+        // /api/backtest/<id>/stop: end an optimization early (it keeps the best found so far)
+        p if p.starts_with("/api/backtest/") && p.ends_with("/stop") => {
+            let id = p["/api/backtest/".len()..p.len() - "/stop".len()].parse::<u64>().map_err(|_| "use /api/backtest/<id>/stop")?;
+            Ok(json!({"ok": crate::optimize::stop(id)}))
+        }
         "/api/backtest" => {
             let wallet = load_settings()["wallet"].as_str().unwrap_or("").to_string();
             Ok(json!({"ok": true, "id": crate::backtest::start(body, wallet)?}))
         }
         "/api/strategies" => crate::library::post(&body),
-        "/api/custom/rearm" => {
-            let cid = body["chain_id"].as_u64().ok_or("chain_id is required")?;
-            let pool = body["pool"].as_str().unwrap_or("").to_lowercase();
-            if !is_addr(&pool) {
-                return Err("pool must be a 0x address".into());
-            }
-            crate::custom::rearm(cid, &pool);
-            Ok(json!({"ok": true}))
-        }
         "/api/pools/add" => {
             let cid = body["chain_id"].as_u64().unwrap_or(crate::chains::BASE);
             Ok(json!({"ok": true, "pool": add_pool(body["pool"].as_str().unwrap_or(""), body["name"].as_str(), cid)?}))

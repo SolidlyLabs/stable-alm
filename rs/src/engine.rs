@@ -96,9 +96,17 @@ pub fn wallet_positions(cid: u64, pool: &str, wallet: &str) -> Result<Vec<(i64, 
     keys.sort();
     // one multicall for every known range
     let calls: Vec<(String, String)> = keys.iter().map(|(tl, tu)| (pool.to_lowercase(), chain::position_calldata(wallet, *tl, *tu))).collect();
+    // liquidity parked here by another pool's strategy (parking.rs) is that strategy's, not this pool's
+    let parked = crate::parking::parked_in(cid, pool);
     let mut out = vec![];
     for ((tl, tu), r) in keys.into_iter().zip(chain::eth_calls(cid, &calls)?) {
-        let liq = eth::word_u(&r?, 0);
+        let mut liq = eth::word_u(&r?, 0);
+        if let Some(p) = parked.get(&(tl, tu)) {
+            liq = match u128::try_from(&liq) {
+                Ok(l) => BigUint::from(crate::parking::own_share(l, *p)),
+                Err(_) => liq - BigUint::from(*p), // more than u128 holds: larger than any lot
+            };
+        }
         if liq > BigUint::default() {
             out.push((tl, tu, liq));
         }
@@ -248,6 +256,9 @@ pub struct Executor {
     attempts: usize,
     backoff: f64,
     virt: HashMap<String, i128>,
+    /// Allowances as this run knows them: set by its own approvals and lowered by its own spends, so
+    /// a read from an RPC node a block behind cannot hide an allowance a mint just used up. Unknown
+    /// until this run approves or spends: then the chain's figure is read.
     virt_allow: HashMap<(String, String), i128>,
     v_deployed: f64,
     v_removed: f64,
@@ -588,9 +599,9 @@ impl Executor {
         let rules = if is_graph { None } else { Some(crate::custom::Rules::from(&self.cfg.strategy, self.spacing)?) };
         let graph = if is_graph { Some(crate::graph::Graph::parse(&self.cfg.strategy, self.spacing)?) } else { None };
         let label = rules.as_ref().map(|r| r.label()).or_else(|| graph.as_ref().map(|g| g.label())).unwrap_or_default();
-        let exit_to = rules.as_ref().map(|r| r.exit_to).or_else(|| graph.as_ref().map(|g| g.exit_to)).unwrap_or(crate::custom::ExitTo::Keep);
+        let mut exit_to = rules.as_ref().map(|r| r.exit_to).or_else(|| graph.as_ref().map(|g| g.exit_to)).unwrap_or(crate::custom::ExitTo::Keep);
         if let Some(g) = rules.as_ref().and_then(|r| r.guard) {
-            let med = data::rolling_median_trailing(&m.bar_tick, data::WEEK_BARS, 12);
+            let med = data::rolling_median_trailing(&m.bar_tick, data::week_bars(m), 12);
             if let (Some(t), Some(md)) = (m.bar_tick.last(), med.last()) {
                 if (*t as f64 - md).abs() > g {
                     self.say(format!("  DEPEG GUARD: holding, no action (tick {tick} is {:.0} ticks from the 7-day median)", (*t as f64 - md).abs()));
@@ -610,15 +621,21 @@ impl Executor {
                 d
             }
             (None, Some(g)) => {
-                let ev = crate::graph::evaluate(g, m);
+                let (ext, errs) = crate::graph::load_externals(g, self.cid, m);
+                for e in errs {
+                    self.say_warn(format!("  watched token unavailable: {e}"));
+                }
+                let ev = crate::graph::evaluate_ext(g, m, &ext);
                 let bar = m.bar_tick.len().checked_sub(1).ok_or_else(|| "no bars in the replay market".to_string())?;
                 let d = crate::graph::decide(g, &ev, &mut st, now, bar, tick, range, self.spacing);
+                exit_to = crate::graph::exit_to(g, &ev, bar, tick, range);
                 summary["custom"] = json!({"decision": format!("{d:?}"), "range": range, "wanted": crate::graph::wanted(g, &ev, bar, self.spacing)});
                 d
             }
             _ => unreachable!(),
         };
         let save = |s: &Self, st: &crate::custom::State| crate::custom::save_state(s.cid, &s.cfg.pool, s.execute, st);
+        summary["parked"] = json!(crate::parking::of_origin(self.execute, self.cid, &self.cfg.pool));
         match d {
             crate::custom::Decision::Move { tl, tu, reason } => {
                 summary["mode"] = json!("rebalance");
@@ -627,8 +644,27 @@ impl Executor {
                 if self.blocked(m, tick, false)? {
                     return Ok(summary);
                 }
-                let t = Target { ranges: vec![(tl, tu, 1.0)], swap: true };
+                let ranges = match graph.as_ref().and_then(|g| g.ladder()) {
+                    // a ladder block: the ladder's own solve, taken when it moves enough of the value
+                    Some(lp) => {
+                        let spf = to_f64(sp) / 2f64.powi(96);
+                        let r = cap_ranges(snap_ranges(ladder::decide(m, &lp, budget0, spf, tick), self.spacing), self.cfg.max_ranges);
+                        let moved = if positions.is_empty() || st.exited || st.force_solve { 1.0 } else { self.moved_share(&positions, sp, p, &r) };
+                        if moved < lp.turnover {
+                            self.say(format!("  ladder target differs by {:.0}% < turnover {:.0}%: keep", moved * 100.0, lp.turnover * 100.0));
+                            summary["mode"] = json!("keep");
+                            st.moved(now);
+                            save(self, &st);
+                            return Ok(summary);
+                        }
+                        r
+                    }
+                    None => vec![(tl, tu, 1.0)],
+                };
+                let t = Target { ranges, swap: true };
                 self.begin("rebalance", Some(&t));
+                // what waited in a parking pool comes back first (parking.rs)
+                self.unpark_all()?;
                 self.resize(&positions, &t, budget0, sp, p)?;
                 st.moved(now);
                 save(self, &st);
@@ -641,6 +677,8 @@ impl Executor {
                     return Ok(summary);
                 }
                 self.begin("exit", None);
+                // switching sides: a parked lot comes back before the swap
+                self.unpark_all()?;
                 let all: Vec<(i64, i64, i128)> = positions.iter().map(|(a, b, l)| (*a, *b, small(l))).collect();
                 self.burn_all(&all)?;
                 let into = match exit_to {
@@ -650,7 +688,8 @@ impl Executor {
                 };
                 if let Some((tin, tout, to0)) = into {
                     let (_, _, _, p) = self.price()?;
-                    let amt = self.bal(&tin)?.max(0);
+                    // at most this pool's budget: the wallet's other tokens belong to other pools
+                    let amt = self.bal(&tin)?.max(0).min(self.budget_raw(&tin, budget0, p));
                     let fair = if to0 { amt as f64 / p } else { amt as f64 * p };
                     if amt > 0 {
                         let max_cost = self.cfg.max_swap_cost_bps;
@@ -659,8 +698,16 @@ impl Executor {
                         }
                     }
                 }
-                st.exited();
+                st.exited_to(exit_to);
                 save(self, &st);
+                let side = match exit_to {
+                    crate::custom::ExitTo::Token0 => crate::parking::Side::Token0,
+                    crate::custom::ExitTo::Token1 => crate::parking::Side::Token1,
+                    crate::custom::ExitTo::Keep => crate::parking::Side::Both,
+                };
+                if let Err(e) = self.park_pass(side, budget0, 0.0) {
+                    self.say_warn(format!("  parking failed: {e}; the tokens wait in the wallet (retried next cycle)"));
+                }
             }
             crate::custom::Decision::Wait(reason) => {
                 summary["mode"] = json!("wait");
@@ -694,6 +741,17 @@ impl Executor {
                     summary["mode"] = json!(if st.exited { "exited" } else { "keep" });
                     self.say(format!("  {label}: {reason}"));
                     log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "keep", "tick": tick}));
+                    // what it holds and does not use waits parked until a move needs it
+                    let side = if !st.exited || st.exit_side == 0 {
+                        crate::parking::Side::Both
+                    } else if st.exit_side > 0 {
+                        crate::parking::Side::Token0
+                    } else {
+                        crate::parking::Side::Token1
+                    };
+                    if let Err(e) = self.park_pass(side, budget0, if positions.is_empty() { 0.0 } else { pos_val }) {
+                        self.say_warn(format!("  parking failed: {e}; retried next cycle"));
+                    }
                 }
             }
         }
@@ -705,7 +763,10 @@ impl Executor {
     fn strategy_target(&mut self, m: &Market, params: &Params, positions: &[(i64, i64, BigUint)], sp: &BigUint, p: f64, budget0: f64,
                        spf: f64, tick: i64) -> Res<Option<Target>> {
         let state = crate::paths::logs().join(format!("last_solve_{}.json", self.cfg.name));
-        let last = std::fs::read_to_string(&state).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()).and_then(|v| v["ts"].as_f64()).unwrap_or(0.0);
+        let saved = std::fs::read_to_string(&state).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()).unwrap_or(Value::Null);
+        let last = saved["ts"].as_f64().unwrap_or(0.0);
+        // a re-solve asked for (a parked lot was handed over): the new target is taken whatever the turnover
+        let force = saved["force"] == true;
         let period = (params.every * 300) as f64;
         let el = now() as f64 - last;
         if !positions.is_empty() && el < period {
@@ -713,25 +774,8 @@ impl Executor {
             return Ok(None);
         }
         let ranges = cap_ranges(snap_ranges(ladder::decide(m, params, budget0, spf, tick), self.spacing), self.cfg.max_ranges);
-        if !positions.is_empty() {
-            let mut cur_w: HashMap<i64, f64> = HashMap::new();
-            for (tl, tu, liq) in positions {
-                let (a0, a1) = amounts_at(sp, *tl, *tu, liq);
-                let v = self.value0(to_f64(&a0), to_f64(&a1), p);
-                for t in *tl..*tu {
-                    *cur_w.entry(t).or_default() += v / (tu - tl) as f64;
-                }
-            }
-            let s: f64 = cur_w.values().sum::<f64>();
-            let s = if s == 0.0 { 1.0 } else { s };
-            let mut new_w: HashMap<i64, f64> = HashMap::new();
-            for (a, c, w) in &ranges {
-                for t in *a..*c {
-                    *new_w.entry(t).or_default() += w / (c - a) as f64;
-                }
-            }
-            let keys: HashSet<i64> = cur_w.keys().chain(new_w.keys()).cloned().collect();
-            let moved: f64 = keys.iter().map(|t| (new_w.get(t).unwrap_or(&0.0) - cur_w.get(t).unwrap_or(&0.0) / s).abs()).sum::<f64>() / 2.0;
+        if !positions.is_empty() && !force {
+            let moved = self.moved_share(positions, sp, p, &ranges);
             if moved < params.turnover {
                 self.say(format!("  ladder target differs by {:.0}% < turnover {:.0}%: keep", moved * 100.0, params.turnover * 100.0));
                 self.mark_solved();
@@ -739,6 +783,28 @@ impl Executor {
             }
         }
         Ok(Some(Target { ranges, swap: true }))
+    }
+
+    /// Share of value that moves between the positions and `ranges` (0 = same, 1 = all).
+    fn moved_share(&self, positions: &[(i64, i64, BigUint)], sp: &BigUint, p: f64, ranges: &[(i64, i64, f64)]) -> f64 {
+        let mut cur_w: HashMap<i64, f64> = HashMap::new();
+        for (tl, tu, liq) in positions {
+            let (a0, a1) = amounts_at(sp, *tl, *tu, liq);
+            let v = self.value0(to_f64(&a0), to_f64(&a1), p);
+            for t in *tl..*tu {
+                *cur_w.entry(t).or_default() += v / (tu - tl) as f64;
+            }
+        }
+        let s: f64 = cur_w.values().sum::<f64>();
+        let s = if s == 0.0 { 1.0 } else { s };
+        let mut new_w: HashMap<i64, f64> = HashMap::new();
+        for (a, c, w) in ranges {
+            for t in *a..*c {
+                *new_w.entry(t).or_default() += w / (c - a) as f64;
+            }
+        }
+        let keys: HashSet<i64> = cur_w.keys().chain(new_w.keys()).cloned().collect();
+        keys.iter().map(|t| (new_w.get(t).unwrap_or(&0.0) - cur_w.get(t).unwrap_or(&0.0) / s).abs()).sum::<f64>() / 2.0
     }
 
     /// Record that the ladder's current solve is in place: the next re-solve is `every` bars from now.
@@ -899,7 +965,7 @@ impl Executor {
         Ok(())
     }
 
-    fn need0_fraction(&self, ranges: &[(i64, i64, f64)], sp: &BigUint, p: f64) -> f64 {
+    pub fn need0_fraction(&self, ranges: &[(i64, i64, f64)], sp: &BigUint, p: f64) -> f64 {
         let one = BigUint::from(10u8).pow(18);
         ranges
             .iter()
@@ -1024,15 +1090,17 @@ impl Executor {
                 self.say_warn(format!("    received {got:.0} raw, below the expected minimum {min_out:.0}"));
             }
             self.say(format!("    received {:.6}", got / 10f64.powi(mo.decimals as i32)));
+            self.spent(tin, &spender, amount_in);
             return Ok(got as i128);
         }
         self.mv(tin, -amount_in);
+        self.spent(tin, &spender, amount_in);
         self.mv(tout, out as i128);
         Ok(out as i128)
     }
 
     pub fn mint_one(&mut self, tl: i64, tu: i64, share: f64, budget0: f64) -> Res<bool> {
-        let (sp, _, _, p) = self.price()?;
+        let (mut sp, _, _, p) = self.price()?;
         let (sa, sb) = (sqrt_ratio_at_tick(tl), sqrt_ratio_at_tick(tu));
         let (x, y) = self.usable(budget0, p)?;
         let one = BigUint::from(10u8).pow(18);
@@ -1054,7 +1122,8 @@ impl Executor {
             return Ok(false);
         }
         let slip = if self.is_solid_lp { self.cfg.slippage_bps / 1e4 } else { self.cfg.slippage_bps / 1e4 };
-        for _ in 0..6 {
+        let mut reapproved = false;
+        for _ in 0..7 {
             let (m0, m1) = crate::tickmath::amounts_for_liquidity(&sp, &sa, &sb, &big(liq));
             let (m0, m1) = (small(&m0), small(&m1));
             let (t0, t1) = (self.t0.clone(), self.t1.clone());
@@ -1073,21 +1142,537 @@ impl Executor {
                 && small(&chain::erc20_allowance(self.cid, &t1, &self.wallet, &pool)?) >= m1;
             match self.tx(&pool, &data, &format!("mint {tl}:{tu}"), live) {
                 Ok(_) => {}
+                Err(e) if (e.message.starts_with("eth_call reverted") || e.message.starts_with("estimateGas failed")) && transfer_failed(&e.reason) && !reapproved => {
+                    // the pool could not pull a token: approve again (the allowance read may have been stale) and retry the same size
+                    reapproved = true;
+                    self.say_warn(format!("    simulation failed ({}): approving both tokens again", e.reason));
+                    self.virt_allow.insert((t0.to_lowercase(), pool.to_lowercase()), 0);
+                    self.virt_allow.insert((t1.to_lowercase(), pool.to_lowercase()), 0);
+                    continue;
+                }
                 Err(e) if e.message.starts_with("eth_call reverted") || e.message.starts_with("estimateGas failed") => {
+                    // the minimums are amounts at the price read before: read it again, so a move
+                    // since then (or a stale read) is not mistaken for too large a mint
                     liq = (liq as f64 * 0.995) as i128;
-                    self.say_warn(format!("    simulation failed ({}); shrinking liquidity 0.5%", e.reason));
+                    sp = self.price()?.0;
+                    self.say_warn(format!("    simulation failed ({}); price read again, liquidity 0.5% smaller", e.reason));
                     continue;
                 }
                 Err(e) => return Err(e.into()),
             }
             self.mv(&t0, -m0);
             self.mv(&t1, -m1);
+            self.spent(&t0, &pool, m0);
+            self.spent(&t1, &pool, m1);
             if !self.execute {
                 self.v_deployed += self.value0(m0 as f64, m1 as f64, p);
             }
             return Ok(true);
         }
         Err(StepErr::Fail(format!("mint [{tl},{tu}) still fails after shrinking liquidity by ~3%")))
+    }
+
+    /// Mint exactly `x` token0 + `y` token1 (raw, at most) into [tl, tu); returns the liquidity minted.
+    fn mint_exact(&mut self, tl: i64, tu: i64, x: i128, y: i128) -> Res<i128> {
+        let (mut sp, _, _, _) = self.price()?;
+        let (sa, sb) = (sqrt_ratio_at_tick(tl), sqrt_ratio_at_tick(tu));
+        let mut liq = (to_f64(&liquidity_for_amounts(&sp, &sa, &sb, &big(x), &big(y))) * 0.999) as i128;
+        let slip = self.cfg.slippage_bps / 1e4;
+        let mut reapproved = false;
+        for _ in 0..7 {
+            if liq <= 0 {
+                return Err(StepErr::Fail(format!("nothing to mint into [{tl},{tu})")));
+            }
+            let (m0, m1) = crate::tickmath::amounts_for_liquidity(&sp, &sa, &sb, &big(liq));
+            let (m0, m1) = (small(&m0), small(&m1));
+            let (t0, t1) = (self.t0.clone(), self.t1.clone());
+            self.ensure_allowance(&t0, m0 + m0 / 1000 + 10, None)?;
+            self.ensure_allowance(&t1, m1 + m1 / 1000 + 10, None)?;
+            let data = calldata(
+                "mint(address,int24,int24,uint128,uint256,uint256,uint256)",
+                &[addr(&self.wallet), chain::int(tl), chain::int(tu), u(big(liq)), u(big((m0 as f64 * (1.0 - slip)) as i128)),
+                  u(big((m1 as f64 * (1.0 - slip)) as i128)), u(now() + DEADLINE_S)],
+            );
+            self.say(format!("  park: mint [{tl},{tu}) liquidity {liq} uses {} t0 + {} t1", self.fmt0(m0 as f64), self.fmt1(m1 as f64)));
+            let pool = self.cfg.pool.clone();
+            let live = small(&chain::erc20_balance(self.cid, &t0, &self.wallet)?) >= m0
+                && small(&chain::erc20_balance(self.cid, &t1, &self.wallet)?) >= m1
+                && small(&chain::erc20_allowance(self.cid, &t0, &self.wallet, &pool)?) >= m0
+                && small(&chain::erc20_allowance(self.cid, &t1, &self.wallet, &pool)?) >= m1;
+            match self.tx(&pool, &data, &format!("mint {tl}:{tu}"), live) {
+                Ok(_) => {}
+                Err(e) if (e.message.starts_with("eth_call reverted") || e.message.starts_with("estimateGas failed")) && transfer_failed(&e.reason) && !reapproved => {
+                    // the pool could not pull a token: approve again (the allowance read may have been stale) and retry the same size
+                    reapproved = true;
+                    self.say_warn(format!("    simulation failed ({}): approving both tokens again", e.reason));
+                    self.virt_allow.insert((t0.to_lowercase(), pool.to_lowercase()), 0);
+                    self.virt_allow.insert((t1.to_lowercase(), pool.to_lowercase()), 0);
+                    continue;
+                }
+                Err(e) if e.message.starts_with("eth_call reverted") || e.message.starts_with("estimateGas failed") => {
+                    // the minimums are amounts at the price read before: read it again, so a move
+                    // since then (or a stale read) is not mistaken for too large a mint
+                    liq = (liq as f64 * 0.995) as i128;
+                    sp = self.price()?.0;
+                    self.say_warn(format!("    simulation failed ({}); price read again, liquidity 0.5% smaller", e.reason));
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            }
+            self.mv(&t0, -m0);
+            self.mv(&t1, -m1);
+            self.spent(&t0, &pool, m0);
+            self.spent(&t1, &pool, m1);
+            return Ok(liq);
+        }
+        Err(StepErr::Fail(format!("mint [{tl},{tu}) still fails after shrinking liquidity by ~3%")))
+    }
+
+    /// `budget0` (token0 units) in raw units of `token` (one of the pool's) at raw price p.
+    fn budget_raw(&self, token: &str, budget0: f64, p: f64) -> i128 {
+        let raw0 = budget0 * self.unit;
+        (if token.eq_ignore_ascii_case(&self.t0) { raw0 } else { raw0 * p }) as i128
+    }
+
+    /// What this pool's parking decision depends on now (parking.rs `Situation`).
+    fn parking_situation(&self, side: crate::parking::Side, budget0: f64, deployed0: f64) -> Res<crate::parking::Situation> {
+        use crate::parking::Held;
+        let held = |t: &str| -> Res<Held> {
+            let m = prices::meta(self.cid, t)?;
+            let px = prices::usd(self.cid, t).unwrap_or(0.0);
+            let b = self.bal(t)?.max(0) as f64 / 10f64.powi(m.decimals as i32);
+            Ok(Held { token: t.to_lowercase(), usd: b * px, park_pool: crate::parking::pool_for(&self.settings, self.cid, t).map(|w| w.pool) })
+        };
+        let mut funding = vec![];
+        for ft in crate::settings::funding_tokens(&self.settings, self.cid) {
+            let ft = ft.to_lowercase();
+            if ft == self.t0 || ft == self.t1 {
+                continue;
+            }
+            if let Ok(h) = held(&ft) {
+                funding.push(h); // a token the chain does not have is skipped
+            }
+        }
+        let t0usd = prices::usd(self.cid, &self.t0)?;
+        Ok(crate::parking::Situation {
+            on: crate::parking::enabled(&self.settings) && crate::parking::wanted(&self.cfg.strategy),
+            pool: self.cfg.pool.clone(),
+            side,
+            budget_usd: budget0 * t0usd,
+            deployed_usd: deployed0 * t0usd,
+            min_usd: crate::parking::min_usd(&self.settings),
+            own: [held(&self.t0.clone())?, held(&self.t1.clone())?],
+            funding,
+            lots: crate::parking::of_origin(self.execute, self.cid, &self.cfg.pool)
+                .iter()
+                // a claim is already out of this pool's budget (worker): it counts as parked, not again as spent
+                .map(|l| (l["token"].as_str().unwrap_or("").to_lowercase(), if crate::parking::is_claim(l) { 0.0 } else { l["usd"].as_f64().unwrap_or(0.0) }))
+                .collect(),
+        })
+    }
+
+    /// Parking for this pool while it is not moving (parking.rs `decide`): its unfinished steps put
+    /// right first, then what it holds and does not use parked (or its lots brought back when
+    /// parking stopped for it), and lots re-centred where their whitelist entry asks for it.
+    fn park_pass(&mut self, side: crate::parking::Side, budget0: f64, deployed0: f64) -> Res<()> {
+        self.reconcile_lots()?;
+        let s = self.parking_situation(side, budget0, deployed0)?;
+        for a in crate::parking::decide(&s) {
+            match a {
+                crate::parking::Act::UnparkAll => {
+                    self.say("  parking stopped for this pool (or a parked token left the whitelist): bringing parked tokens back");
+                    self.unpark_all()?;
+                }
+                crate::parking::Act::Park(tok, usd) => {
+                    let m = prices::meta(self.cid, &tok)?;
+                    let amt = ((usd / prices::usd(self.cid, &tok)?) * 10f64.powi(m.decimals as i32)) as i128;
+                    let amt = amt.min(self.bal(&tok)?.max(0));
+                    if !s.own.iter().any(|h| h.token == tok) {
+                        self.say(format!("  ${usd:.2} of its ${:.2} budget is still in {} (funding it has not drawn): parking it", s.budget_usd, m.symbol));
+                    }
+                    if let Err(e) = self.park(&tok, amt) {
+                        self.say_warn(format!("  park failed: {e}; retried next cycle"));
+                    }
+                }
+            }
+        }
+        if s.on {
+            if let Err(e) = self.recentre_lots() {
+                self.say_warn(format!("  re-centring parked lots failed: {e}; retried next cycle"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Put right this pool's lots whose last park or unpark step did not finish (parking.rs
+    /// `reconcile`): a mint that happened gets its lot, a swap whose mint never came is swapped
+    /// back, a withdrawal that happened gets its swap back. Live only: dry-run lots touch no chain.
+    fn reconcile_lots(&mut self) -> Res<()> {
+        if !self.execute {
+            return Ok(());
+        }
+        for lot in crate::parking::of_origin(true, self.cid, &self.cfg.pool) {
+            if lot["stage"].is_null() {
+                continue;
+            }
+            let id = lot["id"].as_str().unwrap_or("").to_string();
+            let pool = lot["pool"].as_str().unwrap_or("").to_string();
+            let (tl, tu) = (lot["tl"].as_i64().unwrap_or(0), lot["tu"].as_i64().unwrap_or(0));
+            let there = crate::parking::onchain(self.cid, &pool, &self.wallet, tl, tu).map_err(StepErr::Fail)?;
+            match crate::parking::reconcile(&lot, &crate::parking::lots(true), there) {
+                crate::parking::Fix::Fine => {}
+                crate::parking::Fix::Restore(l) => {
+                    self.say_warn(format!("  park: lot {id}'s last step ({}) did finish: kept as parked, liquidity {}", lot["stage"].as_str().unwrap_or("?"), l["liquidity"].as_str().unwrap_or("?")));
+                    log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "park_recovered", "live": true, "lot": l}));
+                    crate::parking::update(true, l);
+                }
+                crate::parking::Fix::SwapBackAndDrop { from, to, amount } => {
+                    self.say_warn(format!("  park: lot {id}'s last step ({}) was cut short: nothing of it is parked", lot["stage"].as_str().unwrap_or("?")));
+                    if amount > 0 && !from.is_empty() {
+                        let mut pk = self.parking_executor(&pool)?;
+                        let amt = (amount as i128).min(pk.bal(&from)?.max(0));
+                        if amt > 0 {
+                            let (_, _, _, p) = pk.price()?;
+                            let fair = if from == pk.t0 { amt as f64 * p } else { amt as f64 / p };
+                            let mc = pk.cfg.max_swap_cost_bps.max(10.0);
+                            let r = pk.retry("park recovery swap", |s| s.swap(&from, &to, amt, fair, mc, "park recovery: swap back"));
+                            for l in std::mem::take(&mut pk.report) {
+                                self.report.push(l);
+                            }
+                            self.broadcasts += pk.broadcasts;
+                            if let Err(e) = r {
+                                self.say_warn(format!("  park recovery swap failed: {e}; retried next cycle"));
+                                continue;
+                            }
+                        }
+                    }
+                    log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "park_recovered", "live": true, "lot": lot, "dropped": true}));
+                    crate::parking::remove(true, &id);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// An executor for the parking pool, sharing this one's wallet, mode and limits.
+    fn parking_executor(&self, pool: &str) -> Res<Executor> {
+        let mut cfg = self.cfg.clone();
+        cfg.pool = pool.to_lowercase();
+        cfg.name = format!("{} parking", self.cfg.name);
+        cfg.strategy = Default::default();
+        let mut pk = Executor::new(cfg, self.cid, &self.wallet, &self.settings, self.execute, None).map_err(StepErr::Fail)?;
+        pk.virt = self.virt.clone();
+        pk.virt_allow = self.virt_allow.clone();
+        Ok(pk)
+    }
+
+    /// Park `amount` (raw) of `token` in its whitelisted pegged pool (parking.rs) as a lot of this
+    /// pool. Live, the lot is in the ledger before the swap (stage "parking"), so a step cut short is
+    /// put right on the next cycle (`reconcile_lots`); a mint that fails swaps the ratio swap back.
+    fn park(&mut self, token: &str, amount: i128) -> Res<()> {
+        let Some(w) = crate::parking::pool_for(&self.settings, self.cid, token) else { return Ok(()) };
+        if w.pool.eq_ignore_ascii_case(&self.cfg.pool) {
+            return Ok(()); // never into the pool itself
+        }
+        let m = prices::meta(self.cid, token)?;
+        let usd = amount.max(0) as f64 / 10f64.powi(m.decimals as i32) * prices::usd(self.cid, token)?;
+        let min = crate::parking::min_usd(&self.settings);
+        if usd < min {
+            self.say(format!("  park: {:.4} {} is worth ${usd:.2} < ${min}: kept in the wallet", amount as f64 / 10f64.powi(m.decimals as i32), m.symbol));
+            return Ok(());
+        }
+        let mut pk = self.parking_executor(&w.pool)?;
+        let tok = token.to_lowercase();
+        if tok != pk.t0 && tok != pk.t1 {
+            return Err(StepErr::Fail(format!("parking pool {} does not hold {}", w.pool, m.symbol)));
+        }
+        if let Some(host) = crate::parking::host(self.cid, &w.pool) {
+            // the parking pool runs its own strategy: the tokens are its to place (parking.rs, claims)
+            let lot = json!({"id": format!("{}-{}-{}", now(), &self.cfg.pool[2..8], &tok[2..6]), "kind": "claim", "chain_id": self.cid,
+                             "origin": self.cfg.pool, "origin_name": self.cfg.name, "pool": w.pool, "host_name": host, "token": tok,
+                             "symbol": m.symbol, "amount": amount.to_string(), "usd": usd, "ts": now()});
+            crate::parking::add(self.execute, lot.clone());
+            self.say(format!("  park: {:.4} {} (${usd:.2}) handed to {host}'s strategy as a claim: it places them with its own, and pays them back on unpark",
+                             amount as f64 / 10f64.powi(m.decimals as i32), m.symbol));
+            log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "park", "live": self.execute, "lot": lot}));
+            return Ok(());
+        }
+        self.say(format!("  park: {:.4} {} (${usd:.2}) into the pegged pool {}", amount as f64 / 10f64.powi(m.decimals as i32), m.symbol, &w.pool[..10]));
+        let live = self.execute;
+        let mut lot = json!({"id": format!("{}-{}-{}", now(), &self.cfg.pool[2..8], &tok[2..6]), "chain_id": self.cid, "origin": self.cfg.pool,
+                             "origin_name": self.cfg.name, "pool": w.pool, "token": tok, "symbol": m.symbol, "liquidity": "0",
+                             "amount": amount.to_string(), "usd": usd, "ts": now()});
+        let (cid, wallet) = (self.cid, self.wallet.clone());
+        let r = (|| -> Res<(i64, i64, i128)> {
+            let (sp, tick, _, p) = pk.price()?;
+            let (tl, tu) = crate::parking::range(tick, pk.spacing, w.range_pct);
+            let f0 = pk.need0_fraction(&[(tl, tu, 1.0)], &sp, p);
+            let is0 = tok == pk.t0;
+            let (tin, tout) = if is0 { (pk.t0.clone(), pk.t1.clone()) } else { (pk.t1.clone(), pk.t0.clone()) };
+            lot["tl"] = json!(tl);
+            lot["tu"] = json!(tu);
+            if live {
+                let pre = crate::parking::onchain(cid, &w.pool, &wallet, tl, tu).map_err(StepErr::Fail)?;
+                for (k, v) in [("stage", json!("parking")), ("pre", json!(pre.to_string())), ("other", json!(tout)), ("got", json!("0"))] {
+                    lot[k] = v;
+                }
+                crate::parking::add(true, lot.clone());
+            }
+            // the share of the lot the range wants in the other token
+            let give = ((if is0 { 1.0 - f0 } else { f0 }) * amount as f64) as i128;
+            let mc = pk.cfg.max_swap_cost_bps.max(10.0);
+            let got = if give > 0 {
+                let fair = if is0 { give as f64 * p } else { give as f64 / p };
+                let (a, b) = (tin.clone(), tout.clone());
+                pk.retry("park swap", |s| s.swap(&a, &b, give, fair, mc, "park: ratio swap"))?
+            } else {
+                0
+            };
+            if live {
+                lot["got"] = json!(got.to_string());
+                crate::parking::update(true, lot.clone());
+            }
+            let keep = amount - give;
+            let (x, y) = if is0 { (keep, got) } else { (got, keep) };
+            match pk.retry("park mint", |s| s.mint_exact(tl, tu, x, y)) {
+                Ok(liq) => Ok((tl, tu, liq)),
+                Err(e) => {
+                    // undo the ratio swap; if that fails too, the next cycle's reconcile does it
+                    if live && got > 0 {
+                        let fair = if is0 { got as f64 / p } else { got as f64 * p };
+                        let (a, b) = (tout.clone(), tin.clone());
+                        if pk.retry("park undo swap", |s| s.swap(&a, &b, got, fair, mc, "park failed: swap back")).is_ok() {
+                            crate::parking::remove(true, lot["id"].as_str().unwrap_or(""));
+                        }
+                    } else if live {
+                        crate::parking::remove(true, lot["id"].as_str().unwrap_or(""));
+                    }
+                    Err(e)
+                }
+            }
+        })();
+        for l in std::mem::take(&mut pk.report) {
+            self.report.push(l);
+        }
+        self.broadcasts += pk.broadcasts;
+        let (_, _, liq) = r?;
+        if !self.execute {
+            self.virt = pk.virt.clone();
+        }
+        lot["liquidity"] = json!(liq.to_string());
+        if let Some(o) = lot.as_object_mut() {
+            for k in ["stage", "pre", "other", "got"] {
+                o.remove(k);
+            }
+        }
+        log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "park", "live": self.execute, "lot": lot}));
+        if self.execute {
+            crate::parking::update(true, lot);
+        } else {
+            crate::parking::add(false, lot);
+        }
+        Ok(())
+    }
+
+    /// Bring every lot this pool parked back into its token (before re-entering or switching sides).
+    fn unpark_all(&mut self) -> Res<()> {
+        self.reconcile_lots()?;
+        for lot in crate::parking::of_origin(self.execute, self.cid, &self.cfg.pool) {
+            if lot["stage"].is_null() {
+                self.unpark(&lot)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Bring one lot back into its token; returns how much of the token came back (raw). Only what
+    /// is still on the lot's range is withdrawn (parking.rs): a lot whose liquidity went elsewhere
+    /// is dropped from the ledger rather than failing every cycle. Live, each step is in the ledger
+    /// first ("unparking", then "burned"), so one cut short is finished by `reconcile_lots`.
+    fn unpark(&mut self, lot: &Value) -> Res<i128> {
+        if crate::parking::is_claim(lot) {
+            return self.unpark_claim(lot);
+        }
+        let id = lot["id"].as_str().unwrap_or("").to_string();
+        let token = lot["token"].as_str().unwrap_or("").to_lowercase();
+        let amount: i128 = lot["amount"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let (tl, tu) = (lot["tl"].as_i64().unwrap_or(0), lot["tu"].as_i64().unwrap_or(0));
+        let liq: u128 = lot["liquidity"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let pool = lot["pool"].as_str().unwrap_or("").to_string();
+        let short = &pool[..10.min(pool.len())];
+        self.say(format!("  unpark: lot {id} ({} {}) from {short}", lot["symbol"].as_str().unwrap_or("?"), lot["usd"].as_f64().map(|u| format!("${u:.2}")).unwrap_or_default()));
+        if !self.execute {
+            // a dry-run lot was never minted: its tokens simply come back
+            self.say("    dry run: the lot's tokens return to the wallet");
+            self.mv(&token, amount);
+            crate::parking::remove(false, &id);
+            return Ok(amount);
+        }
+        let there = crate::parking::onchain(self.cid, &pool, &self.wallet, tl, tu).map_err(StepErr::Fail)?;
+        let w = crate::parking::withdrawable(lot, &crate::parking::lots(true), there);
+        if w == 0 {
+            self.say_warn(format!("  unpark: lot {id}'s liquidity is no longer on [{tl},{tu}) of {short} (withdrawn elsewhere): dropped from the ledger"));
+            log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "unpark", "live": true, "lot": lot, "missing": true}));
+            crate::parking::remove(true, &id);
+            return Ok(0);
+        }
+        if w < liq {
+            self.say_warn(format!("  unpark: only {w} of lot {id}'s liquidity {liq} is still on [{tl},{tu}): withdrawing that"));
+        }
+        let mut pk = self.parking_executor(&pool)?;
+        let other = if token == pk.t0 { pk.t1.clone() } else { pk.t0.clone() };
+        let (before, before_tok) = (pk.bal(&other)?, pk.bal(&token)?);
+        let mut step = lot.clone();
+        step["stage"] = json!("unparking");
+        step["pre"] = json!(there.to_string());
+        step["other"] = json!(other);
+        crate::parking::update(true, step.clone());
+        let r = (|| -> Res<i128> {
+            pk.retry(&format!("unpark withdraw [{tl},{tu})"), |s| s.burn_one(tl, tu, w as i128).map(|_| ()))?;
+            let got = pk.bal(&other)? - before;
+            // withdrawn: the lot holds no liquidity now, only the swap back is left
+            step["stage"] = json!("burned");
+            step["liquidity"] = json!("0");
+            step["got"] = json!(got.max(0).to_string());
+            crate::parking::update(true, step.clone());
+            if got > 0 {
+                let (_, _, _, p) = pk.price()?;
+                let fair = if other == pk.t0 { got as f64 * p } else { got as f64 / p };
+                let mc = pk.cfg.max_swap_cost_bps.max(10.0);
+                let (a, b) = (other.clone(), token.clone());
+                if let Err(e) = pk.retry("unpark swap", |s| s.swap(&a, &b, got, fair, mc, "unpark: swap back")) {
+                    // left at "burned": the next cycle swaps it back
+                    pk.say_warn(format!("  unpark swap failed: {e}; retried next cycle"));
+                    return Ok(-1);
+                }
+            }
+            Ok((pk.bal(&token)? - before_tok).max(0))
+        })();
+        for l in std::mem::take(&mut pk.report) {
+            self.report.push(l);
+        }
+        self.broadcasts += pk.broadcasts;
+        let back = match r {
+            Ok(b) => b,
+            Err(e) => {
+                // the withdrawal failed: still parked as it was
+                if step["stage"] == "unparking" {
+                    crate::parking::update(true, lot.clone());
+                }
+                return Err(e);
+            }
+        };
+        if back < 0 {
+            return Ok(0);
+        }
+        log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "unpark", "live": true, "lot": lot}));
+        crate::parking::remove(true, &id);
+        Ok(back)
+    }
+
+    /// Pay a claim back (parking.rs, claims): the wallet's balance of the token first (the host may not
+    /// have placed it yet), the rest withdrawn from the host's own positions in proportion (a little
+    /// over, for rounding) with the other token swapped back. A step cut short leaves the claim as it
+    /// was: the next unpark finds what was withdrawn in the wallet and needs less.
+    fn unpark_claim(&mut self, lot: &Value) -> Res<i128> {
+        let id = lot["id"].as_str().unwrap_or("").to_string();
+        let token = lot["token"].as_str().unwrap_or("").to_lowercase();
+        let amount: i128 = lot["amount"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let host = lot["pool"].as_str().unwrap_or("").to_string();
+        let name = lot["host_name"].as_str().map(String::from).unwrap_or_else(|| host[..10.min(host.len())].to_string());
+        self.say(format!("  unpark: claim {id} ({} {}) on {name}", lot["symbol"].as_str().unwrap_or("?"), lot["usd"].as_f64().map(|u| format!("${u:.2}")).unwrap_or_default()));
+        if !self.execute {
+            // dry run: the tokens never left the virtual wallet
+            crate::parking::remove(false, &id);
+            return Ok(amount);
+        }
+        let mut pk = self.parking_executor(&host)?;
+        let r = (|| -> Res<()> {
+            let have = pk.bal(&token)?.max(0);
+            if have >= amount {
+                return Ok(());
+            }
+            let (_, _, _, p) = pk.price()?;
+            let is0 = token == pk.t0;
+            let other = if is0 { pk.t1.clone() } else { pk.t0.clone() };
+            let short = amount - have;
+            let short0 = if is0 { short as f64 } else { short as f64 / p };
+            let positions = wallet_positions(self.cid, &host, &self.wallet)?;
+            let (sp, _, _, _) = pk.price()?;
+            let held0: f64 = positions.iter().map(|(tl, tu, l)| {
+                let (a0, a1) = amounts_at(&sp, *tl, *tu, l);
+                pk.value0(to_f64(&a0), to_f64(&a1), p)
+            }).sum();
+            if held0 > 0.0 {
+                let f = (short0 * 1.01 / held0).min(1.0);
+                self.say(format!("    {:.1}% of {name}'s positions withdrawn to pay it back", f * 100.0));
+                let before = pk.bal(&other)?;
+                for (tl, tu, l) in &positions {
+                    let take = (to_f64(l) * f) as i128;
+                    if take > 0 {
+                        let (a, b) = (*tl, *tu);
+                        pk.retry(&format!("claim withdraw [{a},{b})"), |s| s.burn_one(a, b, take).map(|_| ()))?;
+                    }
+                }
+                let got = pk.bal(&other)? - before;
+                if got > 0 {
+                    let fair = if other == pk.t0 { got as f64 * p } else { got as f64 / p };
+                    let mc = pk.cfg.max_swap_cost_bps.max(10.0);
+                    let (a, b) = (other.clone(), token.clone());
+                    pk.retry("claim swap", |s| s.swap(&a, &b, got, fair, mc, "unpark: swap back"))?;
+                }
+            }
+            Ok(())
+        })();
+        for l in std::mem::take(&mut pk.report) {
+            self.report.push(l);
+        }
+        self.broadcasts += pk.broadcasts;
+        r?;
+        let back = pk.bal(&token)?.max(0).min(amount);
+        log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "unpark", "live": true, "lot": lot, "back": back.to_string()}));
+        crate::parking::remove(true, &id);
+        Ok(back)
+    }
+
+    /// Lots whose whitelist entry re-centres them (parking.rs), outside their range for long enough,
+    /// move back around the parking pool's price: withdrawn and parked again.
+    fn recentre_lots(&mut self) -> Res<()> {
+        for mut lot in crate::parking::of_origin(self.execute, self.cid, &self.cfg.pool) {
+            if crate::parking::is_claim(&lot) {
+                continue; // its host's strategy places it
+            }
+            let Some(w) = crate::parking::entry_of(&self.settings, &lot) else { continue };
+            let Some(after) = w.recentre_after_min else { continue };
+            let (tl, tu) = (lot["tl"].as_i64().unwrap_or(0), lot["tu"].as_i64().unwrap_or(0));
+            let (_, tick, _) = crate::chain::slot0(self.cid, &w.pool).map_err(StepErr::Fail)?;
+            if tl <= tick && tick < tu {
+                if !lot["out_since"].is_null() {
+                    lot["out_since"] = Value::Null;
+                    crate::parking::update(self.execute, lot);
+                }
+                continue;
+            }
+            let t = now() as i64;
+            let Some(since) = lot["out_since"].as_i64() else {
+                lot["out_since"] = json!(t);
+                crate::parking::update(self.execute, lot);
+                continue;
+            };
+            if ((t - since) as f64) < after * 60.0 {
+                continue;
+            }
+            let token = lot["token"].as_str().unwrap_or("").to_lowercase();
+            self.say(format!("  park: lot {} has been outside [{tl},{tu}) for {} min (price at tick {tick}): moving it back around the price",
+                             lot["id"].as_str().unwrap_or("?"), (t - since) / 60));
+            let back = self.unpark(&lot)?;
+            if back > 0 {
+                if let Err(e) = self.park(&token, back) {
+                    self.say_warn(format!("  park failed: {e}; the tokens wait in the wallet (retried next cycle)"));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn sell_rewards(&mut self) -> Res<()> {
@@ -1197,12 +1782,17 @@ impl Executor {
         Ok(())
     }
 
-    /// Exact-amount approvals only; a too-small non-zero allowance is reset to 0 first (USDT).
+    /// The pool this executor runs (or parks in) gets an unlimited approval once: a mint never waits on
+    /// an allowance read again. Anything else (an aggregator's router) is approved the exact amount.
+    /// A too-small non-zero allowance is reset to 0 first (USDT).
     pub fn ensure_allowance(&mut self, token: &str, amount: i128, spender: Option<&str>) -> Res<()> {
+        let own = spender.map(|s| s.eq_ignore_ascii_case(&self.cfg.pool)).unwrap_or(true);
         let spender = spender.unwrap_or(&self.cfg.pool).to_lowercase();
         let key = (token.to_lowercase(), spender.clone());
-        let onchain = small(&chain::erc20_allowance(self.cid, token, &self.wallet, &spender)?);
-        let cur = self.virt_allow.get(&key).copied().unwrap_or(onchain);
+        let cur = match self.virt_allow.get(&key) {
+            Some(v) => *v,
+            None => small(&chain::erc20_allowance(self.cid, token, &self.wallet, &spender)?),
+        };
         if amount <= 0 || cur >= amount {
             return Ok(());
         }
@@ -1214,16 +1804,64 @@ impl Executor {
             let tk = token.to_string();
             self.retry("approve reset", |s| s.tx(&tk, &d, &what, true).map_err(StepErr::from))?;
         }
-        self.say(format!("  approve {} -> {} for {:.6}", m.symbol, &spender[..10], amount as f64 / 10f64.powi(m.decimals as i32)));
-        let d = calldata("approve(address,uint256)", &[addr(&spender), u(big(amount))]);
+        let d = if own {
+            self.say(format!("  approve {} -> {} (this pool): unlimited", m.symbol, &spender[..10]));
+            calldata("approve(address,uint256)", &[addr(&spender), u((BigUint::from(1u8) << 256u32) - 1u8)])
+        } else {
+            self.say(format!("  approve {} -> {} for {:.6}", m.symbol, &spender[..10], amount as f64 / 10f64.powi(m.decimals as i32)));
+            calldata("approve(address,uint256)", &[addr(&spender), u(big(amount))])
+        };
         let what = format!("approve {}", m.symbol);
         let tk = token.to_string();
         self.retry("approve", |s| s.tx(&tk, &d, &what, true).map_err(StepErr::from))?;
-        if !self.execute {
-            self.virt_allow.insert(key, amount);
-        }
+        self.virt_allow.insert(key, if own { i128::MAX } else { amount });
         Ok(())
     }
+
+    /// This run's own spend of an allowance (a mint, a swap): what is known of it goes down by `amount`.
+    fn spent(&mut self, token: &str, spender: &str, amount: i128) {
+        if let Some(v) = self.virt_allow.get_mut(&(token.to_lowercase(), spender.to_lowercase())) {
+            if *v != i128::MAX {
+                *v = (*v - amount.max(0)).max(0);
+            }
+        }
+    }
+}
+
+/// A revert of the pool pulling a token (transferFrom): an allowance or a balance, not the size.
+/// (A Solidly pool's "AL", amounts below the minimums, is the price having moved: not this.)
+fn transfer_failed(reason: &str) -> bool {
+    let r = reason.trim();
+    ["TF", "STF"].iter().any(|c| r == *c || r.starts_with(&format!("{c} ")))
+}
+
+#[cfg(test)]
+mod allowance_tests {
+    use super::transfer_failed;
+
+    #[test]
+    fn a_failed_token_pull_is_told_from_a_size_problem() {
+        for r in ["TF (token transfer failed)", "STF (token transferFrom failed (balance or allowance too low))"] {
+            assert!(transfer_failed(r), "{r}");
+        }
+        for r in ["Price slippage check (pool price moved past the min amounts (slippage))", "AL (amounts below the minimums: the price moved (slippage))", "LOK (pool is locked (reentrancy guard))", "TFX", ""] {
+            assert!(!transfer_failed(r), "{r}");
+        }
+    }
+}
+
+/// Make the pool's strategy decide afresh on its next cycle instead of on its schedule, and take the
+/// new target whatever the turnover: the ladder's last solve is replaced by a forced one, and a node
+/// strategy's last move is forgotten (a ladder block re-solves; a range strategy is past its cooldown).
+pub fn resolve_now(cid: u64, cfg: &PoolConfig, live: bool) {
+    if live {
+        let _ = std::fs::write(crate::paths::logs().join(format!("last_solve_{}.json", cfg.name)), json!({"ts": 0, "force": true}).to_string());
+    }
+    let mut st = crate::custom::load_state(cid, &cfg.pool, live);
+    st.last_move = 0;
+    st.force_solve = true;
+    crate::custom::save_state(cid, &cfg.pool, live, &st);
+    crate::info!("worker", "[{}] re-solving on this cycle (a parked lot was handed over to it)", cfg.name);
 }
 
 pub fn thousands(n: u64) -> String {
