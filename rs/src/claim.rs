@@ -39,7 +39,8 @@ pub fn snapshot(cid: u64, wallet: &str) -> Result<Value, String> {
 
 static CACHE: Mutex<Option<HashMap<(u64, String), (Instant, Value)>>> = Mutex::new(None);
 
-/// Unclaimed rewards in USD (cached 10 min; cleared after a claim).
+/// Unclaimed rewards in USD (cached 10 min; cleared after a claim): `claimable` is in the latest
+/// claim snapshot; `pending` accrued after it and becomes claimable with the next one (about daily).
 pub fn claimable(cid: u64, wallet: &str) -> Value {
     let key = (cid, wallet.to_lowercase());
     if let Some((t, v)) = CACHE.lock().unwrap().get_or_insert_with(HashMap::new).get(&key) {
@@ -50,18 +51,42 @@ pub fn claimable(cid: u64, wallet: &str) -> Value {
     let res = (|| -> Result<Value, String> {
         let snap = snapshot(cid, wallet)?;
         let mut data = vec![];
-        let mut total = 0.0;
+        let (mut total, mut pending) = (0.0, 0.0);
         for r in snap["rewards"].as_array().cloned().unwrap_or_default() {
             let t = r["token"].as_str().unwrap_or("");
             let m = prices::meta(cid, t)?;
             let amt = prices::fnum(&r["claimable"]) / 10f64.powi(m.decimals as i32);
-            let usd = prices::usd(cid, t).ok().map(|p| p * amt);
+            let pend = prices::fnum(&r["pending"]).max(0.0) / 10f64.powi(m.decimals as i32);
+            let px = prices::usd(cid, t).ok();
+            let usd = px.map(|p| p * amt);
             total += usd.unwrap_or(0.0);
-            data.push(json!({"symbol": m.symbol, "amount": amt, "usd": usd}));
+            pending += px.map(|p| p * pend).unwrap_or(0.0);
+            data.push(json!({"symbol": m.symbol, "amount": amt, "usd": usd, "pending": pend, "pending_usd": px.map(|p| p * pend)}));
         }
-        Ok(json!({"claimable": data, "can_claim": snap["claimState"]["canClaim"].as_bool().unwrap_or(false), "usd": total}))
-    })()
-    .unwrap_or_else(|e| json!({"error": e}));
+        Ok(json!({"claimable": data, "can_claim": snap["claimState"]["canClaim"].as_bool().unwrap_or(false), "usd": total, "pending_usd": pending}))
+    })();
+    let last_path = crate::paths::logs().join(format!("rewards_last_{cid}.json"));
+    let res = match res {
+        Ok(v) => {
+            let mut keep = v.clone();
+            keep["as_of"] = json!(crate::engine::now());
+            keep["wallet"] = json!(key.1);
+            let _ = crate::settings::write_atomic(&last_path, &keep);
+            v
+        }
+        // The rewards API is down: show the last figures read, marked stale, rather than nothing.
+        Err(e) => match std::fs::read_to_string(&last_path).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .filter(|v| v["wallet"].as_str() == Some(key.1.as_str()))
+        {
+            Some(mut last) => {
+                last["stale"] = json!(true);
+                last["error"] = json!(e);
+                last["can_claim"] = json!(false);
+                last
+            }
+            None => json!({"error": e}),
+        },
+    };
     CACHE.lock().unwrap().as_mut().unwrap().insert(key, (Instant::now(), res.clone()));
     res
 }

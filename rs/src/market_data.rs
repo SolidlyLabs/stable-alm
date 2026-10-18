@@ -67,12 +67,76 @@ fn api_key() -> Result<String, String> {
     .map(|v| v.as_str().unwrap_or("").to_string())
 }
 
-fn init_data(cid: u64, wallet: &str) -> Result<Value, String> {
+fn fetch_init_data(cid: u64, wallet: &str) -> Result<Value, String> {
     let key = api_key()?;
-    cached(format!("init:{cid}:{}", wallet.to_lowercase()), 300, || {
-        let auth = format!("Bearer {}", jwt(wallet, &key));
-        crate::rpc::post_json("https://solidly.com/api/getInitData/", &json!({"userAddress": wallet, "chainId": cid}), &[("Authorization", &auth)])
-    })
+    let auth = format!("Bearer {}", jwt(wallet, &key));
+    crate::rpc::post_json("https://solidly.com/api/getInitData/", &json!({"userAddress": wallet, "chainId": cid}), &[("Authorization", &auth)])
+}
+
+static REFRESHING: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
+const INIT_TTL_S: u64 = 300;
+
+/// The chain's pool list. Served from memory, or after a restart from the copy saved on disk, at
+/// once; when that copy is older than 5 minutes a fresh one is fetched in the background. Only
+/// with no copy at all does the caller wait for the network. A failed refresh keeps the old copy.
+fn init_data(cid: u64, wallet: &str) -> Result<Value, String> {
+    let w = wallet.to_lowercase();
+    let mkey = format!("init:{cid}:{w}");
+    let snap = format!("pools_{cid}_{w}");
+    let mem = CACHE.lock().unwrap().get_or_insert_with(HashMap::new).get(&mkey).cloned();
+    let (value, age) = match mem {
+        Some((t, v)) => (Some(v), t.elapsed().as_secs()),
+        None => match crate::store::load_snapshot(&snap) {
+            Some((v, saved)) => {
+                let age = crate::engine::now().saturating_sub(saved);
+                let at = Instant::now().checked_sub(Duration::from_secs(age)).unwrap_or_else(Instant::now);
+                CACHE.lock().unwrap().as_mut().unwrap().insert(mkey.clone(), (at, v.clone()));
+                (Some(v), age)
+            }
+            None => (None, u64::MAX),
+        },
+    };
+    let store = move |v: &Value| {
+        CACHE.lock().unwrap().get_or_insert_with(HashMap::new).insert(format!("init:{cid}:{w}"), (Instant::now(), v.clone()));
+        crate::store::save_snapshot(&format!("pools_{cid}_{w}"), v);
+        remember_tokens(cid, v);
+    };
+    match value {
+        Some(v) => {
+            if age >= INIT_TTL_S && REFRESHING.lock().unwrap().get_or_insert_with(Default::default).insert(mkey.clone()) {
+                let wallet = wallet.to_string();
+                std::thread::spawn(move || {
+                    match fetch_init_data(cid, &wallet) {
+                        Ok(fresh) => store(&fresh),
+                        Err(e) => crate::warn!("market", "pool list for chain {cid}: refresh failed, keeping the saved copy ({e})"),
+                    }
+                    REFRESHING.lock().unwrap().as_mut().unwrap().remove(&mkey);
+                });
+            }
+            Ok(v)
+        }
+        None => {
+            let v = fetch_init_data(cid, wallet)?;
+            store(&v);
+            Ok(v)
+        }
+    }
+}
+
+/// Keep the facts about every listed token that never change (symbol, name, decimals, logo).
+fn remember_tokens(cid: u64, v: &Value) {
+    for p in v["filledPools"].as_array().cloned().unwrap_or_default() {
+        for t in [&p["token0"], &p["token1"]] {
+            let addr = t["id"].as_str().unwrap_or("").to_lowercase();
+            if addr.is_empty() {
+                continue;
+            }
+            let dec = crate::prices::fnum(&t["decimals"]);
+            crate::store::merge(&crate::store::token_key(cid, &addr), json!({
+                "symbol": t["symbol"], "name": t["name"], "decimals": if dec > 0.0 { json!(dec as u64) } else { Value::Null },
+                "logo_src": t["logoURI"]}));
+        }
+    }
 }
 
 const PEGS: [(&str, &[&str]); 5] = [
@@ -91,9 +155,16 @@ pub fn is_pegged(a: &str, b: &str, ratio: Option<f64>) -> bool {
     }
 }
 
-fn token(t: &Value) -> Value {
-    json!({"address": t["id"].as_str().unwrap_or("").to_lowercase(), "symbol": t["symbol"], "name": t["name"],
-           "decimals": crate::prices::fnum(&t["decimals"]) as i64, "price_usd": crate::prices::fnum(&t["priceUSD"]), "logo": t["logoURI"]})
+/// Logo address the dashboard loads: served by the app from its own copy (see store::logo).
+pub fn logo_path(cid: u64, addr: &str, src: &Value) -> Value {
+    if src.as_str().map(|s| !s.is_empty()).unwrap_or(false) { json!(format!("/api/logo/{cid}/{}", addr.to_lowercase())) } else { Value::Null }
+}
+
+fn token(cid: u64, t: &Value) -> Value {
+    let addr = t["id"].as_str().unwrap_or("").to_lowercase();
+    json!({"address": addr, "symbol": t["symbol"], "name": t["name"],
+           "decimals": crate::prices::fnum(&t["decimals"]) as i64, "price_usd": crate::prices::fnum(&t["priceUSD"]),
+           "logo": logo_path(cid, &addr, &t["logoURI"])})
 }
 
 pub fn pools(cid: u64, wallet: &str) -> Result<Vec<Value>, String> {
@@ -105,7 +176,7 @@ pub fn pools(cid: u64, wallet: &str) -> Result<Vec<Value>, String> {
         .iter()
         .map(|p| {
             let ia = &p["poolAggregation"]["intervalAggregations"]["HOUR_24"];
-            let (t0, t1) = (token(&p["token0"]), token(&p["token1"]));
+            let (t0, t1) = (token(cid, &p["token0"]), token(cid, &p["token1"]));
             let (p0, p1) = (t0["price_usd"].as_f64().unwrap_or(0.0), t1["price_usd"].as_f64().unwrap_or(0.0));
             let ratio = if p0 > 0.0 && p1 > 0.0 { Some(p0 / p1) } else { None };
             json!({"chain_id": cid, "chain": crate::chains::get(cid).name,
@@ -211,7 +282,7 @@ pub fn shortlist(wallet: &str, configured: &[(u64, String)]) -> Result<Vec<Value
 }
 
 /// Every token of the chains' Solidly pools (+ extra addresses) with the wallet's balance.
-pub fn tokens(wallet: &str, extra: &[String]) -> Result<Vec<Value>, String> {
+pub fn tokens(wallet: &str, extra: &[(u64, String)]) -> Result<Vec<Value>, String> {
     let mut out = vec![];
     for c in crate::chains::all().into_iter().filter(|c| c.enabled) {
         let cid = c.id;
@@ -225,11 +296,16 @@ pub fn tokens(wallet: &str, extra: &[String]) -> Result<Vec<Value>, String> {
                 }
             }
         }
-        if cid == crate::chains::BASE {
-            for a in extra {
-                if !known.iter().any(|k| k["address"] == a.to_lowercase().as_str()) {
-                    known.push(json!({"address": a.to_lowercase(), "symbol": &a[..8.min(a.len())], "decimals": null, "price_usd": 0}));
-                }
+        for (_, a) in extra.iter().filter(|(c, _)| *c == cid) {
+            if !known.iter().any(|k| k["address"] == a.to_lowercase().as_str()) {
+                // not in any pool: what the store knows (from earlier pool lists or the chain); no price lookup,
+                // so the list never waits on a price feed
+                let m = crate::prices::meta(cid, a).ok();
+                let k = crate::store::get(&crate::store::token_key(cid, a)).unwrap_or(Value::Null);
+                known.push(json!({"address": a.to_lowercase(),
+                                  "symbol": m.as_ref().map(|m| m.symbol.clone()).unwrap_or_else(|| a[..8.min(a.len())].to_string()),
+                                  "name": k["name"], "logo": logo_path(cid, a, &k["logo_src"]),
+                                  "decimals": m.as_ref().map(|m| m.decimals), "price_usd": if *a == crate::chains::get(cid).usd.to_lowercase() { 1.0 } else { 0.0 }}));
             }
         }
         let data = format!("0x70a08231{}{}", "0".repeat(24), wallet.trim_start_matches("0x").to_lowercase());

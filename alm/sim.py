@@ -83,28 +83,44 @@ class Result:
         return float(self.equity[-1] - self.equity[0])
 
 
-def _income(m, i0: int, i1: int, ranges: list) -> tuple:
-    """Fees and emissions earned by fixed ranges over swaps (i0, i1]; plus in-range time."""
-    if i1 <= i0 or not ranges:
-        return 0.0, 0.0, 0.0, 0.0
-    sl = slice(i0 + 1, i1 + 1)
-    t_post, t_pre = m.tick[sl], m.tick_pre[sl]
-    ours_post = np.zeros(i1 - i0)
-    ours_pre = np.zeros(i1 - i0)
+def _liq_in(ranges: list, ticks: np.ndarray) -> np.ndarray:
+    out = np.zeros(len(ticks))
     for tl, tu, liq in ranges:
-        if liq <= 0:
-            continue
-        ours_post += liq * ((t_post >= tl) & (t_post < tu))
-        ours_pre += liq * ((t_pre >= tl) & (t_pre < tu))
-    others = m.l_others[sl]
-    ours = 0.5 * (ours_post + ours_pre)
-    share = np.where(ours > 0, ours / (others + ours + 1e-12), 0.0)
-    fees = float(np.dot(m.fee[sl], share))
-    # Time-based: state after swap k holds until swap k+1.
-    share_t = np.where(ours_post > 0, ours_post / (others + ours_post + 1e-12), 0.0)
-    dt = m.dt[sl]
-    emis = float(np.dot(m.emis_rate[sl] * dt, share_t))
-    t_in = float(np.dot(dt, ours_post > 0))
+        if liq > 0:
+            out += liq * ((ticks >= tl) & (ticks < tu))
+    return out
+
+
+def _income(m, i0: int, i1: int, ranges: list, t0: float = None, t1: float = None) -> tuple:
+    """Earnings of fixed ranges held from time t0 to t1, where i0 / i1 are the last swaps at or
+    before t0 / t1. Fees: the swaps (i0, i1]. Emissions and in-range time: the state after each
+    swap k in [i0, i1] counts from max(ts[k], t0) to min(ts[k+1], t1), so nothing accrues to these
+    ranges after t1 (when the strategy may have changed them). Without t0 / t1 the interval runs
+    over the swaps (i0, i1] as before."""
+    if not ranges:
+        return 0.0, 0.0, 0.0, 0.0
+    fees = 0.0
+    if i1 > i0:
+        sl = slice(i0 + 1, i1 + 1)
+        ours_post, ours_pre = _liq_in(ranges, m.tick[sl]), _liq_in(ranges, m.tick_pre[sl])
+        ours = 0.5 * (ours_post + ours_pre)
+        share = np.where(ours > 0, ours / (m.l_others[sl] + ours + 1e-12), 0.0)
+        fees = float(np.dot(m.fee[sl], share))
+    if t0 is None or t1 is None:
+        if i1 <= i0:
+            return fees, 0.0, 0.0, 0.0
+        ks = np.arange(i0 + 1, i1 + 1)
+        dt = m.dt[ks]
+    else:
+        if t1 <= t0:
+            return fees, 0.0, 0.0, 0.0
+        ks = np.arange(i0, i1 + 1)
+        nxt = np.append(m.ts[ks[:-1] + 1], t1).astype(float)
+        dt = np.clip(np.minimum(nxt, t1) - np.maximum(m.ts[ks].astype(float), t0), 0.0, None)
+    held = _liq_in(ranges, m.tick[ks])
+    share_t = np.where(held > 0, held / (m.l_others[ks] + held + 1e-12), 0.0)
+    emis = float(np.dot(m.emis_rate[ks] * dt, share_t))
+    t_in = float(np.dot(dt, held > 0))
     return fees, emis, t_in, float(dt.sum())
 
 
@@ -132,6 +148,7 @@ def run(market, strategy, capital_usdc: float = 15_000.0, costs: Costs = None, s
     actions = 0
     day_ts, equity = [], []
     last_i = st.i
+    last_t = float(m.bar_end[0])
     next_day = (int(m.bar_end[0]) // 86400 + 1) * 86400
     cash = 0.0  # rewards received minus costs paid
 
@@ -147,23 +164,27 @@ def run(market, strategy, capital_usdc: float = 15_000.0, costs: Costs = None, s
     strategy.reset()
     for b in range(len(m.bar_end)):
         i = int(m.bar_idx[b])
-        if i > last_i:
-            f, e, a, tt = _income(m, last_i, i, st.ranges)
+        t = float(m.bar_end[b])
+        if t > last_t:
+            # what the ranges held since the last decision earned, up to this decision
+            f, e, a, tt = _income(m, last_i, i, st.ranges, last_t, t)
             fees += f
             emis += e
             cash += f * costs.fee_haircut + e * costs.emission_haircut
             t_in += a
             t_tot += tt
-            last_i = i
+        last_i, last_t = i, t
         st.i, st.bar, st.tick, st.sp = i, b, int(m.tick[i]), float(m.sp[i])
         st.bars_out_of_range = 0 if st.in_range() else st.bars_out_of_range + 1
         target = strategy.decide(st)
         if target is not None:
-            c = _execute(st, target, costs)
+            c, paid = _execute(st, target, costs)
             if num1:  # _execute prices costs in token0
                 c *= st.sp**2
+                paid *= st.sp**2
             cost += c
-            cash -= c
+            # Swap cost already left the inventory inside _execute; only gas is paid from cash.
+            cash -= paid
             actions += 1
             st.last_action_bar = b
             # Restart the out-of-range clock after any action: a one-sided swap-free position can
@@ -185,8 +206,9 @@ def run(market, strategy, capital_usdc: float = 15_000.0, costs: Costs = None, s
     )
 
 
-def _execute(st: State, target: Target, costs: Costs) -> float:
-    """Burn all, (optionally) swap, mint target. Returns cost in USDC."""
+def _execute(st: State, target: Target, costs: Costs) -> tuple:
+    """Burn all, (optionally) swap, mint target. Returns (total cost, part paid from cash), in
+    the numeraire: the swap cost is taken from the swapped inventory, gas from cash."""
     sp, p = st.sp, st.sp**2
     px, py = _position_amounts(st.ranges, sp)
     x, y = st.x + px, st.y + py
@@ -239,8 +261,8 @@ def _execute(st: State, target: Target, costs: Costs) -> float:
                 n_tx += 1
     st.ranges = new
     st.x, st.y = max(x, 0.0), max(y, 0.0)
-    cost += n_tx * costs.gas_usd
-    return cost
+    gas = n_tx * costs.gas_usd
+    return cost + gas, gas
 
 
 def fixed_ranges_value(ranges: list, sp: float) -> float:

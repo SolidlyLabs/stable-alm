@@ -7,14 +7,22 @@
 //!   StableALM --parity DIR    parity check against fixtures exported by scripts/export_parity.py
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod backtest;
 mod chain;
 mod chains;
 mod claim;
 mod data;
 mod desktop;
+mod elasticity;
 mod engine;
+mod custom;
 mod ledger;
+mod library;
 mod eth;
+mod graph;
+mod overfit;
+mod ta;
+mod history;
 mod ladder;
 mod log;
 mod market_data;
@@ -26,6 +34,7 @@ mod rpc;
 mod settings;
 mod signer;
 mod solid_lp;
+mod store;
 mod tickmath;
 mod webui;
 mod worker;

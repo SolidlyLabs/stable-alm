@@ -1,7 +1,7 @@
 //! The live strategy: Ladder (water-filling across single ticks) with the depeg guard, as in
 //! alm/strategies.py. Only what the executor uses: one decision at the latest bar.
 
-use crate::data::{median, rolling_median_trailing_bfill, Market};
+use crate::data::{median, rolling_median_trailing, Market, WEEK_BARS};
 
 #[derive(Clone, Debug)]
 pub struct Params {
@@ -70,7 +70,7 @@ pub fn np_sum(a: &[f64]) -> f64 {
 /// Distance of the latest bar tick from the 7-day (2016-bar) median; None without a guard.
 pub fn guard_dev(m: &Market, p: &Params) -> Option<f64> {
     p.guard?;
-    let med = rolling_median_trailing_bfill(&m.bar_tick, 2016, 12);
+    let med = rolling_median_trailing(&m.bar_tick, WEEK_BARS, 12);
     let b = m.bar_tick.len().checked_sub(1)?;
     Some((m.bar_tick[b] as f64 - med[b]).abs())
 }
@@ -129,8 +129,12 @@ pub fn solve(m: &Market, p: &Params, i1: usize, budget_l: f64) -> Option<(i64, V
 /// The ladder's decision at the latest bar for a fresh state (the executor re-solves on its own
 /// schedule): ranges (tl, tu, weight). x = budget in token0 units, sp = sqrt price (float).
 pub fn decide(m: &Market, p: &Params, x: f64, sp: f64, tick: i64) -> Vec<(i64, i64, f64)> {
+    decide_at(m, p, x, sp, tick, *m.bar_idx.last().unwrap())
+}
+
+/// The same decision as of swap `i1` (the backtester's bar), from the swaps up to it only.
+pub fn decide_at(m: &Market, p: &Params, x: f64, sp: f64, tick: i64, i1: usize) -> Vec<(i64, i64, f64)> {
     let budget_l = x * 10f64.powi(m.decimals) * sp / (1.0001f64.sqrt() - 1.0) / m.liq_scale;
-    let i1 = *m.bar_idx.last().unwrap();
     match solve(m, p, i1, budget_l) {
         None => vec![(tick - 2, tick + 3, 1.0)],
         Some((lo, w)) => w.iter().enumerate().filter(|(_, x)| **x > 1e-3).map(|(j, x)| (lo + j as i64, lo + j as i64 + 1, *x)).collect(),

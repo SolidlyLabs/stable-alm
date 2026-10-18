@@ -3,7 +3,7 @@
 // and strategy inputs from their keys. The panel keeps the last explanation until something else
 // with help is hovered, and shows the element's live details (its tooltip text and table row).
 (function () {
-  const H = {
+  const H = window.HELP = {
     _default: ["How to use this panel", `
       <p>Move the pointer over anything on the page (a number, a column header, a button, a setting) and this panel explains what it is,
       how it is calculated and what changing it does. On a phone, tap the item.</p>
@@ -39,8 +39,84 @@
     "tab-pools": ["Pools tab", `<p>One table for every pool: the ones you manage (highlighted, at the top by default) and every other Solidly V3 pool on the chains you turned on. Click a column header to sort.</p>
       <ul><li>Turn chains on or off with the chips at the top.</li><li>Search, show only your pools, or show volatile pairs (after a confirmation).</li>
       <li>Set each managed pool's allocation, enable it, and tune its strategy; then <b>Save</b> in the bar that appears.</li><li><b>Add</b> any listed pool; it starts disabled at 0%.</li></ul>`],
-    "tab-settings": ["Settings tab", `<p>Global options (cycle interval, claims, reward selling, retries, the funding tokens for cross-pool allocations) and the private key.</p>`],
+    "tab-settings": ["Settings tab", `<p>Global options (cycle interval, claims, reward selling, retries, the private key, funding tokens and RPC endpoints per chain.</p>`],
     "tab-activity": ["Activity tab", `<p>Every decision and transaction the worker made (newest first), and the tail of the warnings/errors log.</p>`],
+    "tab-lab": ["Strategy lab tab", `<p>Build strategies, see them on a pool's real price history, backtest them against strategies you pick, and save them under a name.</p>
+      <ol><li>Choose a pool (yours, any listed pool, or any pool by address).</li><li>Pick a strategy with <b>📂 Select strategy</b>: built in, or one you saved (each shows its APR for the period).</li>
+      <li>Change it: a node strategy by wiring blocks (indicators, conditions, outputs), simple rules in the form or by dragging handles on the chart.</li>
+      <li>Every change re-runs the backtest; the cards on the right compare it with the strategies you chose.</li>
+      <li><b>Save</b> it to your strategies, then pick it for a pool under <b>Pools</b>. The worker runs exactly what you tested.</li></ol>`],
+
+    // ---- strategy lab ----
+    lab: ["Strategy lab", `<p>Pick the pool to test, the period (how many days back from now) and the capital.</p>
+      <p>The first run on a pool downloads its history from the Solidly data processor (compressed, a few seconds). After that it is kept on this computer and only the newest events are fetched, so re-runs take a moment.</p>`],
+    "lab-pool": ["Pool", `<p>The pool to backtest on. Click to open the list: <b>your pools</b> first, with the liquidity you have in each, its share of the account, how many ranges it holds and whether they are in range (green dot) or out (amber); then <b>all pools</b> on the supported chains by TVL, with 24-hour volume and fee APR. Type to search by token, pool name or chain, filter by chain, and use the arrow keys and Enter. <b>Another pool by address</b> loads any pool.</p>`],
+    "lab-period": ["Period", `<p>How far back the backtest starts. It always ends now. Choose 7 days to a year. The first run of a long period downloads the pool's history once (a year of a busy pool takes a few minutes and about 2 GB of memory while the replay is built); later runs read it from this computer. Longer periods cover more market conditions; the most recent week says most about how the pool trades today.</p>`],
+    "lab-capital": ["Capital", `<p>How much the backtest deploys, in US dollars: you bring USDC and the backtest buys the pool's tokens with it (where the pair has no stablecoin, that purchase pays the swap cost, shown under the results). The replay counts in the pair's numeraire and the cards show dollars at today's price. It starts at what you would really have there: for your pool, what is deployed in it now; for another pool, an equal share of the account.</p>
+      <p><b>Fees</b> start from the fee the pool paid per unit of liquidity, and your liquidity deepens the pool. Deeper pools draw more flow (aggregators route more through them), by how much is the pool's <b>elasticity β</b>, measured on its last week and shown under the results: at β = 1 flow grows in proportion and the fee APR is the same for any amount; at 0 volume is fixed and more capital only splits it thinner. Your own positions going in and out of range are the cleanest measurement; a week of hourly fees is noisy, so the estimate is weighted against a prior of 0.5 by how sure it is. No position draws more than twice a swap's real flow. <b>Emissions do:</b> they are a fixed budget per pool, so more capital is a smaller share each. <b>Gas</b> is a fixed cost per move, heavier on a small amount.</p>`],
+    "lab-library": ["Strategies", `<p>Every strategy you can open, compare with or apply: <b>built in</b> (the ladder, simple one-range rules, and node strategies built on indicators) and <b>saved by you</b> under your own names (kept in <code>config/strategies.json</code>).</p>
+      <p>When the list opens, each strategy is backtested on the chosen pool, period and capital (four at a time, after costs), so every row shows its <b>APR</b>, what it added over holding, its moves and its time in range. Sort by APR, name or group; search by name or description.</p>
+      <ul><li>Click a row to open it in the editor.</li><li><b>compare</b> adds it to the backtest comparison on the right (up to four).</li><li><b>✕</b> deletes one of your own strategies.</li></ul>
+      <p>Shortcuts: <kbd>Ctrl+O</kbd> opens this list, <kbd>Ctrl+S</kbd> saves, <kbd>Esc</kbd> closes.</p>`],
+    "lab-save": ["Open, new and save", `<p><b>📂 Select strategy</b> lists every strategy with its APR. <b>＋ Create new strategy</b> starts a node strategy, simple rules or a ladder. Click the name to rename.</p>
+      <p><b>Save</b> (<kbd>Ctrl+S</kbd>) overwrites your own strategy, or asks for a name the first time; <b>Save as…</b> keeps a copy under a new name (built-in strategies are never changed). <b>Delete</b> removes one of yours.</p>`],
+    "lab-compare": ["Comparisons", `<p>The strategies the backtest runs next to the one you are editing, on the same swaps, with the same capital and costs: up to four from the library (the ladder by default), plus holding half and half. Each gets a card and a line in the value chart.</p>
+      <p><b>×</b> on a card removes it; <b>＋ Add a strategy</b> under the cards lists the library (with each strategy's APR once the strategy list has run) and holding. Your choice is remembered.</p>`],
+    "lab-toolbox": ["Toolbox", `<p><b>＋ Blocks</b> opens the list of blocks (sources, indicators, maths, conditions, position and outputs): type to search, click one to add it in the middle of the view, or drag it onto the canvas. <b>Tidy</b> lays the blocks out in columns, sources on the left and outputs on the right, ordered so wires cross as little as possible; <b>−</b>, the percentage (fit everything) and <b>+</b> zoom.</p>`],
+    "lab-nodes": ["Node editor", `<p>A node strategy is a small flow: <b>sources</b> (price, bar high/low, fees) feed <b>indicators</b> and <b>maths</b>, which feed <b>conditions</b>, which drive the <b>outputs</b>.</p>
+      <ul><li><b>Range</b> (required) is the range to hold: its lower and upper edges, in ticks, rounded out to the tick spacing.</li>
+      <li><b>Rebalance when</b> moves to that range when its condition is true (by default when the price leaves the current range), with a delay and a cooldown.</li>
+      <li><b>Exit when</b> withdraws everything, <b>Hold when</b> freezes all action.</li></ul>
+      <p>Add blocks with <b>＋ Blocks</b> in the toolbox or a right-click on the canvas; drag a block by its title, drag from an output dot (right) to an input dot (left) to connect, click a wire or drag it off an input to remove it. Amber outputs are true/false, green ones are prices in ticks, blue ones are other numbers. <b>Tidy blocks</b> lays them out in columns.</p>
+      <p><b>Right-click</b> the empty canvas to add a block where you clicked (type to search), paste a copied block, tidy or fit. Right-click a block to name it, change its unit, reset its settings, duplicate, copy, disconnect or delete it; right-click a wire to remove it. With a block selected: <kbd>Del</kbd> deletes it, <kbd>Ctrl+D</kbd> duplicates, <kbd>Ctrl+C</kbd> / <kbd>Ctrl+V</kbd> copy and paste.</p>
+      <p>Hold the middle mouse button (or drag the empty background, or one finger on a phone) to move around the canvas; the mouse wheel (or a pinch) zooms around the pointer. The minimap in the corner shows every block and the part in view: click or drag in it to jump there, right click it to see every block. <b>+</b>, <b>−</b> and the percentage (fit everything in view) sit above it.</p>
+      <p>Indicator periods are in hours (bars are 5 minutes). Every value is computed from bars that have closed, so the backtest never looks ahead; the Donchian channel uses the bars before the current one, and Ichimoku has no lagging span (it would look ahead). EMA and Wilder averages start from a simple average, and on a flat price the oscillators show a neutral value instead of dividing by zero. A chain of indicators may need at most 190 hours of history before its first value. Blocks with a missing input are outlined red and the backtest waits until they are connected.</p>`],
+    "lab-range": ["Range", `<p>The one range custom mode keeps around the price. In the chart it is the green bar at today's price; drag its top or bottom edge to change it.</p>`],
+    "lab-width": ["Width", `<p>The range's width in ticks (1 tick is a 0.01% price step). It is rounded up to the pool's tick spacing.</p>
+      <p>Narrower ranges earn a bigger share of the fees while the price is inside, but leave the range more often, and every move costs gas and a swap.</p>`],
+    "lab-placement": ["Placement", `<p><b>Centred</b>: each new range is placed around the price, with the share below set by the slider.</p>
+      <p><b>Follow</b>: the width stays; after the price leaves at the top the new range ends just above the price, after it leaves at the bottom it starts just below. A trend keeps the position on the price's side.</p>`],
+    "lab-skew": ["Share below the price", `<p>Where the price sits inside a new range: 50% centres it; less puts more of the range above the price (expecting a rise), more puts it below.</p>`],
+    "lab-offset": ["Follow offsets", `<p>With follow placement: how many ticks past the price the new range reaches after a move up (from the top) or down (from the bottom).</p>`],
+    "lab-trigger": ["Trigger", `<p>When a move happens: the price must leave the trigger band (the range widened by the buffers, dashed blue on the chart), stay out for the delay, and the cooldown since the last move must be over.</p>`],
+    "lab-buffer": ["Buffers", `<p>Ticks added to each side of the range before a move triggers. A buffer lets the price leave the range for a while without a move. A negative buffer moves the range before the price reaches its edge.</p>
+      <p>Drag the blue trigger handles on the chart to set them.</p>`],
+    "lab-delay": ["Delay", `<p>How long the price must stay outside the trigger band before the range moves. It filters out brief spikes; if the price comes back in time, nothing happens.</p>`],
+    "lab-cooldown": ["Cooldown", `<p>The minimum time between two moves, so a choppy market cannot trigger a move every cycle.</p>`],
+    "lab-cutoff": ["Cutoffs", `<p>Fixed prices beyond which the range is not moved: the position waits there instead of chasing the price. Useful on a pegged pair, where a price far from the peg is likely to come back.</p>
+      <p>Drag the amber lines on the chart.</p>`],
+    "lab-exit": ["Exit", `<p>Fixed prices that withdraw everything when crossed (after the exit delay), for example if a peg breaks. With re-entry on, it deposits again once the price is back between them; otherwise it stays out until you re-arm the pool.</p>`],
+    "lab-exitp": ["Exit prices", `<p>The lower and upper prices that trigger the exit. Drag the red lines on the chart.</p>`],
+    "lab-exitdelay": ["Exit delay", `<p>How long the price must stay beyond an exit price before the withdrawal, so a brief wick does not close the position.</p>`],
+    "lab-exitto": ["Withdraw into", `<p>What the exit leaves in the wallet: both tokens as withdrawn, or everything swapped into one of them (costs a swap).</p>`],
+    "lab-reenter": ["Re-enter", `<p>On: after an exit, a new range is opened when the price is back between the exit prices (and not beyond a cutoff). Off: the pool stays out until you press <b>Re-arm</b>.</p>`],
+    "lab-guard": ["Depeg guard", `<p>Freezes all action while the price is more than this many ticks from its 7-day median. The position is kept as it is; nothing is moved or withdrawn until the price returns.</p>`],
+    "lab-costs": ["Costs and haircuts", `<p>What the backtest charges and credits:</p><ul><li><b>Swap cost</b>: basis points paid on the value swapped at each move.</li><li><b>Gas</b>: dollars per transaction (withdraw, swap, deposit).</li>
+      <li><b>Fees received</b>: the share of the processor's fee attribution that is really paid out (measured at 82% on this wallet).</li><li><b>Emissions value</b>: what SOLID emissions are worth when sold (it has little liquidity).</li></ul>`],
+    "lab-chart": ["Price and strategy", `<p>The pool's price over the period (grey), the ranges the backtest held (green blocks) and its moves (ticks at the bottom).</p>
+      <p><b>Node strategies</b>: the dashed green lines are the range the strategy wanted at each hour; the coloured lines are its indicators (toggle them with the chips under the chart).</p>
+      <p><b>Simple rules</b>: the strip on the right shows the rules at today's price: the range (green), the trigger band (dashed blue), and the cutoffs (amber) and exits (red) across the chart. Drag any handle; the backtest re-runs when you let go.</p>`],
+    "lab-results": ["Backtest results", `<p>Always on the right while you edit. Each card replays the same swaps: the strategy you are editing (outlined), the ones you added with <b>＋ Add a strategy</b>, and holding half and half. The big number is the profit, then its yearly rate; the small figures split it up. The chart below shows each run's value over time.</p>
+      <p><code>value − holding = fees + emissions − swap costs − gas + IL</code></p>
+      <p>The best figure across the cards is green. Volume is held fixed, which is conservative; fees and emissions are paid out, not compounded.</p>`],
+    "lab-overfit": ["Overfit check", `<p>After each full backtest the lab runs a second step for the strategy you are editing: the same swaps replayed with every setting nudged between half and double (24 neighbours), and the period cut into 8 time slices.</p>
+      <p><b>Walk-forward efficiency</b>: the best settings on the slices so far, measured on the next slice, over what they earned in sample (1 = held up). <b>PBO</b>: over the 70 ways to split the slices into halves, how often the best settings of one half rank in the bottom half of the other. <b>Neighbours holding up</b>: share of nudged settings keeping at least half the edge over holding. <b>Slices beating hold</b>: how steady the edge is over time.</p>
+      <p>Score = 35% (1 − PBO) + 25% efficiency + 25% stability + 15% consistency. 70+ robust, 45–70 some risk, below 45 likely overfit. A strategy with no settings to vary gets no score. Short periods give noisy slices.</p>`],
+    "lab-r-value": ["Value at the end", `<p>Everything the strategy holds at the end (the positions at the final price, idle tokens, and the fees and emissions it was paid), in the numeraire.</p>`],
+    "lab-r-pnl": ["Profit", `<p>Value at the end minus the capital, and the same as a yearly rate. It includes the price change of the tokens held.</p>`],
+    "lab-r-hodl": ["vs holding", `<p>Value at the end minus what the first deposit's token amounts would be worth if simply held. This is what the strategy added on top of owning the tokens.</p>`],
+    "lab-r-fees": ["Fees", `<p>The strategy's share of every swap's fee while its range was active at the swap's price, after the fee haircut.</p>`],
+    "lab-r-emis": ["Emissions", `<p>SOLID emissions earned by time in range, in proportion to the liquidity held, valued with the emission haircut.</p>`],
+    "lab-r-costs": ["Costs", `<p>Swap costs at each move (on the value swapped) and gas for every transaction.</p>`],
+    "lab-r-il": ["IL", `<p>Impermanent loss and rebalancing drift: how much the positions' tokens lost (or gained) against holding the first deposit, as the price moved and the ranges were moved. Swap costs are counted separately.</p>`],
+    "lab-r-moves": ["Moves", `<p>How many times the strategy withdrew and re-deposited (or exited).</p>`],
+    "lab-r-tir": ["Time in range", `<p>The share of the period the strategy's liquidity was at the pool's price, earning.</p>`],
+    "lab-moves": ["Moves and exits", `<p>Every move of your rules in the backtest, with its new range and the reason the rules gave, the same reasons the worker logs live.</p>`],
+    "lab-apply": ["Using a strategy", `<p>The lab is for building and testing. To run a strategy on a pool, <b>Save</b> it here, then pick it in the pool's row under <b>Pools</b> (expand the row): the pool gets a copy fitted to its tick spacing, with the strategy's settings right there to adjust, and <b>Save</b> in the bar applies it from the next cycle.</p>`],
+    "p-strategy-pick": ["Pool strategy", `<p>Pick the strategy this pool runs: the ladder (the app's default), a built-in simple-rules or indicator strategy, or one you saved in the Strategy lab. The pool gets its own copy, fitted to its tick spacing (simple rules given in spacings become ticks; a ladder gets the defaults for the pair).</p>
+      <p>The fields below change with the strategy: the ladder's parameters, the simple rules (width, placement, buffers, timers, cutoffs, exits, depeg guard), or each block's settings of a node strategy. Edits apply to this pool only and are saved with the bar below; <b>Open in the lab</b> backtests the pool's current strategy. Unfinished strategies (saved with an unconnected block) cannot be picked.</p>`],
+    "lab-rearm": ["Re-arm", `<p>The pool's exit fired and it stays out. Re-arm clears that, so the next cycle deposits again (if the price is not beyond a cutoff).</p>`],
+    "lab-ladder-form": ["Ladder settings", `<p>The ladder's own parameters. Empty fields use the pool's defaults.</p>`],
 
     // ---- overview ----
     "k-total": ["Managed value", `
@@ -54,12 +130,13 @@
     "k-idle": ["Idle in wallet", `<p>Free balances of the managed tokens (pool tokens and the funding tokens) sitting in the wallet, not earning.</p>
       <p>When a pool's idle share exceeds <i>Redeploy idle above</i> (Settings, default 2% of its allocation), the next cycle tops the position up without withdrawing it. Smaller amounts wait for the next rebalance.</p>`],
     "k-profit": ["Profit", `<p>What the app has made for you across all chains, from its own transactions:</p>
-      <p><code>profit = earned − gas paid − swap costs</code></p>
-      <ul><li><b>Earned</b>: everything the reward claims paid into the wallet, plus what is claimable now. On Solidly V3 all LP income (swap fees, SOLID emissions, bribes) is paid through claims.</li>
+      <p><code>profit = earned − gas − swaps − IL</code></p>
+      <ul><li><b>Earned</b>: everything the reward claims paid into the wallet, plus what is claimable now, plus what is <i>pending</i> (earned since the last claim snapshot; it becomes claimable with the next one, about daily). On Solidly V3 all LP income (swap fees, SOLID emissions, bribes) is paid through claims.</li>
       <li><b>Gas paid</b>: every transaction the app sent (claims, swaps, approvals, deposits, withdrawals), including the L1 data fee on OP-stack chains.</li>
-      <li><b>Swap costs</b>: value given away by rebalancing swaps and SOLID sales (what went out minus what came in).</li></ul>
+      <li><b>Swaps</b>: slippage and price paid on rebalancing swaps and SOLID sales (what went out minus what came in). Shown with a + when the swaps came out ahead, which happens when the aggregator beats the pool price.</li>
+      <li><b>IL</b> (impermanent loss): what the positions gave back when withdrawn, or hold now, minus what the tokens put into them would be worth if simply held. Counted for liquidity the app added, at the prices of each withdrawal (today's for open positions). On a pegged pair it is usually small; it grows when the price moves through a range.</li></ul>
       <p>Each transaction is valued at the token prices of its time (today's when no snapshot is near). Later price moves of the tokens you hold are not counted here; they show in the managed value. Transactions you sent yourself are not included.</p>`],
-    "k-earned": ["Earned", `<p>Claimed rewards (valued at the prices when they were claimed) plus rewards claimable now, summed over all chains. The line below splits it into claimed and claimable.</p>`],
+    "k-earned": ["Earned", `<p>Claimed rewards (valued at the prices when they were claimed), plus rewards claimable now, plus pending rewards (earned since the last claim snapshot), summed over all chains. The line below splits it into the three.</p>`],
     chaincard: ["Chain", `<p>Everything the app manages on one chain. The same wallet address is used on every chain.</p><ul>
       <li><b>Managed</b>: positions plus idle managed tokens on this chain. Allocations on this chain are percentages of this number.</li>
       <li><b>Deployed / Idle</b>: in positions vs free in the wallet.</li>
@@ -204,15 +281,17 @@
     "set-sell_rewards.min_value_usd": ["Min SOLID sale value", `<p>A SOLID chunk worth less than this is kept for later, so gas is not spent on dust.</p>`],
     "set-retries.attempts": ["Retries per step", `<p>How often each step (withdraw, swap, approval, deposit) is retried after a failure, with fresh chain state and a fresh quote each time. Withdraw failures stop the pass before anything else happens. Swap and deposit failures leave tokens idle for the next cycle's top-up.</p>`],
     "set-retries.backoff_s": ["Retry backoff", `<p>Seconds to wait before a retry, multiplied by the attempt number (10 s, 20 s, …). It gives a congested RPC or a moving price time to settle.</p>`],
+    "set-ui_port": ["Dashboard port", `<p>The port this dashboard listens on, on 127.0.0.1 only (default 8080). Saving a new one moves the dashboard there at once and this page follows; the old port keeps answering for 20 seconds. A port another program holds is refused and not saved. At startup, if the port is taken, the app uses the next free one (up to 20 higher, else any free port) and the tray's <b>Open dashboard</b> goes there.</p>`],
     "set-wallet": ["Managed wallet", `<p>The address whose positions and balances are managed. It must equal the private key's address for live trading. Saving a key switches it automatically.</p>`],
     funding: ["Funding tokens", `<p>The tokens used to buy what a pool needs when its allocation requires tokens the wallet does not hold. Example: you hold USDC and USDT and give cbETH/WETH 30%, so the worker buys cbETH/WETH with them.</p>
+      <p>Each chain has its own row and list; a pool is only ever funded with tokens on its own chain. Every chain starts with its USDC and USDT (tagged <b>default</b>). Click a row's tokens to add or remove, then <b>Save</b> that row; <b>Reset</b> puts the chain back to USDC and USDT.</p>
       <p>You can tick several. A shortfall is bought from the selected token with the largest USD balance first; if that runs out, the next one covers the rest. Shortfalls under $10 are ignored.</p>
-      <p>The list shows every token of every Solidly pool with your wallet balance; ticked tokens are listed first, and the closed picker shows them as chips (× removes one). A selected token that is one of the pool's own tokens is not swapped by funding; the normal rebalancing swap handles it. <b>None</b> clears the selection and turns cross-pool funding off: each pool then only uses its own tokens.</p>`],
+      <p>The picker shows every token of that chain's Solidly pools with your wallet balance (or paste an address); ticked tokens are listed first, and the closed picker shows them as chips (× removes one). A selected token that is one of the pool's own tokens is not swapped by funding; the normal rebalancing swap handles it. <b>None</b> empties that chain's list and turns cross-pool funding off there: its pools then only use their own tokens.</p>`],
     privkey: ["Private key", `<p>Paste the wallet's private key to allow live trading. It is encrypted for your user account (Windows DPAPI or the macOS Keychain), so the worker resumes after restarts without asking.</p>
       <p>The API never returns it and logs never contain it; only its address is shown. Saving it switches the managed wallet to its address. <b>Remove</b> deletes the file and turns live trading off.</p>`],
     helpvis: ["Show explanations panel", `<p>Shows or hides this panel. It is on by default. The choice is remembered in this browser only (not a worker setting), and takes effect immediately without saving.</p>
       <p>With the panel hidden, hovering still works as normal tooltips where values have breakdowns.</p>`],
-    savesettings: ["Save settings", `<p>Writes the options and the funding tokens to <code>config/settings.json</code>. They take effect on the next cycle.</p>`],
+    savesettings: ["Save settings", `<p>Writes the options to <code>config/settings.json</code> (funding tokens and RPCs have their own Save per chain). They take effect on the next cycle.</p>`],
     safety: ["Safety", `<p>Checks before any action:</p><ul><li>kill switch,</li><li>depeg guard,</li><li>spot vs 1 h median,</li><li>enough gas on the chain,</li><li>daily action cap.</li></ul>
       <p>Every transaction is simulated with <code>eth_call</code> and <code>estimateGas</code> before it is sent. Swaps only go through the Solidly UI meta-aggregator, capped against the pool price, with exact-amount approvals. Stuck transactions are re-broadcast with higher fees.</p>`],
 
@@ -232,7 +311,7 @@
 
   const TH = {"APR 1h": "apr", "APR 6h": "apr", "APR 24h": "apr", "Pool APR 24h": "poolapr", "TVL": "tvl", "In-range TVL": "activetvl", "24h volume": "vol24", "Fee / arb 7d": "flvr",
     "Fee": "fee", "Pair": "pair", "Chain": "chain", "Pool": "p-pool", "Enabled": "p-enabled", "Allocation": "p-alloc", "Target": "p-target", "Deployed": "p-deployed",
-    "Strategy & limits": "p-strategy", "Token": "wallet", "Claimable": "rewards", "When": "events", "Event": "events", "Details": "events"};
+    "Strategy & limits": "p-strategy", "Token": "wallet", "Claimable": "rewards", "Reward": "rewards", "Pending": "rewards", "When": "events", "Event": "events", "Details": "events"};
   const BTN = {"Run now": "run_now", "Claim now": "claim_now", "Pause": "pause", "Resume": "pause", "Go live": "live", "Switch to dry run": "live",
     "Re-solve": "resolve", "Remove": "remove", "Add": "addpair", "Save pools & allocation": "savepools", "Discard changes": "discard", "Save settings": "savesettings",
     "Save key": "privkey", "Refresh": "refresh", "Add (disabled, 0%)": "addaddr"};
@@ -256,7 +335,7 @@
     root.querySelectorAll("#pools .chip.mine").forEach(c => set(c, "configured"));
     root.querySelectorAll("#allocs .card").forEach(c => set(c, "allocation"));
     root.querySelectorAll("#chainBar .chipbtn").forEach(c => set(c, "chainfilter"));
-    const ids = {mode: "mode", cycle: "cycle", chart: "chart", tokens: "wallet", rewards: "rewards", chainBar: "chainfilter", q: "search", newChain: "newchain", depSize: "depsize", minTvl: "mintvl", fundingPicker: "funding", pk: "privkey", keyStatus: "privkey", errors: "errors", newPool: "addaddr", newName: "addaddr"};
+    const ids = {mode: "mode", cycle: "cycle", chart: "chart", tokens: "wallet", rewards: "rewards", chainBar: "chainfilter", q: "search", newChain: "newchain", depSize: "depsize", minTvl: "mintvl", fundCard: "funding", pk: "privkey", keyStatus: "privkey", errors: "errors", newPool: "addaddr", newName: "addaddr"};
     for (const [id, k] of Object.entries(ids)) set(document.getElementById(id), k);
     const kp = {kTotal: "k-total", kProfit: "k-profit", kEarned: "k-earned", kDeployed: "k-deployed", kIdle: "k-idle"};
     for (const [id, k] of Object.entries(kp)) { const e = document.getElementById(id); if (e) set(e.closest(".card"), k); }

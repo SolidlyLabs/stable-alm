@@ -231,8 +231,7 @@ pub fn run() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     plat::init();
     let worker = Worker::new();
-    let (server, port) = crate::webui::serve(worker.clone(), 8080, true)?;
-    let _ = std::fs::write(port_file(), port.to_string());
+    let _port = crate::webui::serve(worker.clone(), crate::webui::wanted_port(), true)?;
     let w2 = worker.clone();
     let thread = std::thread::Builder::new().name("worker".into()).spawn(move || w2.loop_forever()).map_err(|e| e.to_string())?;
 
@@ -306,7 +305,7 @@ pub fn run() -> Result<(), String> {
             worker.stop();
         }
         if quitting && thread.is_finished() {
-            server.unblock();
+            crate::webui::stop();
             crate::info!("desktop", "stopped");
             break;
         }
@@ -354,8 +353,7 @@ pub fn quit_running(timeout: Duration) -> i32 {
 pub fn headless() -> Result<(), String> {
     crate::paths::seed();
     let worker = Worker::new();
-    let (_server, port) = crate::webui::serve(worker.clone(), 8080, true)?;
-    let _ = std::fs::write(port_file(), port.to_string());
+    let _port = crate::webui::serve(worker.clone(), crate::webui::wanted_port(), true)?;
     let w2 = worker.clone();
     let th = std::thread::spawn(move || w2.loop_forever());
     while !QUIT.load(Ordering::SeqCst) {

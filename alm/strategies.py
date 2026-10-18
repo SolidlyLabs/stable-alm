@@ -26,8 +26,11 @@ class Strategy:
         g = self.params.get("guard")
         self.guard_dev = None
         if g:
-            med = pd.Series(m.bar_tick.astype(float)).rolling(2016, min_periods=12).median().bfill().to_numpy()
-            self.guard_dev = np.abs(m.bar_tick - med)
+            week = max(1, int(7 * 86400 // m.bar_seconds))
+            med = pd.Series(m.bar_tick.astype(float)).rolling(week, min_periods=min(12, week)).median().to_numpy()
+            # Before the window has enough bars the guard has no reference and stays off (no backfill
+            # from later bars).
+            self.guard_dev = np.nan_to_num(np.abs(m.bar_tick - med), nan=0.0)
 
     def frozen(self, st) -> bool:
         return self.guard_dev is not None and self.guard_dev[st.bar] > self.params["guard"]
@@ -112,7 +115,10 @@ class VolBand(Strategy):
             sig = pd.Series(m.bar_high - m.bar_low, dtype=float).rolling(lb, min_periods=max(lb // 4, 2)).mean()
         else:
             sig = t.rolling(lb, min_periods=max(lb // 4, 2)).std()
-        self.sig = sig.bfill().fillna(0.0).to_numpy()
+        # warm-up bars use the volatility seen so far, never a later value
+        early = t.expanding(min_periods=2).std() if self.params.get("vol", "std") != "atr" else \
+            pd.Series(m.bar_high - m.bar_low, dtype=float).expanding(min_periods=1).mean()
+        self.sig = sig.fillna(early).fillna(0.0).to_numpy()
         a = self.params.get("anchor", "spot")
         alb = self.params.get("anchor_lb", lb)
         if a == "median":
@@ -233,7 +239,7 @@ class Adaptive(Strategy):
             per_bar = np.sqrt((hl**2).rolling(lb, min_periods=2).mean() / (4 * np.log(2)))
         else:
             per_bar = d.rolling(lb, min_periods=2).std()
-        sig = (per_bar * np.sqrt(day)).bfill().fillna(1.0).clip(lower=0.25)
+        sig = (per_bar * np.sqrt(day)).fillna(1.0).clip(lower=0.25)  # warm-up: a default, not a later value
         self.sig = sig.to_numpy()
         self.sig_ref = sig.rolling(int(7 * day), min_periods=1).median().to_numpy()
         slb = max(2, int(self.params.get("skew_lb_s", 86400) / bs))

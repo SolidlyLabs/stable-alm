@@ -157,15 +157,80 @@ pub fn slot0(cid: u64, pool: &str) -> Result<(BigUint, i64, u64), String> {
     Ok((eth::word_u(&r, 0), eth::word_i(&r, 1).to_i64().unwrap(), eth::word_u(&r, 2).to_u64().unwrap()))
 }
 
-pub fn position_liquidity(cid: u64, pool: &str, owner: &str, tl: i64, tu: i64) -> Result<BigUint, String> {
-    let mut pre = eth::unhex(owner).map_err(|e| e.to_string())?;
+/// Calldata of positions(bytes32) for the owner's range.
+pub fn position_calldata(owner: &str, tl: i64, tu: i64) -> String {
+    let mut pre = eth::unhex(owner).unwrap_or_default();
     for t in [tl, tu] {
         let b = (t as i32).to_be_bytes();
         pre.extend_from_slice(&b[1..]);
     }
-    let key = eth::keccak(&pre);
-    let r = eth_call(cid, pool, &calldata("positions(bytes32)", &[Tok::B32(key)]), None).map_err(|e| e.message)?;
+    calldata("positions(bytes32)", &[Tok::B32(eth::keccak(&pre))])
+}
+
+pub fn position_liquidity(cid: u64, pool: &str, owner: &str, tl: i64, tu: i64) -> Result<BigUint, String> {
+    let r = eth_call(cid, pool, &position_calldata(owner, tl, tu), None).map_err(|e| e.message)?;
     Ok(eth::word_u(&r, 0))
+}
+
+/// Several eth_calls at the same (pinned) block, sent as one Multicall3 request by rpc::batch.
+pub fn eth_calls(cid: u64, calls: &[(String, String)]) -> Result<Vec<Result<Vec<u8>, String>>, String> {
+    if calls.is_empty() {
+        return Ok(vec![]);
+    }
+    for i in 0..15 {
+        let t = tag(cid);
+        let reqs: Vec<(&str, Value)> = calls.iter().map(|(to, d)| ("eth_call", json!([{"to": to, "data": d}, t]))).collect();
+        let res = rpc::batch(cid, &reqs)?;
+        if res.iter().any(|r| matches!(r, Err(e) if unknown_block(e))) {
+            with_pin(cid, |p| p.at = None);
+            std::thread::sleep(Duration::from_millis(1000 + i * 500));
+            continue;
+        }
+        return Ok(res
+            .into_iter()
+            .map(|r| match r {
+                Ok(v) => eth::unhex(v.as_str().unwrap_or("0x")),
+                Err(e) => Err(format!("eth_call reverted: {}", revert_reason(&e))),
+            })
+            .collect());
+    }
+    Err("eth_call: no RPC node reached the pinned block in time".into())
+}
+
+/// balanceOf for several tokens in one request.
+pub fn erc20_balances(cid: u64, tokens: &[String], owner: &str) -> Result<Vec<Result<BigUint, String>>, String> {
+    let data = calldata("balanceOf(address)", &[eth::addr(owner)]);
+    let calls: Vec<(String, String)> = tokens.iter().map(|t| (t.clone(), data.clone())).collect();
+    Ok(eth_calls(cid, &calls)?.into_iter().map(|r| r.map(|b| BigUint::from_bytes_be(&b))).collect())
+}
+
+/// A pool's immutable facts (token0, token1, tick spacing), read once with one request and cached.
+static POOL_INFO: std::sync::Mutex<Option<std::collections::HashMap<(u64, String), (String, String, i64)>>> = std::sync::Mutex::new(None);
+
+pub fn pool_info(cid: u64, pool: &str) -> Result<(String, String, i64), String> {
+    let key = (cid, pool.to_lowercase());
+    if let Some(v) = POOL_INFO.lock().unwrap().get_or_insert_with(Default::default).get(&key) {
+        return Ok(v.clone());
+    }
+    let sk = format!("pool:{cid}:{}", key.1);
+    if let Some(v) = crate::store::get(&sk) {
+        if let (Some(a), Some(b), Some(c)) = (v["token0"].as_str(), v["token1"].as_str(), v["tick_spacing"].as_i64()) {
+            let v = (a.to_string(), b.to_string(), c);
+            POOL_INFO.lock().unwrap().as_mut().unwrap().insert(key, v.clone());
+            return Ok(v);
+        }
+    }
+    let calls: Vec<(String, String)> = ["token0()", "token1()", "tickSpacing()"].iter().map(|f| (key.1.clone(), calldata(f, &[]))).collect();
+    let r = eth_calls(cid, &calls)?;
+    let word = |i: usize| -> Result<Vec<u8>, String> {
+        let b = r[i].clone()?;
+        if b.len() < 32 { Err(format!("pool {} returned no data; is it a Solidly V3 pool on chain {cid}?", key.1)) } else { Ok(b) }
+    };
+    let (a, b, c) = (word(0)?, word(1)?, word(2)?);
+    let v = (format!("0x{}", eth::hex(&a[12..32])), format!("0x{}", eth::hex(&b[12..32])), eth::word_i(&c, 0).to_i64().unwrap_or(1));
+    crate::store::put(&sk, serde_json::json!({"token0": v.0, "token1": v.1, "tick_spacing": v.2}));
+    POOL_INFO.lock().unwrap().as_mut().unwrap().insert(key, v.clone());
+    Ok(v)
 }
 
 pub fn erc20_balance(cid: u64, token: &str, owner: &str) -> Result<BigUint, String> {
@@ -180,9 +245,11 @@ pub fn erc20_allowance(cid: u64, token: &str, owner: &str, spender: &str) -> Res
 }
 
 pub fn erc20_meta(cid: u64, token: &str) -> Result<(u32, String), String> {
-    let r = eth_call(cid, token, &calldata("decimals()", &[]), None).map_err(|e| e.message)?;
+    let mut r = eth_calls(cid, &[(token.to_string(), calldata("decimals()", &[])), (token.to_string(), calldata("symbol()", &[]))])?;
+    let sym_raw = r.pop().unwrap();
+    let r = r.pop().unwrap()?;
     let dec = BigUint::from_bytes_be(&r).to_u32().unwrap_or(18);
-    let sym = match eth_call(cid, token, &calldata("symbol()", &[]), None) {
+    let sym = match sym_raw {
         Ok(raw) if raw.len() > 32 => eth::decode_string(&raw).unwrap_or_else(|| token[..8].to_string()),
         Ok(raw) => String::from_utf8(raw.into_iter().filter(|b| *b != 0).collect()).unwrap_or_else(|_| token[..8].into()),
         Err(_) => token[..8].to_string(),
@@ -191,14 +258,11 @@ pub fn erc20_meta(cid: u64, token: &str) -> Result<(u32, String), String> {
 }
 
 pub fn pool_tokens(cid: u64, pool: &str) -> Result<(String, String), String> {
-    let a = eth_call(cid, pool, &calldata("token0()", &[]), None).map_err(|e| e.message)?;
-    let b = eth_call(cid, pool, &calldata("token1()", &[]), None).map_err(|e| e.message)?;
-    Ok((format!("0x{}", eth::hex(&a[12..32])), format!("0x{}", eth::hex(&b[12..32]))))
+    pool_info(cid, pool).map(|(a, b, _)| (a, b))
 }
 
 pub fn tick_spacing(cid: u64, pool: &str) -> Result<i64, String> {
-    let r = eth_call(cid, pool, &calldata("tickSpacing()", &[]), None).map_err(|e| e.message)?;
-    Ok(eth::word_i(&r, 0).to_i64().unwrap())
+    pool_info(cid, pool).map(|x| x.2)
 }
 
 pub fn eth_balance(cid: u64, addr: &str) -> Result<BigUint, String> {
@@ -220,6 +284,18 @@ pub fn simulate(cid: u64, from: &str, to: &str, data: &str) -> Result<u64, TxErr
     }
 }
 
+/// The token transfers a call would make, from eth_simulateV1 with traced transfers on the send RPC.
+/// None when the node does not offer it; Some(Err) when the call reverts in the simulation.
+pub fn simulate_transfers(cid: u64, from: &str, to: &str, data: &str) -> Option<Result<Vec<crate::prices::Transfer>, String>> {
+    let params = json!([{"blockStateCalls": [{"calls": [{"from": from, "to": to, "data": data}]}], "traceTransfers": true, "validation": false}, "latest"]);
+    let r = rpc::send_call(cid, "eth_simulateV1", params).ok()?.ok()?;
+    let call = r.get(0)?.get("calls")?.get(0)?.clone();
+    if call["status"].as_str() != Some("0x1") {
+        return Some(Err(format!("swap reverts in simulation: {}", call["error"])));
+    }
+    Some(Ok(crate::prices::transfers(call["logs"].as_array().map(|v| v.as_slice()).unwrap_or(&[]))))
+}
+
 fn receipt(cid: u64, h: &str) -> Option<Value> {
     let ok = |r: &rpc::R| r.as_ref().ok().filter(|v| !v["blockNumber"].is_null()).cloned();
     rpc::call(cid, "eth_getTransactionReceipt", json!([h]))
@@ -232,12 +308,103 @@ pub struct Sent {
     pub hash: String,
     pub gas_used: u64,
     pub block: u64,
+    pub receipt: Value,
+}
+
+// -- pending transactions ------------------------------------------------------------------------------
+// Every signed transaction is written to logs/pending_tx.json (chain, nonce, every signed copy and its
+// locally computed hash) before it is broadcast, and removed once one copy is mined. If a response is
+// lost, the app stops or a transaction is not mined, the record stays: until it is reconciled (a copy
+// mined, or the nonce used by something else) no new transaction is sent on that chain, so an
+// operation is never repeated at a fresh nonce.
+
+static PENDING_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn pending_path() -> std::path::PathBuf {
+    crate::paths::logs().join("pending_tx.json")
+}
+
+fn pending_load() -> Vec<Value> {
+    std::fs::read_to_string(pending_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+fn pending_save(v: &[Value]) {
+    let _ = std::fs::create_dir_all(crate::paths::logs());
+    let tmp = pending_path().with_extension("tmp");
+    if std::fs::write(&tmp, serde_json::to_string_pretty(v).unwrap()).is_ok() {
+        let _ = std::fs::rename(tmp, pending_path());
+    }
+}
+
+fn pending_upsert(cid: u64, from: &str, nonce: u64, hash: &str, raw: &str, to: &str) {
+    let _g = PENDING_LOCK.lock().unwrap();
+    let mut all = pending_load();
+    match all.iter_mut().find(|p| p["chain_id"] == cid && p["nonce"] == nonce && p["from"] == from) {
+        Some(p) => {
+            if let Some(c) = p["copies"].as_array_mut() {
+                c.push(json!({"hash": hash, "raw": raw}));
+            }
+        }
+        None => all.push(json!({"chain_id": cid, "from": from, "nonce": nonce, "to": to, "ts": crate::engine::now(),
+                                "copies": [{"hash": hash, "raw": raw}]})),
+    }
+    pending_save(&all);
+}
+
+fn pending_clear(cid: u64, from: &str, nonce: u64) {
+    let _g = PENDING_LOCK.lock().unwrap();
+    let mut all = pending_load();
+    all.retain(|p| !(p["chain_id"] == cid && p["nonce"] == nonce && p["from"] == from));
+    pending_save(&all);
+}
+
+/// Pending transactions waiting to be reconciled (for the dashboard).
+pub fn pending_list() -> Vec<Value> {
+    pending_load().into_iter().map(|p| json!({"chain_id": p["chain_id"], "nonce": p["nonce"], "to": p["to"], "ts": p["ts"],
+                                                "hashes": p["copies"].as_array().map(|c| c.iter().map(|x| x["hash"].clone()).collect::<Vec<_>>())})).collect()
+}
+
+/// Resolve stored pending transactions of `from` on a chain. Ok(()) when none is left unresolved;
+/// Err(reason) while one is still outstanding (it is re-broadcast unchanged, never replaced).
+pub fn reconcile_pending(cid: u64, from: &str) -> Result<(), String> {
+    let from = from.to_lowercase();
+    let mine: Vec<Value> = pending_load().into_iter().filter(|p| p["chain_id"] == cid && p["from"] == from.as_str()).collect();
+    for p in mine {
+        let nonce = p["nonce"].as_u64().unwrap_or(0);
+        let copies = p["copies"].as_array().cloned().unwrap_or_default();
+        if let Some(rc) = copies.iter().find_map(|c| receipt(cid, c["hash"].as_str().unwrap_or(""))) {
+            crate::warn!("chain", "reconciled pending nonce {nonce} on chain {cid}: mined in block {} (status {})",
+                         hex_u64(&rc["blockNumber"]), rc["status"].as_str().unwrap_or("?"));
+            crate::engine::log(json!({"chain_id": cid, "kind": "reconciled", "nonce": nonce, "hash": rc["transactionHash"], "status": rc["status"],
+                                      "to": p["to"]}));
+            pending_clear(cid, &from, nonce);
+            continue;
+        }
+        let mined = hex_u64(&rpc::send_call(cid, "eth_getTransactionCount", json!([from, "latest"]))?.map_err(|e| e.to_string())?);
+        if mined > nonce {
+            crate::warn!("chain", "pending nonce {nonce} on chain {cid} was used by another transaction; clearing it");
+            crate::engine::log(json!({"chain_id": cid, "kind": "reconciled", "nonce": nonce, "status": "replaced", "to": p["to"]}));
+            pending_clear(cid, &from, nonce);
+            continue;
+        }
+        if let Some(c) = copies.last() {
+            let _ = rpc::send_call(cid, "eth_sendRawTransaction", json!([c["raw"]]));
+        }
+        return Err(format!("transaction nonce {nonce} sent earlier is not mined yet (re-broadcast unchanged); no new transactions on this chain until it is"));
+    }
+    Ok(())
 }
 
 /// Sign and broadcast; re-broadcast with fees +25% (same nonce) when not mined within 90 s, up to 3
-/// times. Returns once any copy is mined; Err if it reverted.
+/// times. Returns once any copy is mined; Err if it reverted. Refuses while execution is paused, and
+/// while an earlier transaction on the chain is unresolved.
 pub fn send(cid: u64, acct: &Account, to: &str, data: &str, gas: u64) -> Result<Sent, TxError> {
+    if let Some(why) = crate::paths::execution_blocked() {
+        return Err(err(format!("not sent: {why}"), "paused"));
+    }
+    reconcile_pending(cid, &acct.address).map_err(|e| err(e, "pending"))?;
     let nonce = hex_u64(&rpc::send_call(cid, "eth_getTransactionCount", json!([acct.address, "pending"]))?.map_err(|e| err(e.to_string(), ""))?);
+    let from = acct.address.to_lowercase();
     let blk = rpc::call_ok(cid, "eth_getBlockByNumber", json!(["latest", false]))?;
     let base = eth::parse_uint(blk["baseFeePerGas"].as_str().unwrap_or("0x0"));
     let tip0 = eth::parse_uint(rpc::call_ok(cid, "eth_maxPriorityFeePerGas", json!([]))?.as_str().unwrap_or("0x0"));
@@ -255,18 +422,37 @@ pub fn send(cid: u64, acct: &Account, to: &str, data: &str, gas: u64) -> Result<
             to: to.to_string(),
             data: body.clone(),
         };
-        let raw = format!("0x{}", eth::hex(&tx.sign(acct)));
-        match rpc::send_call(cid, "eth_sendRawTransaction", json!([raw]))? {
+        let signed = tx.sign(acct);
+        let raw = format!("0x{}", eth::hex(&signed));
+        let local = format!("0x{}", eth::hex(&eth::keccak(&signed)));
+        pending_upsert(cid, &from, nonce, &local, &raw, to);
+        if !hashes.contains(&local) {
+            hashes.push(local.clone());
+        }
+        let res = match rpc::send_call(cid, "eth_sendRawTransaction", json!([raw])) {
+            Ok(r) => r,
+            Err(e) => {
+                // The node may have accepted it before the response was lost: keep the record and
+                // look for a receipt instead of assuming it failed.
+                crate::warn!("chain", "broadcast of {local} (nonce {nonce}) had no response: {e}");
+                Ok(json!(local))
+            }
+        };
+        match res {
             Ok(h) => {
-                let h = h.as_str().unwrap_or("").to_string();
+                let h = h.as_str().unwrap_or("").to_lowercase();
                 crate::info!("chain", "broadcast {h} nonce {nonce} (attempt {})", attempt + 1);
-                hashes.push(h);
+                if !h.is_empty() && !hashes.contains(&h) {
+                    hashes.push(h);
+                }
             }
             Err(e) => {
                 let m = revert_reason(&e);
                 let low = m.to_lowercase();
                 if low.contains("nonce too low") || low.contains("already known") {
-                } else if hashes.is_empty() {
+                } else if attempt == 0 {
+                    // rejected outright: this copy was never accepted, so nothing is outstanding
+                    pending_clear(cid, &from, nonce);
                     return Err(err(format!("send rejected: {m}"), m));
                 } else {
                     crate::warn!("chain", "replacement rejected: {m}");
@@ -277,12 +463,13 @@ pub fn send(cid: u64, acct: &Account, to: &str, data: &str, gas: u64) -> Result<
         while t0.elapsed() < Duration::from_secs(90) {
             for h in &hashes {
                 if let Some(rc) = receipt(cid, h) {
+                    pending_clear(cid, &from, nonce);
                     if rc["status"].as_str() != Some("0x1") {
                         return Err(err(format!("transaction {h} reverted on-chain"), "reverted"));
                     }
                     let block = hex_u64(&rc["blockNumber"]);
                     note_mined(cid, block);
-                    return Ok(Sent { hash: h.clone(), gas_used: hex_u64(&rc["gasUsed"]), block });
+                    return Ok(Sent { hash: h.clone(), gas_used: hex_u64(&rc["gasUsed"]), block, receipt: rc });
                 }
             }
             std::thread::sleep(Duration::from_secs(2));
@@ -291,7 +478,7 @@ pub fn send(cid: u64, acct: &Account, to: &str, data: &str, gas: u64) -> Result<
         max_fee = &max_fee * 5u8 / 4u8 + 1u8;
         crate::warn!("chain", "not mined in 90s; re-broadcasting with higher fees");
     }
-    Err(err(format!("transaction (nonce {nonce}) not mined after 3 fee bumps: {hashes:?}"), "not mined"))
+    Err(err(format!("transaction (nonce {nonce}) not mined after 3 fee bumps: {hashes:?}; kept as pending, no new transactions on this chain until it resolves"), "not mined"))
 }
 
 pub fn int(v: i64) -> Tok {

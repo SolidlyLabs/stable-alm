@@ -12,6 +12,7 @@ use tiny_http::{Header, Method, Request, Response, Server};
 
 const INDEX: &str = include_str!("../static/index.html");
 const HELP: &str = include_str!("../static/help.js");
+const LAB: &str = include_str!("../static/lab.js");
 const COOKIE: &str = "alm_t";
 
 pub fn ui_token() -> String {
@@ -29,8 +30,7 @@ pub fn ui_token() -> String {
         let mut b = [0u8; 24];
         getrandom::getrandom(&mut b).expect("random");
         let t: String = b.iter().map(|x| format!("{x:02x}")).collect();
-        let _ = std::fs::create_dir_all(crate::paths::secrets());
-        let _ = std::fs::write(&p, &t);
+        let _ = crate::paths::write_secret(&p, t.as_bytes());
         t
     })
     .clone()
@@ -61,11 +61,38 @@ fn authorised(r: &Request) -> bool {
         .unwrap_or(false)
 }
 
+/// A token logo from the app's own copy. Cached by the browser for a day; sandboxed so an SVG
+/// opened on its own cannot run anything.
+fn send_logo(r: Request, rest: &str) {
+    let mut it = rest.splitn(2, '/');
+    let (cid, addr) = (it.next().and_then(|c| c.parse::<u64>().ok()), it.next().unwrap_or(""));
+    let Some(cid) = cid else { return send_json(r, 404, json!({"error": "not found"})) };
+    match crate::store::logo(cid, addr) {
+        Ok((bytes, ctype)) => {
+            let resp = Response::from_data(bytes)
+                .with_header(Header::from_bytes("Content-Type", ctype).unwrap())
+                .with_header(Header::from_bytes("Cache-Control", "private, max-age=86400").unwrap())
+                .with_header(Header::from_bytes("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox").unwrap())
+                .with_header(Header::from_bytes("X-Content-Type-Options", "nosniff").unwrap());
+            let _ = r.respond(resp);
+        }
+        Err(_) => send_json(r, 404, json!({"error": "no logo"})),
+    }
+}
+
 fn send(r: Request, code: u16, body: Vec<u8>, ctype: &str) {
     let resp = Response::from_data(body)
         .with_status_code(code)
         .with_header(Header::from_bytes("Content-Type", ctype).unwrap())
-        .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap());
+        .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap())
+        // The page may only talk to this app: no scripts, connections, forms or frames elsewhere.
+        // Images (token logos) may come from https hosts, and never get a referrer.
+        .with_header(Header::from_bytes("Content-Security-Policy",
+            "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; \
+             connect-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'").unwrap())
+        .with_header(Header::from_bytes("Referrer-Policy", "no-referrer").unwrap())
+        .with_header(Header::from_bytes("X-Content-Type-Options", "nosniff").unwrap())
+        .with_header(Header::from_bytes("X-Frame-Options", "DENY").unwrap());
     let _ = r.respond(resp);
 }
 
@@ -73,25 +100,84 @@ fn send_json(r: Request, code: u16, v: Value) {
     send(r, code, v.to_string().into_bytes(), "application/json");
 }
 
-pub fn serve(worker: Arc<Worker>, port: u16, fallback: bool) -> Result<(Arc<Server>, u16), String> {
+static WORKER: OnceLock<Arc<Worker>> = OnceLock::new();
+/// The server answering now and its port (a port change starts a new one, see `rebind`).
+static CURRENT: std::sync::Mutex<Option<(Arc<Server>, u16)>> = std::sync::Mutex::new(None);
+
+/// The port the settings ask for (8080 unless changed).
+pub fn wanted_port() -> u16 {
+    load_settings()["ui_port"].as_u64().filter(|p| (1024..=65535).contains(p)).unwrap_or(8080) as u16
+}
+
+/// Serve the UI on 127.0.0.1:`port`; with `fallback`, a port in use moves to the next free one of
+/// the following 20, else any free port. Writes the port to HOME/ui.port (the tray's links read it).
+pub fn serve(worker: Arc<Worker>, port: u16, fallback: bool) -> Result<u16, String> {
+    let _ = WORKER.set(worker);
     let server = match Server::http(("127.0.0.1", port)) {
         Ok(s) => s,
-        Err(_) if fallback => Server::http(("127.0.0.1", 0)).map_err(|e| e.to_string())?,
+        Err(e) if fallback => {
+            let next = (1..=20u16).filter_map(|k| port.checked_add(k)).find_map(|p| Server::http(("127.0.0.1", p)).ok());
+            let s = match next {
+                Some(s) => s,
+                None => Server::http(("127.0.0.1", 0)).map_err(|e| e.to_string())?,
+            };
+            crate::warn!("ui", "port {port} is in use ({e}); serving the UI on another one");
+            s
+        }
         Err(e) => return Err(e.to_string()),
     };
-    let port = server.server_addr().to_ip().map(|a| a.port()).unwrap_or(port);
+    let port = start(server, port);
     crate::info!("ui", "web UI on http://localhost:{port} (sign-in link printed on the console)");
     println!("Stable ALM dashboard: http://localhost:{port}/?t={}", ui_token());
+    Ok(port)
+}
+
+fn start(server: Server, asked: u16) -> u16 {
+    let port = server.server_addr().to_ip().map(|a| a.port()).unwrap_or(asked);
     let server = Arc::new(server);
+    let w = WORKER.get().expect("serve() sets the worker").clone();
     for _ in 0..4 {
-        let (s, w) = (server.clone(), worker.clone());
+        let (s, w) = (server.clone(), w.clone());
         std::thread::spawn(move || {
             for req in s.incoming_requests() {
                 handle(req, &w);
             }
         });
     }
-    Ok((server, port))
+    let _ = std::fs::write(crate::paths::home().join("ui.port"), port.to_string());
+    let old = CURRENT.lock().unwrap().replace((server, port));
+    if let Some((old, p)) = old {
+        // the old port answers a little longer: the page that changed the setting moves over first
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(20));
+            old.unblock();
+            crate::info!("ui", "stopped answering on port {p}");
+        });
+    }
+    port
+}
+
+/// The port the UI answers on now.
+pub fn current_port() -> Option<u16> {
+    CURRENT.lock().unwrap().as_ref().map(|c| c.1)
+}
+
+/// Move the UI to `port` (an error when it is in use; the old port keeps answering for a while).
+pub fn rebind(port: u16) -> Result<u16, String> {
+    if current_port() == Some(port) {
+        return Ok(port);
+    }
+    let server = Server::http(("127.0.0.1", port)).map_err(|e| format!("port {port} is not free: {e}"))?;
+    let p = start(server, port);
+    crate::info!("ui", "web UI moved to http://localhost:{p}");
+    Ok(p)
+}
+
+/// Stop answering (quitting).
+pub fn stop() {
+    if let Some((s, _)) = CURRENT.lock().unwrap().take() {
+        s.unblock();
+    }
 }
 
 fn handle(mut req: Request, w: &Arc<Worker>) {
@@ -120,11 +206,17 @@ fn handle(mut req: Request, w: &Arc<Worker>) {
         if path == "/help.js" {
             return send(req, 200, HELP.as_bytes().to_vec(), "application/javascript; charset=utf-8");
         }
+        if path == "/lab.js" {
+            return send(req, 200, LAB.as_bytes().to_vec(), "application/javascript; charset=utf-8");
+        }
         if !path.starts_with("/api/") {
             return send_json(req, 404, json!({"error": "not found"}));
         }
         if !authorised(&req) {
             return send_json(req, 401, json!({"error": "not signed in: open the dashboard from the tray icon (or the link in the log)"}));
+        }
+        if let Some(rest) = path.strip_prefix("/api/logo/") {
+            return send_logo(req, rest);
         }
         let (code, body) = get(&path, w);
         return send_json(req, code, body);
@@ -207,7 +299,8 @@ fn get(path: &str, w: &Arc<Worker>) -> (u16, Value) {
             let errors: Vec<String> = tail_text(&crate::paths::logs().join("errors.log"), 80).into_iter().rev().collect();
             (200, json!({"worker": w.status.lock().unwrap().clone(), "settings": s, "pools": load_pools(), "signer": crate::signer::status(),
                          "paused": crate::paths::stop_file().exists(), "events": events, "errors": errors, "snapshots": snapshots(),
-                         "rewards": rw, "chains": crate::chains::as_json(), "now": engine::now(), "runtime": "rust"}))
+                         "rewards": rw, "chains": crate::chains::as_json(), "now": engine::now(), "runtime": "rust",
+                         "ladder_defaults": settings::pool_defaults()["strategy"]}))
         }
         "/api/chains" => (200, json!({"chains": crate::chains::as_json()})),
         p if p.starts_with("/api/market") => match crate::market_data::shortlist(&wallet, &configured()) {
@@ -230,13 +323,28 @@ fn get(path: &str, w: &Arc<Worker>) -> (u16, Value) {
             }
             (200, json!({"pools": rows}))
         }
+        "/api/strategies" => (200, crate::library::get()),
+        p if p.starts_with("/api/backtest/") => match p["/api/backtest/".len()..].parse::<u64>().ok().and_then(crate::backtest::job) {
+            Some(j) => (200, j),
+            None => (404, json!({"error": "no such backtest"})),
+        },
+        p if p.starts_with("/api/custom/state/") => {
+            // /api/custom/state/<chain>/<pool>: the live and dry-run timers of a custom-mode pool
+            let mut it = p["/api/custom/state/".len()..].splitn(2, '/');
+            match (it.next().and_then(|c| c.parse::<u64>().ok()), it.next()) {
+                (Some(cid), Some(pool)) if is_addr(pool) => (200, json!({"live": crate::custom::state_json(cid, pool, true), "dry": crate::custom::state_json(cid, pool, false)})),
+                _ => (400, json!({"error": "use /api/custom/state/<chain id>/<pool>"})),
+            }
+        }
         p if p.starts_with("/api/tokens") => {
-            let mut extra: Vec<String> = vec![];
-            for k in [&s["funding_tokens"], &s["sell_rewards"]["tokens"]] {
-                for t in k.as_array().cloned().unwrap_or_default() {
-                    if let Some(a) = t.as_str() {
-                        extra.push(a.to_string());
-                    }
+            // (chain, token) pairs to list even without a pool: funding tokens per chain, reward tokens on Base
+            let mut extra: Vec<(u64, String)> = vec![];
+            for c in crate::chains::all().into_iter().filter(|c| c.enabled) {
+                extra.extend(crate::settings::funding_tokens(&s, c.id).into_iter().map(|a| (c.id, a)));
+            }
+            for t in s["sell_rewards"]["tokens"].as_array().cloned().unwrap_or_default() {
+                if let Some(a) = t.as_str() {
+                    extra.push((crate::chains::BASE, a.to_lowercase()));
                 }
             }
             match crate::market_data::tokens(&wallet, &extra) {
@@ -307,19 +415,38 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
         "/api/settings" => {
             let mut s = load_settings();
             let mut body = body;
-            if let Some(ft) = body.get("funding_tokens") {
-                let arr = ft.as_array().cloned().unwrap_or_default();
-                if !arr.iter().all(|t| t.as_str().map(is_addr).unwrap_or(false)) {
-                    return Err("funding_tokens must be a list of token addresses".into());
+            if body.get("funding_tokens").is_some() {
+                return Err("funding tokens are set per chain now: send funding_by_chain {chain id: [addresses]}".into());
+            }
+            if let Some(fb) = body.get("funding_by_chain") {
+                let Some(m) = fb.as_object() else { return Err("funding_by_chain must map chain ids to token lists".into()) };
+                let mut clean = serde_json::Map::new();
+                for (k, v) in m {
+                    let id: u64 = k.parse().map_err(|_| format!("funding_by_chain: {k} is not a chain id"))?;
+                    if !crate::chains::all().iter().any(|c| c.id == id) {
+                        return Err(format!("funding_by_chain: chain {id} is not supported"));
+                    }
+                    if v.is_null() {
+                        clean.insert(k.clone(), Value::Null); // back to the chain's default
+                        continue;
+                    }
+                    let arr = v.as_array().ok_or(format!("funding_by_chain[{k}] must be a list or null"))?;
+                    if arr.len() > 20 || !arr.iter().all(|t| t.as_str().map(is_addr).unwrap_or(false)) {
+                        return Err(format!("funding_by_chain[{k}] must be at most 20 token addresses"));
+                    }
+                    clean.insert(k.clone(), Value::Array(settings::clean_addrs(v)));
                 }
-                let mut seen = vec![];
-                for t in arr {
-                    let t = t.as_str().unwrap().to_lowercase();
-                    if !seen.contains(&t) {
-                        seen.push(t);
+                // chains not sent keep their lists
+                let mut merged = s["funding_by_chain"].as_object().cloned().unwrap_or_default();
+                for (k, v) in clean {
+                    if v.is_null() {
+                        merged.remove(&k);
+                    } else {
+                        merged.insert(k, v);
                     }
                 }
-                body["funding_tokens"] = json!(seen);
+                body["funding_by_chain"] = Value::Object(merged.clone());
+                s["funding_by_chain"] = Value::Object(merged);
             }
             for (k, v) in body.as_object().cloned().unwrap_or_default() {
                 if s.get(&k).is_none() {
@@ -340,8 +467,16 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
             if s["execute"].as_bool().unwrap_or(false) && !crate::signer::configured() {
                 return Err("set a private key before turning live trading on".into());
             }
+            settings::validate_settings(&s)?;
+            // a new port is bound before the setting is saved: a port in use is refused, not saved
+            let mut moved = None;
+            if let Some(p) = body["ui_port"].as_u64() {
+                if current_port() != Some(p as u16) {
+                    moved = Some(rebind(p as u16)?);
+                }
+            }
             save_settings(&s).map_err(|e| e.to_string())?;
-            Ok(json!({"ok": true, "settings": s}))
+            Ok(json!({"ok": true, "settings": s, "ui_port": current_port(), "moved": moved.is_some()}))
         }
         "/api/pools" => {
             let pools = body["pools"].as_array().cloned().ok_or("expected {pools: [...]}")?;
@@ -357,6 +492,7 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
                     return Err("allocation_pct must be 0-100".into());
                 }
                 p["allocation_pct"] = json!(a);
+                settings::validate_pool(&p)?;
                 out.push(p);
             }
             save_pools(&out)?;
@@ -365,9 +501,32 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
         }
         "/api/chains" => {
             let id = body["id"].as_u64().ok_or("expected {id, enabled}")?;
+            if body.get("rpc").is_some() || body.get("send_rpc").is_some() || body.get("batch_size").is_some() {
+                // rate_per_min: a number sets it (0 = no limit), null restores the default, absent keeps it
+                let rate = body.get("rate_per_min").map(|v| v.as_u64());
+                crate::chains::set_rpc(id, body["rpc"].as_str(), body["send_rpc"].as_str(), body["batch_size"].as_u64(), rate)?;
+                return Ok(json!({"ok": true, "chains": crate::chains::as_json()}));
+            }
+            if let Some(url) = body["test"].as_str() {
+                return crate::chains::test_rpc(id, url);
+            }
             crate::chains::set_enabled(id, body["enabled"].as_bool().unwrap_or(false))?;
             w.request(false);
             Ok(json!({"ok": true, "chains": crate::chains::as_json()}))
+        }
+        "/api/backtest" => {
+            let wallet = load_settings()["wallet"].as_str().unwrap_or("").to_string();
+            Ok(json!({"ok": true, "id": crate::backtest::start(body, wallet)?}))
+        }
+        "/api/strategies" => crate::library::post(&body),
+        "/api/custom/rearm" => {
+            let cid = body["chain_id"].as_u64().ok_or("chain_id is required")?;
+            let pool = body["pool"].as_str().unwrap_or("").to_lowercase();
+            if !is_addr(&pool) {
+                return Err("pool must be a 0x address".into());
+            }
+            crate::custom::rearm(cid, &pool);
+            Ok(json!({"ok": true}))
         }
         "/api/pools/add" => {
             let cid = body["chain_id"].as_u64().unwrap_or(crate::chains::BASE);

@@ -58,7 +58,7 @@ impl Worker {
             if *self.stopping.lock().unwrap() {
                 break;
             }
-            let interval = settings::load_settings()["interval_s"].as_f64().unwrap_or(300.0);
+            let interval = settings::load_settings()["interval_s"].as_f64().filter(|x| x.is_finite()).unwrap_or(300.0).clamp(30.0, 86400.0);
             self.set("next_cycle", json!(engine::now() as f64 + interval));
             let (m, cv) = &self.wake;
             let g = m.lock().unwrap();
@@ -97,8 +97,11 @@ impl Worker {
         let s = settings::load_settings();
         let raw = settings::load_pools();
         let wallet = s["wallet"].as_str().unwrap_or("").to_lowercase();
+        if !(wallet.len() == 42 && wallet.starts_with("0x") && wallet[2..].chars().all(|c| c.is_ascii_hexdigit())) {
+            return Err("no managed wallet set: add a private key or the wallet address in Settings".into());
+        }
         let has_signer = crate::signer::configured();
-        let stop = crate::paths::stop_file().exists();
+        let stop = crate::paths::execution_blocked().is_some();
         let mut execute = s["execute"].as_bool().unwrap_or(false) && has_signer && !stop;
         if s["execute"].as_bool().unwrap_or(false) && !has_signer {
             crate::error!("worker", "live trading is on but no private key is set; running as a dry run");
@@ -147,6 +150,19 @@ impl Worker {
 
         for (cid, pools) in &by_chain {
             let chain_total = acct["chains"][cid.to_string()]["total_usd"].as_f64().unwrap_or(0.0);
+            // An earlier transaction on this chain that is still unresolved: nothing new is signed here
+            // until it is (it is re-broadcast unchanged meanwhile).
+            let mut chain_execute = execute;
+            if execute {
+                if let Err(e) = crate::chain::reconcile_pending(*cid, &wallet) {
+                    crate::warn!("worker", "chain {cid}: {e}");
+                    chain_execute = false;
+                }
+            }
+            // Unknown value is not zero value: while anything on the chain could not be valued, its
+            // allocations are not acted on (a pool switched off or set to 0% is still withdrawn).
+            let incomplete: Vec<String> = acct["chains"][cid.to_string()]["incomplete"].as_array().cloned().unwrap_or_default()
+                .iter().filter_map(|x| x.as_str().map(String::from)).collect();
             for (_, cfg) in pools {
                 let info = &acct["pools"][&cfg.name];
                 let has_pos = info["positions"].as_array().map(|a| !a.is_empty()).unwrap_or(false);
@@ -154,7 +170,16 @@ impl Worker {
                     self.status.lock().unwrap()["pools"][&cfg.name] = json!({"mode": "disabled", "chain_id": cid});
                     continue;
                 }
+                let explicit_exit = !cfg.enabled || cfg.allocation_pct <= 0.0;
+                if !incomplete.is_empty() && !explicit_exit {
+                    let why = format!("valuation incomplete on this chain ({}); holding until everything can be valued", incomplete.join("; "));
+                    crate::warn!("worker", "[{}] {why}", cfg.name);
+                    engine::log(json!({"chain_id": cid, "pool": cfg.pool, "kind": "blocked", "problems": [why.clone()]}));
+                    self.status.lock().unwrap()["pools"][&cfg.name] = json!({"mode": "hold", "chain_id": cid, "error": why, "flvr": info["flvr"]});
+                    continue;
+                }
                 let budget = if cfg.enabled { chain_total * cfg.allocation_pct / 100.0 } else { 0.0 };
+                let execute = chain_execute;
                 let res = (|| -> Result<Value, String> {
                     let mut ex = Executor::new(cfg.clone(), *cid, &wallet, &s, execute, Some(budget))?;
                     let num = cfg.numeraire;
@@ -253,6 +278,7 @@ pub fn account_value(by_chain: &BTreeMap<u64, Vec<(Value, PoolConfig)>>, wallet:
     for (cid, pools) in by_chain {
         let mut total = 0.0;
         let mut tokens: Vec<String> = vec![];
+        let mut incomplete: Vec<String> = vec![];
         for (_, cfg) in pools {
             let r = (|| -> Result<(Value, f64, String, String), String> {
                 let (t0, t1) = crate::chain::pool_tokens(*cid, &cfg.pool)?;
@@ -288,21 +314,30 @@ pub fn account_value(by_chain: &BTreeMap<u64, Vec<(Value, PoolConfig)>>, wallet:
                 }
                 Err(e) => {
                     crate::error!("worker", "[{}] valuation failed: {e}", cfg.name);
+                    incomplete.push(format!("{}: {e}", cfg.name));
                     out["pools"][&cfg.name] = json!({"error": e, "chain_id": cid});
                 }
             }
         }
-        for ft in s["funding_tokens"].as_array().cloned().unwrap_or_default() {
-            let ft = ft.as_str().unwrap_or("").to_lowercase();
-            if !ft.is_empty() && !tokens.contains(&ft) && crate::chain::eth_call(*cid, &ft, "0x313ce567", None).is_ok() {
-                tokens.push(ft);
+        // Funding tokens that exist on this chain (decimals() answers), then every balance in one request.
+        let funding: Vec<String> = crate::settings::funding_tokens(&s, *cid).into_iter()
+            .filter(|a| !tokens.contains(a))
+            .collect();
+        let probe: Vec<(String, String)> = funding.iter().map(|a| (a.clone(), "0x313ce567".to_string())).collect();
+        if let Ok(res) = crate::chain::eth_calls(*cid, &probe) {
+            for (a, r) in funding.into_iter().zip(res) {
+                if r.map(|b| b.len() >= 32).unwrap_or(false) {
+                    tokens.push(a);
+                }
             }
         }
+        let balances = crate::chain::erc20_balances(*cid, &tokens, wallet)
+            .unwrap_or_else(|e| tokens.iter().map(|_| Err(e.clone())).collect());
         let mut chain_tokens = Map::new();
-        for t in tokens {
+        for (t, bal) in tokens.into_iter().zip(balances) {
             let r = (|| -> Result<(String, Value, f64), String> {
                 let m = prices::meta(*cid, &t)?;
-                let amt = to_f64(&crate::chain::erc20_balance(*cid, &t, wallet)?) / 10f64.powi(m.decimals as i32);
+                let amt = to_f64(&bal?) / 10f64.powi(m.decimals as i32);
                 let usd = if amt > 0.0 { amt * prices::usd(*cid, &t)? } else { 0.0 };
                 Ok((m.symbol, json!({"address": t, "amount": amt, "usd": usd, "chain_id": cid}), usd))
             })();
@@ -313,7 +348,10 @@ pub fn account_value(by_chain: &BTreeMap<u64, Vec<(Value, PoolConfig)>>, wallet:
                     out["tokens"][&key] = v.clone();
                     chain_tokens.insert(sym, v);
                 }
-                Err(e) => crate::error!("worker", "balance of {t} failed: {e}"),
+                Err(e) => {
+                    crate::error!("worker", "balance of {t} failed: {e}");
+                    incomplete.push(format!("balance of {t}: {e}"));
+                }
             }
         }
         let gas = crate::chain::eth_balance(*cid, wallet).map(|g| to_f64(&g) / 1e18).ok();
@@ -321,7 +359,8 @@ pub fn account_value(by_chain: &BTreeMap<u64, Vec<(Value, PoolConfig)>>, wallet:
             out["eth_gas"] = json!(gas);
         }
         out["chains"][cid.to_string()] = json!({"name": chains::get(*cid).name, "total_usd": total, "gas": gas,
-                                                "gas_symbol": chains::get(*cid).gas_symbol, "tokens": chain_tokens});
+                                                "gas_symbol": chains::get(*cid).gas_symbol, "tokens": chain_tokens,
+                                                "incomplete": incomplete});
         grand += total;
     }
     out["total_usd"] = json!(grand);

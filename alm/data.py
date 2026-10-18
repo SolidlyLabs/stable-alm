@@ -99,8 +99,9 @@ class Market:
         raw_sp = np.array([int(s) for s in sw.sqrt_price_x96], dtype=float) / 2**96
         # A near-empty pool lets a swap run the price to absurd ticks (down to -887272). That is
         # not a market price, and any real liquidity would have absorbed the swap, so swaps more
-        # than 20 ticks from the rolling median are pinned to the median.
-        med = pd.Series(raw_tick).rolling(51, center=True, min_periods=1).median().round().to_numpy()
+        # than 20 ticks from the rolling median are pinned to the median. The median is trailing
+        # (this swap and the 50 before it), so a swap's price never depends on later swaps.
+        med = pd.Series(raw_tick).rolling(51, min_periods=1).median().round().to_numpy()
         bad = np.abs(raw_tick - med) > 20
         self.tick = np.where(bad, med, raw_tick).astype(np.int64)
         self.sp = np.where(bad, np.power(1.0001, (self.tick + 0.5) / 2), raw_sp)
@@ -153,10 +154,12 @@ class Market:
         self.bar_seconds = bar_seconds
 
     def slice_from(self, start_ts: int) -> "Market":
-        """View of the market from start_ts on (shares arrays)."""
+        """View of the market from start_ts on (shares arrays). Keeps the last swap before start_ts,
+        which sets the price at the start, so every bar index stays >= 0."""
         m = object.__new__(Market)
-        i = int(np.searchsorted(self.ts, start_ts))
         b = int(np.searchsorted(self.bar_end, start_ts))
+        i = int(self.bar_idx[b]) if b < len(self.bar_end) else len(self.ts) - 1
+        i = max(i, 0)
         for k in ("ts", "tick", "sp", "tick_pre", "amount_in", "l_wallet", "l_others", "fee", "emis_rate", "dt"):
             setattr(m, k, getattr(self, k)[i:])
         m.bar_end = self.bar_end[b:]
@@ -197,7 +200,7 @@ def cached_market(pool: str = POOL, rebuild: bool = False, bar_seconds: int = 30
     if fee_floor_bps is None:
         env = os.environ.get("FEE_FLOOR_OVERRIDE")
         fee_floor_bps = float(env) if env else cfg.get("fee_floor_bps", 0.0)
-    suffix = ("" if bar_seconds == 300 else f"_{bar_seconds}s") + (f"_floor{fee_floor_bps:g}" if fee_floor_bps else "")
+    suffix = "_v2" + ("" if bar_seconds == 300 else f"_{bar_seconds}s") + (f"_floor{fee_floor_bps:g}" if fee_floor_bps else "")
     path = os.path.join(DATA, f"market_{pool}{suffix}.npz")
     if rebuild or not os.path.exists(path):
         m = Market(pool, bar_seconds=bar_seconds, decimals=cfg["decimals"], numeraire=cfg["numeraire"],

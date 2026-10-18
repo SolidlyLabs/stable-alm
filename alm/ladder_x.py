@@ -80,7 +80,10 @@ class LadderX(Strategy):
             wgt = np.ones(int(sel.sum()))
         r = np.bincount(idx, weights=m.fee[i0 : i1 + 1][sel] * wgt, minlength=n)
         if self.params.get("emis"):  # haircuts as in sim.Costs: fees 82%, SOLID 50%
-            e = m.emis_rate[i0 : i1 + 1][sel] * m.dt[i0 : i1 + 1][sel]
+            # time each state held, cut at the decision time (the last swap's interval is still open)
+            now = float(m.bar_end[st.bar])
+            held = np.minimum(m.dt[i0 : i1 + 1], np.maximum(now - m.ts[i0 : i1 + 1], 0.0))
+            e = m.emis_rate[i0 : i1 + 1][sel] * held[sel]
             r = 0.82 * r + 0.5 * np.bincount(idx, weights=e * wgt, minlength=n)
         ws = np.bincount(idx, weights=wgt, minlength=n)
         o = np.bincount(idx, weights=m.l_others[i0 : i1 + 1][sel] * wgt, minlength=n) / np.maximum(ws, 1e-12)

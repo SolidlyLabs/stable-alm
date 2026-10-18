@@ -1,6 +1,6 @@
 [package]
 name = "stable-alm"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Stable ALM: automated liquidity management for Solidly V3 (desktop app)"
 license = "Apache-2.0"
@@ -13,7 +13,7 @@ path = "src/main.rs"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-ureq = { version = "2.10", default-features = false, features = ["json", "native-tls"] }
+ureq = { version = "2.10", default-features = false, features = ["json", "native-tls", "gzip"] }
 native-tls = "0.2"
 tiny_http = "0.12"
 k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }

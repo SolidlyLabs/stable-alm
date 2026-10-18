@@ -15,9 +15,13 @@ pub fn defaults() -> Value {
         "execute": false,
         "wallet": "",
         "interval_s": 300,
+        // where the dashboard listens (127.0.0.1); a port in use at startup moves to the next free one
+        "ui_port": 8080,
         "claim": {"enabled": true, "every_days": 7},
         "sell_rewards": {"enabled": true, "tokens": [SOLID], "max_impact_pct": 3.0, "min_value_usd": 2.0},
-        "funding_tokens": [USDC],
+        // chain id -> tokens that may be swapped to fund that chain's pools; a chain missing here uses
+        // its USDC and USDT, an empty list turns funding off on that chain
+        "funding_by_chain": {},
         "solid_lp": {"enabled": false, "pool": SOLID_WETH_POOL, "min_value_usd": 5.0, "max_price_dev_pct": 3.0,
                      "slippage_bps": 50.0, "max_swap_cost_bps": 50.0},
         "retries": {"attempts": 3, "backoff_s": 10},
@@ -69,17 +73,42 @@ pub fn load_settings() -> Value {
         if let Some(old) = o.remove("funding_token") {
             o.entry("funding_tokens").or_insert_with(|| if old.is_null() { json!([]) } else { json!([old]) });
         }
+        // One list for all chains (older settings) held Base tokens: it becomes Base's list, and the
+        // other chains start from their defaults.
+        if let Some(old) = o.remove("funding_tokens") {
+            if !o.contains_key("funding_by_chain") {
+                o.insert("funding_by_chain".into(), json!({crate::chains::BASE.to_string(): old}));
+            }
+        }
     }
     let mut s = merge(&defaults(), &cur);
-    let ft: Vec<Value> = s["funding_tokens"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|t| t.as_str().filter(|x| !x.is_empty()).map(|x| Value::String(x.to_lowercase())))
-        .collect();
-    s["funding_tokens"] = Value::Array(ft);
+    let mut fb = serde_json::Map::new();
+    for (k, v) in s["funding_by_chain"].as_object().cloned().unwrap_or_default() {
+        fb.insert(k, Value::Array(clean_addrs(&v)));
+    }
+    s["funding_by_chain"] = Value::Object(fb);
     s
+}
+
+/// Lowercase, non-empty, de-duplicated addresses of a JSON list.
+pub fn clean_addrs(v: &Value) -> Vec<Value> {
+    let mut out: Vec<Value> = vec![];
+    for t in v.as_array().cloned().unwrap_or_default() {
+        if let Some(a) = t.as_str().map(|x| x.trim().to_lowercase()).filter(|x| !x.is_empty()) {
+            if !out.iter().any(|o| o.as_str() == Some(a.as_str())) {
+                out.push(Value::String(a));
+            }
+        }
+    }
+    out
+}
+
+/// Tokens that may be swapped to fund pools on chain `cid`.
+pub fn funding_tokens(s: &Value, cid: u64) -> Vec<String> {
+    match s["funding_by_chain"].get(cid.to_string()) {
+        Some(v) => clean_addrs(v).iter().filter_map(|x| x.as_str().map(String::from)).collect(),
+        None => crate::chains::default_funding(cid),
+    }
 }
 
 pub fn save_settings(s: &Value) -> std::io::Result<()> {
@@ -150,6 +179,94 @@ impl PoolConfig {
             enabled: v["enabled"].as_bool().unwrap_or(false),
         }
     }
+}
+
+/// Allowed ranges of the numeric settings (path, min, max).
+const SETTING_RANGES: &[(&str, f64, f64)] = &[
+    ("interval_s", 30.0, 86400.0),
+    ("ui_port", 1024.0, 65535.0),
+    ("idle_redeploy_pct", 0.0, 100.0),
+    ("resize_tolerance_pct", 0.0, 100.0),
+    ("claim.every_days", 0.1, 365.0),
+    ("sell_rewards.max_impact_pct", 0.0, 50.0),
+    ("sell_rewards.min_value_usd", 0.0, 1e9),
+    ("solid_lp.min_value_usd", 0.0, 1e9),
+    ("solid_lp.max_price_dev_pct", 0.0, 50.0),
+    ("solid_lp.slippage_bps", 0.0, 1000.0),
+    ("solid_lp.max_swap_cost_bps", 0.0, 1000.0),
+    ("retries.attempts", 1.0, 10.0),
+    ("retries.backoff_s", 0.0, 600.0),
+];
+
+fn at<'a>(v: &'a Value, path: &str) -> &'a Value {
+    path.split('.').fold(v, |a, k| &a[k])
+}
+
+/// Reject settings with numbers outside their range (or not numbers at all).
+pub fn validate_settings(s: &Value) -> Result<(), String> {
+    for (k, lo, hi) in SETTING_RANGES {
+        let v = at(s, k);
+        if v.is_null() {
+            continue;
+        }
+        let Some(x) = v.as_f64().filter(|x| x.is_finite()) else { return Err(format!("{k} must be a number")) };
+        if x < *lo || x > *hi {
+            return Err(format!("{k} must be between {lo} and {hi} (got {x})"));
+        }
+    }
+    if let Some(w) = s["wallet"].as_str() {
+        if !w.is_empty() && !(w.len() == 42 && w.starts_with("0x") && w[2..].chars().all(|c| c.is_ascii_hexdigit())) {
+            return Err("wallet must be an address (0x + 40 hex digits)".into());
+        }
+    }
+    Ok(())
+}
+
+/// Reject pool settings out of range: allocation, limits and strategy parameters.
+pub fn validate_pool(p: &Value) -> Result<(), String> {
+    let name = p["name"].as_str().unwrap_or("?");
+    let check = |v: &Value, k: &str, lo: f64, hi: f64| -> Result<(), String> {
+        if v.is_null() {
+            return Ok(());
+        }
+        let Some(x) = v.as_f64().filter(|x| x.is_finite()) else { return Err(format!("{name}: {k} must be a number")) };
+        if x < lo || x > hi { Err(format!("{name}: {k} must be between {lo} and {hi} (got {x})")) } else { Ok(()) }
+    };
+    for (k, lo, hi) in [("allocation_pct", 0.0, 100.0), ("slippage_bps", 0.0, 500.0), ("max_swap_cost_bps", 0.0, 1000.0),
+                        ("max_spot_dev_ticks", 1.0, 100000.0), ("max_actions_per_day", 0.0, 1000.0), ("min_swap_value", 0.0, 1e12),
+                        ("max_ranges", 1.0, 50.0)] {
+        check(&p[k], k, lo, hi)?;
+    }
+    let st = &p["strategy"];
+    match st["type"].as_str().unwrap_or("ladder") {
+        "ladder" => {
+            for (k, lo, hi) in [("lookback", 3600.0, 30.0 * 86400.0), ("span", 1.0, 100000.0), ("every", 1.0, 100000.0),
+                                ("turnover", 0.0, 1.0), ("guard", 0.0, 100000.0)] {
+                check(&st[k], k, lo, hi)?;
+            }
+        }
+        "custom" => {
+            for (k, lo, hi) in [("width", 1.0, 1_774_544.0), ("skew", 0.0, 1.0), ("offset_up", -1_000_000.0, 1_000_000.0),
+                                ("offset_down", -1_000_000.0, 1_000_000.0), ("buffer_lo", -1_000_000.0, 1_000_000.0),
+                                ("buffer_hi", -1_000_000.0, 1_000_000.0), ("delay_min", 0.0, 10080.0), ("cooldown_min", 0.0, 43200.0),
+                                ("exit_delay_min", 0.0, 10080.0), ("guard", 0.0, 100000.0)] {
+                check(&st[k], k, lo, hi)?;
+            }
+            let spacing = p["tick_spacing"].as_i64().unwrap_or(1);
+            crate::custom::Rules::from(st.as_object().ok_or(format!("{name}: strategy must be an object"))?, spacing)
+                .map_err(|e| format!("{name}: {e}"))?;
+        }
+        "graph" => {
+            if serde_json::to_string(st).map(|s| s.len()).unwrap_or(0) > 64 * 1024 {
+                return Err(format!("{name}: node strategy too large"));
+            }
+            let spacing = p["tick_spacing"].as_i64().unwrap_or(1);
+            crate::graph::Graph::parse(st.as_object().ok_or(format!("{name}: strategy must be an object"))?, spacing)
+                .map_err(|e| format!("{name}: {e}"))?;
+        }
+        t => return Err(format!("{name}: unknown strategy type {t}")),
+    }
+    Ok(())
 }
 
 pub fn load_configs() -> Vec<PoolConfig> {

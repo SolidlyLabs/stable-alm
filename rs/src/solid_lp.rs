@@ -146,9 +146,8 @@ fn run_inner(cid: u64, wallet: &str, settings: &Value, execute: bool, pool: &str
 
 fn buy_pair(ex: &mut Executor, cid: u64, solid: &str, pair: &str, mut short: f64, settings: &Value) -> Result<(), String> {
     let mut avail = vec![];
-    for ft in settings["funding_tokens"].as_array().cloned().unwrap_or_default() {
-        let ft = ft.as_str().unwrap_or("").to_lowercase();
-        if ft.is_empty() || ft == solid || ft == pair {
+    for ft in crate::settings::funding_tokens(settings, cid) {
+        if ft == solid || ft == pair {
             continue;
         }
         let r: Result<(f64, i128), String> = (|| {

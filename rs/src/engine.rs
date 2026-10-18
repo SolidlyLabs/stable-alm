@@ -94,9 +94,11 @@ pub fn minted_ranges(cid: u64, pool: &str) -> HashSet<(i64, i64)> {
 pub fn wallet_positions(cid: u64, pool: &str, wallet: &str) -> Result<Vec<(i64, i64, BigUint)>, String> {
     let mut keys: Vec<(i64, i64)> = data::history_ranges(cid, pool, wallet).union(&minted_ranges(cid, pool)).cloned().collect();
     keys.sort();
+    // one multicall for every known range
+    let calls: Vec<(String, String)> = keys.iter().map(|(tl, tu)| (pool.to_lowercase(), chain::position_calldata(wallet, *tl, *tu))).collect();
     let mut out = vec![];
-    for (tl, tu) in keys {
-        let liq = chain::position_liquidity(cid, pool, wallet, tl, tu)?;
+    for ((tl, tu), r) in keys.into_iter().zip(chain::eth_calls(cid, &calls)?) {
+        let liq = eth::word_u(&r?, 0);
         if liq > BigUint::default() {
             out.push((tl, tu, liq));
         }
@@ -206,7 +208,12 @@ impl From<String> for StepErr {
 }
 impl From<TxError> for StepErr {
     fn from(e: TxError) -> Self {
-        StepErr::Fail(e.message)
+        // Paused, or an earlier transaction still unresolved: stop the pass instead of retrying.
+        if e.reason == "paused" || e.reason == "pending" {
+            StepErr::Abort(e.message)
+        } else {
+            StepErr::Fail(e.message)
+        }
     }
 }
 impl std::fmt::Display for StepErr {
@@ -249,6 +256,9 @@ pub struct Executor {
     pub report: Vec<String>,
     pub is_solid_lp: bool,
     pub solid_pair: Option<(String, String)>, // (solid, pair) for the SOLID LP usable() rule
+    /// Transactions handed to the network in this pass (counted before broadcasting). A step that
+    /// failed after broadcasting is never retried: its transaction may have gone through.
+    broadcasts: usize,
 }
 
 impl Executor {
@@ -289,6 +299,7 @@ impl Executor {
             report: vec![],
             is_solid_lp: false,
             solid_pair: None,
+            broadcasts: 0,
             cfg,
         })
     }
@@ -377,9 +388,18 @@ impl Executor {
     pub fn retry<T>(&mut self, what: &str, mut f: impl FnMut(&mut Self) -> Res<T>) -> Res<T> {
         let mut last = String::new();
         for attempt in 1..=self.attempts {
+            let sent_before = self.broadcasts;
             match f(self) {
                 Ok(v) => return Ok(v),
                 Err(StepErr::Abort(m)) => return Err(StepErr::Abort(m)),
+                Err(StepErr::Fail(e)) if self.broadcasts > sent_before => {
+                    // A transaction of this step was broadcast: repeating the step could do it twice.
+                    let msg = format!("{what}: failed after its transaction was sent ({e}); not retrying");
+                    self.say_err(format!("  {msg}"));
+                    log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "error", "what": what, "attempt": attempt, "error": e,
+                               "after_broadcast": true}));
+                    return Err(StepErr::Abort(msg));
+                }
                 Err(StepErr::Fail(e)) => {
                     let fin = attempt == self.attempts;
                     let msg = format!("  {what}: attempt {attempt}/{} failed: {e}", self.attempts);
@@ -412,15 +432,21 @@ impl Executor {
             self.say("    (projected: rebuilt and simulated live after the previous step)");
         }
         if self.execute {
+            if let Some(why) = crate::paths::execution_blocked() {
+                return Err(chain::err(format!("not sent: {why}"), "paused"));
+            }
+            self.broadcasts += 1;
             let res = chain::send(self.cid, self.account.as_ref().unwrap(), to, data, gas)?;
             entry["kind"] = json!("sent");
             entry["hash"] = json!(res.hash);
             entry["block"] = json!(res.block);
             entry["gas_used"] = json!(res.gas_used);
             self.say(format!("    sent {} (block {}, gas {})", res.hash, res.block, thousands(res.gas_used)));
-        } else {
-            entry["kind"] = json!("dry_run");
+            log(entry.clone());
+            entry["receipt"] = res.receipt;
+            return Ok(entry);
         }
+        entry["kind"] = json!("dry_run");
         log(entry.clone());
         Ok(entry)
     }
@@ -508,6 +534,9 @@ impl Executor {
         if budget0 <= 0.0 || !self.cfg.enabled {
             return Ok(summary);
         }
+        if matches!(self.cfg.strategy.get("type").and_then(|t| t.as_str()), Some("custom") | Some("graph")) {
+            return self.run_custom(m, positions, summary, budget0, idle0, pos_val, &sp, p, tick);
+        }
         let params = Params::from(&self.cfg.strategy)?;
         if ladder::frozen(m, &params) {
             self.say(format!("  DEPEG GUARD: holding, no action (tick {tick} too far from the 7-day median)"));
@@ -532,6 +561,7 @@ impl Executor {
             }
             self.begin("rebalance", Some(&t));
             self.resize(&positions, &t, budget0, &sp, p)?;
+            self.mark_solved();
         } else if idle_usable > thr.max(self.cfg.min_swap_value) {
             summary["mode"] = json!("topup");
             let t = self.current_as_target(&positions, &sp, p).unwrap_or_else(|| self.fresh_target(m, &params, budget0, spf, tick));
@@ -549,6 +579,127 @@ impl Executor {
         Ok(summary)
     }
 
+    // -- custom mode (custom.rs) -------------------------------------------------------------------
+    #[allow(clippy::too_many_arguments)]
+    fn run_custom(&mut self, m: &Market, positions: Vec<(i64, i64, BigUint)>, mut summary: Value, budget0: f64, idle0: f64, pos_val: f64,
+                  sp: &BigUint, p: f64, tick: i64) -> Res<Value> {
+        // custom rules or a node strategy (graph.rs): the same decisions, timers and actions
+        let is_graph = self.cfg.strategy.get("type").and_then(|t| t.as_str()) == Some("graph");
+        let rules = if is_graph { None } else { Some(crate::custom::Rules::from(&self.cfg.strategy, self.spacing)?) };
+        let graph = if is_graph { Some(crate::graph::Graph::parse(&self.cfg.strategy, self.spacing)?) } else { None };
+        let label = rules.as_ref().map(|r| r.label()).or_else(|| graph.as_ref().map(|g| g.label())).unwrap_or_default();
+        let exit_to = rules.as_ref().map(|r| r.exit_to).or_else(|| graph.as_ref().map(|g| g.exit_to)).unwrap_or(crate::custom::ExitTo::Keep);
+        if let Some(g) = rules.as_ref().and_then(|r| r.guard) {
+            let med = data::rolling_median_trailing(&m.bar_tick, data::WEEK_BARS, 12);
+            if let (Some(t), Some(md)) = (m.bar_tick.last(), med.last()) {
+                if (*t as f64 - md).abs() > g {
+                    self.say(format!("  DEPEG GUARD: holding, no action (tick {tick} is {:.0} ticks from the 7-day median)", (*t as f64 - md).abs()));
+                    log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "guard_freeze", "tick": tick}));
+                    summary["mode"] = json!("guard");
+                    return Ok(summary);
+                }
+            }
+        }
+        let now = now() as i64;
+        let mut st = crate::custom::load_state(self.cid, &self.cfg.pool, self.execute);
+        let range = (!positions.is_empty()).then(|| (positions.iter().map(|x| x.0).min().unwrap(), positions.iter().map(|x| x.1).max().unwrap()));
+        let d = match (&rules, &graph) {
+            (Some(r), _) => {
+                let d = crate::custom::decide(r, &mut st, now, tick, range, self.spacing);
+                summary["custom"] = json!({"decision": format!("{d:?}"), "range": range, "band": range.map(|(a, b)| r.band(a, b))});
+                d
+            }
+            (None, Some(g)) => {
+                let ev = crate::graph::evaluate(g, m);
+                let bar = m.bar_tick.len().checked_sub(1).ok_or_else(|| "no bars in the replay market".to_string())?;
+                let d = crate::graph::decide(g, &ev, &mut st, now, bar, tick, range, self.spacing);
+                summary["custom"] = json!({"decision": format!("{d:?}"), "range": range, "wanted": crate::graph::wanted(g, &ev, bar, self.spacing)});
+                d
+            }
+            _ => unreachable!(),
+        };
+        let save = |s: &Self, st: &crate::custom::State| crate::custom::save_state(s.cid, &s.cfg.pool, s.execute, st);
+        match d {
+            crate::custom::Decision::Move { tl, tu, reason } => {
+                summary["mode"] = json!("rebalance");
+                self.say(format!("  {label}: {reason}"));
+                save(self, &st);
+                if self.blocked(m, tick, false)? {
+                    return Ok(summary);
+                }
+                let t = Target { ranges: vec![(tl, tu, 1.0)], swap: true };
+                self.begin("rebalance", Some(&t));
+                self.resize(&positions, &t, budget0, sp, p)?;
+                st.moved(now);
+                save(self, &st);
+            }
+            crate::custom::Decision::Exit(reason) => {
+                summary["mode"] = json!("exit");
+                self.say(format!("  {label}: EXIT: {reason}"));
+                save(self, &st);
+                if self.blocked(m, tick, true)? {
+                    return Ok(summary);
+                }
+                self.begin("exit", None);
+                let all: Vec<(i64, i64, i128)> = positions.iter().map(|(a, b, l)| (*a, *b, small(l))).collect();
+                self.burn_all(&all)?;
+                let into = match exit_to {
+                    crate::custom::ExitTo::Token0 => Some((self.t1.clone(), self.t0.clone(), true)),
+                    crate::custom::ExitTo::Token1 => Some((self.t0.clone(), self.t1.clone(), false)),
+                    crate::custom::ExitTo::Keep => None,
+                };
+                if let Some((tin, tout, to0)) = into {
+                    let (_, _, _, p) = self.price()?;
+                    let amt = self.bal(&tin)?.max(0);
+                    let fair = if to0 { amt as f64 / p } else { amt as f64 * p };
+                    if amt > 0 {
+                        let max_cost = self.cfg.max_swap_cost_bps;
+                        if let Err(e) = self.retry("exit swap", |s| s.swap(&tin, &tout, amt, fair, max_cost, "exit swap")) {
+                            self.say_warn(format!("  exit swap skipped: {e}; the tokens stay as they are"));
+                        }
+                    }
+                }
+                st.exited();
+                save(self, &st);
+            }
+            crate::custom::Decision::Wait(reason) => {
+                summary["mode"] = json!("wait");
+                self.say(format!("  {label}: waiting: {reason}"));
+                log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "keep", "tick": tick, "reason": reason}));
+                save(self, &st);
+            }
+            crate::custom::Decision::Keep(reason) => {
+                save(self, &st);
+                let idle_usable = idle0.min((budget0 - pos_val).max(0.0));
+                let thr = budget0 * self.settings["idle_redeploy_pct"].as_f64().unwrap_or(2.0) / 100.0;
+                if !st.exited && !positions.is_empty() && idle_usable > thr.max(self.cfg.min_swap_value) {
+                    summary["mode"] = json!("topup");
+                    let t = self.current_as_target(&positions, sp, p).unwrap();
+                    self.say(format!("  {} idle (> {}): deploying into the current range", commas(idle_usable), commas(thr)));
+                    if self.blocked(m, tick, false)? {
+                        return Ok(summary);
+                    }
+                    self.begin("topup", Some(&t));
+                    self.deploy(&t, budget0)?;
+                } else if !st.exited && pos_val > budget0 * 1.10 && !positions.is_empty() {
+                    summary["mode"] = json!("rebalance");
+                    self.say(format!("  pool holds {} > 110% of its budget {}: rebalance down to budget", commas(pos_val), commas(budget0)));
+                    if self.blocked(m, tick, false)? {
+                        return Ok(summary);
+                    }
+                    let t = self.current_as_target(&positions, sp, p).unwrap();
+                    self.begin("rebalance", Some(&t));
+                    self.resize(&positions, &t, budget0, sp, p)?;
+                } else {
+                    summary["mode"] = json!(if st.exited { "exited" } else { "keep" });
+                    self.say(format!("  {label}: {reason}"));
+                    log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "keep", "tick": tick}));
+                }
+            }
+        }
+        Ok(summary)
+    }
+
     // -- targets -----------------------------------------------------------------------------------
     #[allow(clippy::too_many_arguments)]
     fn strategy_target(&mut self, m: &Market, params: &Params, positions: &[(i64, i64, BigUint)], sp: &BigUint, p: f64, budget0: f64,
@@ -560,10 +711,6 @@ impl Executor {
         if !positions.is_empty() && el < period {
             self.say(format!("  ladder: next re-solve in {:.1} h", (period - el) / 3600.0));
             return Ok(None);
-        }
-        if self.execute {
-            let _ = std::fs::create_dir_all(state.parent().unwrap());
-            let _ = std::fs::write(&state, json!({"ts": now()}).to_string());
         }
         let ranges = cap_ranges(snap_ranges(ladder::decide(m, params, budget0, spf, tick), self.spacing), self.cfg.max_ranges);
         if !positions.is_empty() {
@@ -587,10 +734,22 @@ impl Executor {
             let moved: f64 = keys.iter().map(|t| (new_w.get(t).unwrap_or(&0.0) - cur_w.get(t).unwrap_or(&0.0) / s).abs()).sum::<f64>() / 2.0;
             if moved < params.turnover {
                 self.say(format!("  ladder target differs by {:.0}% < turnover {:.0}%: keep", moved * 100.0, params.turnover * 100.0));
+                self.mark_solved();
                 return Ok(None);
             }
         }
         Ok(Some(Target { ranges, swap: true }))
+    }
+
+    /// Record that the ladder's current solve is in place: the next re-solve is `every` bars from now.
+    /// Called when the solve keeps the positions or after its rebalance succeeded, never before, so a
+    /// blocked or failed rebalance is re-solved on the next cycle.
+    fn mark_solved(&self) {
+        if self.execute {
+            let state = crate::paths::logs().join(format!("last_solve_{}.json", self.cfg.name));
+            let _ = std::fs::create_dir_all(state.parent().unwrap());
+            let _ = std::fs::write(&state, json!({"ts": now()}).to_string());
+        }
     }
 
     fn fresh_target(&self, m: &Market, params: &Params, budget0: f64, spf: f64, tick: i64) -> Target {
@@ -820,19 +979,52 @@ impl Executor {
             return Err(StepErr::Fail(format!("swap would cost {cost:.2} bp > max {max_cost_bps} bp")));
         }
         let spender = best["spender"].as_str().unwrap_or("").to_lowercase();
+        let quoted_router = best["routerAddress"].as_str().unwrap_or("").to_lowercase();
+        for (what, a) in [("spender", &spender), ("router", &quoted_router)] {
+            if !prices::router_allowed(self.cid, a) {
+                return Err(StepErr::Abort(format!(
+                    "aggregator {} proposed {what} {a}, which is not a known swap router; refused (add it to config/routers.json only if you have verified it)",
+                    best["aggregatorId"].as_str().unwrap_or("?"))));
+            }
+        }
         self.ensure_allowance(tin, amount_in, Some(&spender))?;
         let built = prices::build(self.cid, &best, &self.wallet, self.cfg.slippage_bps / 1e4)?;
         let router = built["routerAddress"].as_str().unwrap_or("").to_lowercase();
-        if router != best["routerAddress"].as_str().unwrap_or("").to_lowercase() {
+        if router != quoted_router {
             return Err(StepErr::Fail("router changed between quote and build; re-quoting".into()));
         }
-        let before = small(&chain::erc20_balance(self.cid, tout, &self.wallet)?);
+        let calldata = built["calldata"].as_str().unwrap_or("").to_string();
+        // the minimum the wallet must receive: the quote less the slippage tolerance (and a little rounding)
+        let min_out = out * (1.0 - self.cfg.slippage_bps / 1e4) * 0.9995;
         let live = small(&chain::erc20_balance(self.cid, tin, &self.wallet)?) >= amount_in;
-        self.tx(&router, built["calldata"].as_str().unwrap(), &format!("swap via {}", best["aggregatorId"].as_str().unwrap_or("?")), live)?;
         if self.execute {
-            let got = small(&chain::erc20_balance(self.cid, tout, &self.wallet)?) - before;
-            self.say(format!("    received {:.6}", got as f64 / 10f64.powi(mo.decimals as i32)));
-            return Ok(got);
+            match chain::simulate_transfers(self.cid, &self.wallet, &router, &calldata) {
+                Some(Ok(tr)) => {
+                    prices::check_swap(&self.wallet, tin, amount_in as f64, tout, min_out, &tr).map_err(|e| StepErr::Abort(format!("refused: {e}")))?;
+                    self.say("    transfer check passed (simulated: only the input token leaves, the output arrives)");
+                }
+                Some(Err(e)) => return Err(StepErr::Fail(e)),
+                None => self.say_warn("    the node cannot trace transfers; relying on the router allowlist and the receipt check"),
+            }
+        }
+        let entry = self.tx(&router, &calldata, &format!("swap via {}", best["aggregatorId"].as_str().unwrap_or("?")), live)?;
+        if self.execute {
+            // What arrived, from the receipt's transfers (no balance read that could fail after the
+            // swap went through). Anything unexpected pauses the app.
+            let logs = entry["receipt"]["logs"].as_array().cloned().unwrap_or_default();
+            let got = match prices::check_swap(&self.wallet, tin, amount_in as f64, tout, 0.0, &prices::transfers(&logs)) {
+                Ok(g) => g,
+                Err(e) => {
+                    let _ = std::fs::write(crate::paths::stop_file(), format!("swap {} moved unexpected tokens: {e}\n", entry["hash"]));
+                    log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "error", "what": "swap check", "error": e, "hash": entry["hash"]}));
+                    return Err(StepErr::Abort(format!("swap {} did not do what was expected ({e}); paused", entry["hash"])));
+                }
+            };
+            if got < min_out {
+                self.say_warn(format!("    received {got:.0} raw, below the expected minimum {min_out:.0}"));
+            }
+            self.say(format!("    received {:.6}", got / 10f64.powi(mo.decimals as i32)));
+            return Ok(got as i128);
         }
         self.mv(tin, -amount_in);
         self.mv(tout, out as i128);
@@ -952,12 +1144,8 @@ impl Executor {
     }
 
     fn fund(&mut self, budget0: f64, ranges: &[(i64, i64, f64)]) -> Res<()> {
-        let fts: Vec<String> = self.settings["funding_tokens"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|t| t.as_str().map(|s| s.to_lowercase()))
+        let fts: Vec<String> = crate::settings::funding_tokens(&self.settings, self.cid)
+            .into_iter()
             .filter(|t| *t != self.t0 && *t != self.t1)
             .collect();
         if fts.is_empty() {

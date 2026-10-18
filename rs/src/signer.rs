@@ -60,10 +60,7 @@ mod store {
 
     pub fn save(key: &str) -> Result<(), String> {
         let enc = run(key.as_bytes(), true)?;
-        std::fs::create_dir_all(crate::paths::secrets()).map_err(|e| e.to_string())?;
-        let p = super::dpapi_path();
-        std::fs::write(p.with_extension("tmp"), enc).map_err(|e| e.to_string())?;
-        std::fs::rename(p.with_extension("tmp"), &p).map_err(|e| e.to_string())?;
+        crate::paths::write_secret(&super::dpapi_path(), &enc).map_err(|e| e.to_string())?;
         let _ = std::fs::remove_file(super::plain_path());
         Ok(())
     }
@@ -121,8 +118,8 @@ mod store {
 #[cfg(not(any(windows, target_os = "macos")))]
 mod store {
     pub fn save(key: &str) -> Result<(), String> {
-        std::fs::create_dir_all(crate::paths::secrets()).map_err(|e| e.to_string())?;
-        std::fs::write(super::plain_path(), key).map_err(|e| e.to_string())
+        // folder 700, file 600, written atomically (paths::write_secret)
+        crate::paths::write_secret(&super::plain_path(), key.as_bytes()).map_err(|e| e.to_string())
     }
     pub fn load() -> Result<Option<String>, String> {
         Ok(std::fs::read_to_string(super::plain_path()).ok())

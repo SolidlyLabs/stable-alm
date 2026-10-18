@@ -38,6 +38,62 @@ Each pool card on the dashboard also shows **fee vs arbitrage loss (7 days)**: w
 the current price earns more in fees than it loses to arbitrage. It is a health signal for the pool;
 the help panel explains how to read it.
 
+### Your own strategies: the Strategy lab
+
+Instead of the ladder, a pool can run a strategy you build in the **Strategy lab** tab. The lab has a
+**library**: built-in strategies (the ladder, simple one-range rules, and strategies built on
+indicators such as Bollinger bands, ATR, Keltner and Donchian channels, an EMA trend, a peg band, a
+volatility freeze, mean reversion, an ADX calm-market filter, the Ichimoku base line, a trend lean and
+a MACD momentum pause), plus the ones you saved under your own names
+(`config/strategies.json`). **Select strategy** lists them all with the APR each would have earned on the
+chosen pool and period (backtested four at a time when the list opens), so you can sort by it, open
+one, or add it to the comparison. **New**, **Save** and **Save as…** manage your own.
+
+There are two kinds of strategy you can edit:
+
+- **Simple rules**: one range of a set width, centred on the price or following it from the edge it
+  crossed; a trigger band (buffers), a delay and a cooldown; cutoff prices beyond which it waits; and
+  exit prices that withdraw everything, optionally into one token, with an optional re-entry. You can
+  drag the range, trigger, cutoff and exit handles on the chart.
+- **Node strategies**: add blocks from the toolbox (or a right-click) and wire them together on a
+  canvas you can pan (middle mouse button) and zoom (wheel), with a minimap; a right-click on a block
+  renames, duplicates, copies or deletes it. Sources (price, bar
+  high/low, fees) feed indicators (SMA, EMA, median, percentile, highest/lowest, standard deviation,
+  z-score, Bollinger bands, ATR, Keltner, Donchian, Gaussian channel, RSI, stochastic, stochastic RSI,
+  CCI, ADX/DI, MACD, TRIX, parabolic SAR, Ichimoku, Heikin-Ashi, a trend score and a momentum z-score)
+  and maths; conditions (above, below, crosses, between, distance, and/or/not,
+  price out of range, range shifted) drive the outputs: the **range** to hold, when to **rebalance**,
+  when to **exit** and when to **hold** still. Widths can be given in ticks, tick spacings or percent,
+  and periods in hours. Indicators only use bars that have closed, so a backtest never looks ahead
+  (`rs/src/ta.rs` lists the pitfalls it avoids: warm-up, seeding, flat prices, rounding drift).
+
+Every change (saved or not) re-runs a backtest of the period you chose (7 days to a year) on the
+pool's real swaps, next to up to four strategies you pick from the library and to simply holding, in a
+results column that stays in view while you edit. An edit reruns only the strategy being edited; adding
+a comparison runs only that one, removing one runs nothing. The results are split into
+fees, emissions, swap costs, gas and IL, and node strategies draw their indicators and wanted range on
+the price chart. The backtest calls the same decision code the worker runs, so picking the saved
+strategy for a pool under **Pools** gives you exactly what you tested. A pool whose exit fired can be
+**re-armed** there.
+
+After each backtest an **overfit check** runs for the strategy being edited (`rs/src/overfit.rs`): the
+same swaps replayed with every setting nudged between half and double (24 neighbours), the period cut
+into 8 slices, then walk-forward efficiency, PBO (probability of backtest overfitting, over the 70
+half-splits of the slices), stability of the neighbours and consistency across slices, combined into a
+0–100 score (70+ robust, below 45 likely overfit). Hover the score for what it means.
+
+### Where the data comes from
+
+Pool events (swaps, deposits, withdrawals) are kept in one local store
+(`data/history/<chain>/<pool>/`, one file per day). Everything reads from it: the live decisions,
+the profit ledger, fee vs arbitrage loss for every listed pool, and the backtests. It is filled from
+the Solidly data processor's public history (`solidly.com/api/history`, compressed in transit), one
+download per chain for all of that chain's pools, up to a month of days per request (the processor
+limits requests per caller, so long stretches go fastest as ranges). Each later top-up only asks for events
+after the last one stored. The minutes the processor has not synced yet come from the chain's RPC,
+and once per run a sample of the processor's events is checked against the chain's own logs. Set
+`ALM_HISTORY_API=off` to use RPC only.
+
 ## Installing
 
 On Windows, download `StableALM-Setup-<version>.exe` from
@@ -86,7 +142,7 @@ It is a single file of about 2.3 MB; copy it anywhere and run it.
 To build the Windows installer, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run, from `rs/`:
 
 ```bash
-ISCC /DAppVersion=0.2.0 installer/StableALM.iss     # -> rs/dist/StableALM-Setup-0.2.0.exe
+ISCC /DAppVersion=0.3.0 installer/StableALM.iss     # -> rs/dist/StableALM-Setup-0.3.0.exe
 ```
 
 Useful command-line options:
