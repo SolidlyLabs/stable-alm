@@ -193,13 +193,16 @@ build it yourself (below).
 ## Using the app
 
 1. Start Stable ALM. A tray icon appears: click it for its menu, double-click it to open the dashboard
-   (on macOS a click opens the menu; choose Open dashboard).
+   (on macOS a click opens the menu; choose Open dashboard). On first start (and once after an
+   update from 0.4 or earlier) a setup wizard opens: create a wallet, or import one from a recovery
+   phrase or a private key, pick chains and parking pools. **Settings › Run the setup wizard** opens
+   it again.
 2. **Pools** lists your pools and every Solidly V3 pool on the chains you show with the chain
    filters at the top (a view filter only: balances, funding and your pools cover every chain). Sort by any column; pegged pairs are shown by default. Add one, enable it,
    give it money with **Add** (from Unallocated, the free tokens no pool holds), and watch a few
    dry-run cycles.
-3. When the plan looks right, paste your wallet's private key under **Settings** and press **Go
-   live**.
+3. When the plan looks right, add your wallet's private key (in the wizard, or **Settings › Update
+   key**) and press **Go live**. The wallet address is blurred on screen until you click it.
    - On Windows the key is encrypted for your user account (DPAPI); on macOS it goes into the
      Keychain.
    - It never leaves your computer and is never shown again.
@@ -228,7 +231,7 @@ It is a single file of about 2.3 MB; copy it anywhere and run it.
 To build the Windows installer, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run, from `rs/`:
 
 ```bash
-ISCC /DAppVersion=0.4.0 installer/StableALM.iss     # -> rs/dist/StableALM-Setup-0.4.0.exe
+ISCC /DAppVersion=0.5.0 installer/StableALM.iss     # -> rs/dist/StableALM-Setup-0.5.0.exe
 ```
 
 Useful command-line options:

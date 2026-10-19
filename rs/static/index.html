@@ -41,7 +41,18 @@ nav button:hover{color:var(--fg)}nav button.on{color:var(--fg)}
 nav button.on::after{content:"";position:absolute;left:10px;right:10px;bottom:0;height:2px;border-radius:2px;background:var(--acc)}
 main{max-width:1400px;margin:0 auto;padding:22px 24px 80px}
 section{animation:rise .35s ease both}@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
-.grid{display:grid;gap:14px}.g2{grid-template-columns:repeat(auto-fit,minmax(min(100%,480px),1fr))}
+.grid{display:grid;gap:14px}
+.exg{grid-template-columns:repeat(12,minmax(0,1fr));align-items:stretch}.exg>*{grid-column:span 12;min-width:0}
+.exg .s4{grid-column:span 4}.exg .s5{grid-column:span 5}.exg .s7{grid-column:span 7}
+.exg .card{padding:16px 18px;display:flex;flex-direction:column}.exg .card>.row:last-child{margin-top:auto!important;padding-top:10px}.exg .card h2{margin-bottom:10px}
+.exhead{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;padding:10px 2px 0;border-top:1px solid var(--line);margin-top:6px}
+.exhead:first-child{border-top:0;margin-top:0;padding-top:0}.exhead h3{margin:0;font:650 15px var(--display)}.exhead .mute{max-width:90ch}
+.exg details>summary{cursor:pointer;list-style:none}.exg details>summary::-webkit-details-marker{display:none}
+.exg details>summary::before{content:"▸";display:inline-block;margin-right:8px;color:var(--mute);transition:transform .2s}.exg details[open]>summary::before{transform:rotate(90deg)}
+.exg details[open]>summary{margin-bottom:12px}
+#agSettings{grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px 14px}
+@media (max-width:1100px){.exg .s4,.exg .s5,.exg .s7{grid-column:span 6}}
+@media (max-width:760px){.exg .s4,.exg .s5,.exg .s7{grid-column:span 12}}.g2{grid-template-columns:repeat(auto-fit,minmax(min(100%,480px),1fr))}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px;min-width:0;box-shadow:var(--shadow)}
 .card h2,.h{font:650 11px/1.2 var(--sans);letter-spacing:1px;text-transform:uppercase;color:var(--mute);margin:0 0 12px}
 /* hero */
@@ -146,6 +157,10 @@ details summary{cursor:pointer;color:var(--info);list-style:none}details summary
 .unal{background:repeating-linear-gradient(135deg,var(--card2) 0 4px,color-mix(in srgb,var(--line2) 60%,var(--card2)) 4px 8px)}
 dialog.cap{border:1px solid var(--line2);border-radius:14px;background:var(--card);color:var(--fg);padding:0;width:min(460px,calc(100vw - 32px));box-shadow:0 18px 50px rgba(0,0,0,.35)}
 dialog.cap::backdrop{background:rgba(8,10,14,.55)}
+/* the owner's wallet address: masked and blurred until clicked (screenshots and screen sharing) */
+.priv{cursor:pointer;filter:blur(4px);user-select:none;transition:filter .2s ease;border-radius:4px}.priv:hover{filter:blur(3px)}.priv.shown{filter:none;user-select:text}input.privin:not(:focus){filter:blur(4px);cursor:pointer}input.privin{transition:filter .2s ease}#pkRow[hidden]{display:none}
+
+dialog.agset{width:min(980px,calc(100vw - 32px));max-height:calc(100vh - 48px)}dialog.agset[open]{animation:rise .25s ease both}dialog.agset #agSettings{max-height:calc(100vh - 240px);overflow:auto;padding:2px}
 dialog.cap form{padding:18px 18px 16px;display:grid;gap:12px}dialog.cap h3{margin:0;font-size:16px}
 dialog.cap .pick{display:grid;gap:2px;max-height:240px;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:6px}
 dialog.cap .pick label{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:7px;cursor:pointer;font-size:13px}
@@ -210,7 +225,7 @@ svg.chart{width:100%;height:210px;display:block}
   </div>
   <nav id="tabs">
     <button data-t="overview" class="on">Overview</button><button data-t="pools">Pools</button>
-    <button data-t="settings">Settings</button><button data-t="activity">Activity</button>
+    <button data-t="settings">Settings</button><button data-t="activity">Activity</button><button data-t="experimental" id="expTab" class="hide">Experimental</button>
   </nav>
 </header>
 <main>
@@ -273,8 +288,11 @@ svg.chart{width:100%;height:210px;display:block}
     </div>
     <div class="grid">
       <div class="card"><h2>Private key</h2><p id="keyStatus" class="mute"></p>
-        <div class="row"><input id="pk" type="password" autocomplete="off" placeholder="0x… private key" style="flex:1;min-width:220px">
-          <button onclick="setKey()">Save key</button><button class="sec" onclick="delKey()">Remove</button></div>
+        <div class="row" id="pkRow" hidden><input id="pk" type="password" autocomplete="off" placeholder="0x… private key" style="flex:1;min-width:220px">
+          <button onclick="setKey()">Save key</button><button class="ghost" id="pkCancel" onclick="keyEdit(false)">Cancel</button></div>
+        <div class="row" id="keyBtns" style="margin-top:8px"><button class="sec" id="keyUpd" onclick="keyEdit(true)">Update key</button>
+          <button class="sec" id="keyDel" onclick="delKey()">Remove</button>
+          <button class="sec" onclick="openWizard()" title="create a new wallet, import one from a recovery phrase, pick chains and parking pools">Run the setup wizard</button></div>
         <p class="mute small"><span id="keyStore">Stored as a plain file (secrets/private_key)</span>, so restarts resume on their own. Never shown again,
           only its address. The managed wallet becomes the key's address, the same on every chain.</p></div>
       <div class="card" id="fundCard"><h2>Funding tokens</h2>
@@ -299,6 +317,45 @@ svg.chart{width:100%;height:210px;display:block}
         <label class="sw"><input type="checkbox" id="helpVisible" checked onchange="window.almHelp && almHelp.setVisible(this.checked)"><span class="t"></span>
           <span><b>Show explanations panel</b> <span class="mute small">(explains whatever you hover; remembered in this browser)</span></span></label></div>
     </div>
+  </section>
+
+  <!-- EXPERIMENTAL (Settings → Experimental features) -->
+  <section data-tab="experimental" class="grid exg hide">
+    <div class="exhead"><h3>Agent</h3><span class="mute small">reviews by Claude, the risk controller and the plans they make</span><span class="sp"></span></div>
+    <div class="card s7" data-help="ag-status"><h2 style="display:flex;align-items:center">Agent · status <button class="ghost sm icon" data-help="xb-cog" onclick="agSettingsOpen()" title="Agent settings: risk, caps, limits, execution, schedule" aria-label="Agent settings" style="margin-left:auto;padding:4px 6px;line-height:0"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button></h2>
+      <div id="agBanner"></div>
+      <div class="kv" id="agStatus"></div>
+      <div class="row" style="margin-top:10px;gap:6px;flex-wrap:wrap"><button class="sm" data-help="xb-review" onclick="agReview('manual')">Run a review now</button>
+        <button class="sec sm" data-help="xb-sync" onclick="agPost('history_sync', {}, 'History sync started.')">Sync history</button>
+        <button class="sec sm" data-help="xb-verify" onclick="agVerify()">Check the journal</button><span class="sp"></span><span class="mute small" id="agInfo"></span>
+        <button class="sec sm" data-help="xb-agrefresh" onclick="loadAgent()">Refresh</button></div></div>
+    <div class="card s5" data-help="ag-keys"><h2>Claude API key · Telegram</h2>
+      <div class="fields">
+        <div data-help="xf-apikey"><label class=f>Anthropic API key</label><input id="agKey" type=password autocomplete=off spellcheck=false placeholder="sk-ant-…"></div>
+        <div class="row" style="gap:6px;align-items:flex-end"><button class="sm" data-help="xb-keysave" onclick="agSaveKey()">Save</button><button class="sec sm" data-help="xb-keytest" onclick="agTestKey()">Test</button>
+          <button class="ghost sm" data-help="xb-keyremove" onclick="agSaveKey(true)">Remove</button></div>
+        <div data-help="xf-bot"><label class=f>Telegram bot token</label><input id="agBot" type=password autocomplete=off spellcheck=false placeholder="123456:ABC…"></div>
+        <div class="row" style="gap:6px;align-items:flex-end"><button class="sm" data-help="xb-botsave" onclick="agSaveBot()">Save</button><button class="sec sm" data-help="xb-link" onclick="agLink()">Link a chat</button>
+          <button class="ghost sm" data-help="xb-unlink" onclick="agPost('telegram_unlink', {}, 'Telegram unlinked; pending approvals voided.')">Unlink</button></div>
+      </div><p class="small mute" id="agKeyInfo" style="margin:8px 0 0"></p></div>
+    <div class="card s12" data-help="ag-plans"><h2>Plans</h2><div class="scroll"><table id="agPlans"></table></div></div>
+    <div class="card s4" data-help="ag-safety"><h2>Safety · risk controller, locks</h2><div id="agSafety"></div></div>
+    <div class="card s4" data-help="ag-perf"><h2>Performance · net of flows, against holding</h2><div class="scroll"><table id="agPerf"></table></div></div>
+    <div class="card s4" data-help="ag-alerts"><h2>Alerts · journal</h2><div class="scroll" style="max-height:360px"><table id="agAlerts"></table></div></div>
+    <div class="card s7" data-help="ag-reviews"><h2>Reviews</h2><div class="scroll"><table id="agReviews"></table></div></div>
+    <div class="card s5" data-help="ag-forward"><h2>Forward test · scored report</h2><div id="agForward"></div>
+      <div class="row" style="margin-top:10px;gap:6px"><button class="sec sm" data-help="xb-freeze" onclick="agFreeze()">Start (freeze strategies)</button>
+        <button class="sec sm" data-help="xb-report" onclick="agPost('report', {}, 'The report is being rebuilt (a few backtests).')">Rebuild report</button></div></div>
+    <dialog class="cap agset" id="agSetDlg" data-help="ag-settings"><form method=dialog onsubmit="event.preventDefault();agSaveSettings()">
+      <div class="row"><h3>Agent settings</h3><span class="mute small">risk, caps, limits, execution, schedule</span><span class="sp"></span>
+        <button type=button class="ghost sm" onclick="$('agSetDlg').close()" aria-label="Close">✕</button></div>
+      <div class="fields" id="agSettings"></div>
+      <div class="small mute">Saved with the other settings; changing limits or the mode voids plans waiting for approval.</div>
+      <div class="btns"><button type=button class="sec" onclick="$('agSetDlg').close()">Cancel</button><button type=submit>Save agent settings</button></div></form></dialog>
+    <div class="exhead"><h3>Liquidity Lens</h3><span class="mute small"><b class="warn">Placeholder data</b>: generated, not real. It shows the shape of what the agent will read once each feature arrives in Liquidity Lens (docs/LLENS_REQUESTS.md); the agent sees it labelled and may not base a decision on it.</span><span class="sp"></span><span class="mute small" id="expInfo"></span><button class="sec sm" data-help="xb-expref" onclick="loadExperimental()">Refresh</button></div>
+    <div class="card s7" data-help="exp-tokens"><h2>Tokens · price, depth, cost</h2><div class="scroll"><table id="expTokens"></table></div></div>
+    <div class="card s5" data-help="exp-cache"><h2>Local cache · requests per source</h2><div class="scroll"><table id="expCache"></table></div></div>
+    <div class="card s12" data-help="exp-pools"><h2>Pools · traffic, competition, ranges</h2><div class="scroll"><table id="expPools"></table></div></div>
   </section>
 
   <!-- ACTIVITY -->
@@ -401,12 +458,14 @@ function show(t) {
   try { localStorage.setItem("alm.tab", t); } catch (e) {}
   if (t === "pools" && !MARKET) loadMarket();
   if (t === "settings" && !TOKENS) loadTokens();
+  if (t === "experimental") loadExperimental();
   // the strategy library as the app has it now: strategies saved or edited outside this page show up
   if ((t === "pools" || t === "lab") && window.LABLIB && LABLIB.refresh) LABLIB.refresh();
 }
 document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => show(b.dataset.t));
 // ---------- status ----------
-async function refresh() { try { S = await api("/api/status"); render(); } catch (e) { toast("status: " + e.message, true); } }
+// not behind the setup wizard: re-rendering every table under it stalls its animations
+async function refresh() { if (document.getElementById("wz")) return; try { S = await api("/api/status"); render(); } catch (e) { toast("status: " + e.message, true); } }
 function render() {
   const w = S.worker || {}, acct = w.account || {};
   const mode = S.paused ? "paused" : (w.mode || "dry run");
@@ -428,6 +487,9 @@ function render() {
   if (!$("pools").contains(document.activeElement)) renderPools();
   renderSettings();
   renderActivity();
+  const exp = !!(S.settings.experimental || {}).enabled;
+  $("expTab").classList.toggle("hide", !exp);
+  if (!exp && tab === "experimental") show("overview");
 }
 // Per-chain figures: balances from the last cycle's account, profit from the ledger.
 function chainStats(acct, w) {
@@ -1019,6 +1081,201 @@ async function addPool(addr, name, chainId) {
     $("newPool").value = ""; $("newName").value = ""; dirtyPools = false; await refresh(); if (MARKET) { MARKET.forEach(p => { if (p.pool === r.pool.pool) p.configured = true; }); renderPools(); } }
   catch (e) { toast(e.message, true); }
 }
+// ---------- experimental (placeholder data) ----------
+let EXP = null;
+async function loadExperimental() {
+  $("expInfo").textContent = "loading…";
+  loadAgent();
+  try { EXP = await api("/api/experimental"); renderExperimental(); }
+  catch (e) { $("expInfo").innerHTML = `<span class=bad>${esc(e.message)}</span>`; }
+}
+const pct = x => x == null || isNaN(x) ? "–" : fmt(100 * x, 1) + "%";
+const bp = x => x == null || isNaN(x) ? "–" : fmt(x, 1) + " bp";
+const big = x => x == null || isNaN(x) ? "–" : x >= 1e6 ? "$" + fmt(x / 1e6, 2) + "M" : x >= 1e3 ? "$" + fmt(x / 1e3, 0) + "k" : usd(x);
+function renderExperimental() {
+  if (!EXP) return;
+  const ph = `<span class="warn small" title="generated, not real">placeholder</span>`;
+  $("expInfo").innerHTML = `Liquidity Lens: ${esc(EXP.llens.mode)} · ${EXP.tokens.length} tokens, ${EXP.pools.length} pools`;
+  const er = v => v && v.error ? `<span class=bad>${esc(v.error)}</span>` : "";
+  $("expTokens").innerHTML = `<tr><th>Token</th><th>Reference</th><th>Depth ±1% (buy / sell)</th><th>Sell $1k / $10k / $100k</th><th>Spot vs exec gap ($10k)</th><th></th></tr>` +
+    EXP.tokens.map(t => {
+      const r = t.reference.data || {}, d = (t.depth.data || {}), q = ((t.sell_quotes.data || {}).quotes || []), h = t.health || {};
+      return `<tr><td><span class="cdot" style="--cc:${cc(t.chain_id)}"></span><b>${esc(t.symbol)}</b></td>
+        <td class=mono>${r.status === "ok" ? "$" + fmt(r.price, r.price < 10 ? 4 : 2) : `<span class=mute>${esc(r.status || "")}</span>`}${er(t.reference)}</td>
+        <td class=mono>${d.buy ? big(d.buy.within_1pct_usd) + " / " + big(d.sell.within_1pct_usd) : er(t.depth)}</td>
+        <td class=mono>${q.length ? q.map(x => bp(x.cost_bp)).join(" · ") : er(t.sell_quotes)}</td>
+        <td class=mono>${h.error ? er(h) : `${bp(h.gap_bp)} <span class=mute>(24h ${bp(h.baseline_24h_bp)})</span>${h.widening ? " <span class=warn>widening</span>" : ""}`}</td>
+        <td>${ph}</td></tr>`;
+    }).join("");
+  $("expPools").innerHTML = `<tr><th>Pool</th><th>7d volume</th><th>Aggregator / bot / organic</th><th>Competing pools (TVL, ±0.5% liquidity)</th><th>Best range (width → APR)</th><th>+$100k capital earns</th><th></th></tr>` +
+    EXP.pools.map(p => {
+      const tr = p.traffic || {}, comp = ((p.competing || {}).data || {}).pools || [], rg = ((p.ranges || {}).data || {}).candidates || [];
+      const best = rg.slice().sort((a, b) => b.expected_fee_apr - a.expected_fee_apr)[0];
+      const dv = (((p.depth_value || {}).data || {}).points || []).find(x => x.capital_usd === 100000);
+      return `<tr><td><span class="cdot" style="--cc:${cc(p.chain_id)}"></span><b>${esc(p.name)}</b>${p.enabled ? "" : ' <span class="mute small">off</span>'}</td>
+        <td class=mono>${tr.error ? er(tr) : big(tr.volume_7d_usd)}</td>
+        <td class=mono>${tr.error ? "" : pct(tr.aggregator_share) + " / " + pct(tr.bot_share) + " / " + pct(tr.organic_share)}</td>
+        <td class="mono small">${comp.map(c => `${esc(c.dex)} ${fmt(c.fee_bp, 0)}bp: ${big(c.tvl_usd)}, ${big(c.in_range_usd["0.5pct"])}`).join("<br>") || er(p.competing)}</td>
+        <td class=mono>${best ? `±${best.width_pct}% → ${pct(best.expected_fee_apr)}` : er(p.ranges)}</td>
+        <td class=mono>${dv ? big(dv.fees_per_year_usd) + "/yr" : er(p.depth_value)}</td><td>${ph}</td></tr>`;
+    }).join("");
+  $("expCache").innerHTML = `<tr><th>Source</th><th>Today: requests / hits / failures</th><th>Hit rate today</th><th>7 days: requests / hits</th><th>On disk</th><th></th></tr>` +
+    (EXP.cache.length ? EXP.cache.map(c => `<tr><td><b>${esc(c.source)}</b></td>
+      <td class=mono>${c.today.requests} / ${c.today.hits} / ${c.today.failures}</td><td class=mono>${pct(c.today.hit_rate)}</td>
+      <td class=mono>${c.week.requests} / ${c.week.hits}</td><td class=mono>${fmt(c.bytes / 1024, 0)} kB</td>
+      <td>${c.backing_off_until ? `<span class=warn>backing off until ${new Date(c.backing_off_until * 1000).toLocaleTimeString()}</span>` : ""}</td></tr>`).join("")
+     : `<tr><td class=mute>Nothing cached yet.</td></tr>`);
+}
+// ---------- experimental: the agent (docs/AGENT_PLAN.md) ----------
+let AG = null;
+async function loadAgent() {
+  try { AG = await api("/api/agent"); renderAgent(); }
+  catch (e) { $("agInfo").innerHTML = `<span class=bad>${esc(e.message)}</span>`; }
+}
+setInterval(() => { if (tab === "experimental" && !document.hidden) loadAgent(); }, 30000);
+async function agPost(action, body, ok) {
+  try { const r = await api("/api/agent/" + action, body); if (ok) toast(ok); await loadAgent(); return r; }
+  catch (e) { toast(e.message, true); }
+}
+const agPool = a => { const p = (S.pools || []).find(x => (x.pool || "").toLowerCase() === (a || "").toLowerCase()); return p ? p.name : (a || "").slice(0, 10) + "…"; };
+const agTime = t => t ? new Date(t * 1000).toLocaleString([], {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"}) : "–";
+const agState = s => `<span class="${({confirmed: "ok", queued: "ok", executing: "warn", awaiting_approval: "warn", rejected: "bad", failed: "bad",
+  partially_completed: "bad", superseded: "bad"})[s] || "mute"}">${esc((s || "").replace(/_/g, " "))}</span>`;
+const agArg = v => esc(JSON.stringify(v));
+function renderAgent() {
+  if (!AG) return;
+  const x = AG.settings || {}, a = x.agent || {}, b = AG.budget || {}, sc = (AG.sched || {}).state || {};
+  const em = AG.emergency;
+  $("agBanner").innerHTML = em ? `<p class="bad small" style="margin:0 0 8px"><b>Emergency exit</b> since ${agTime(em.since)}: ${esc(em.reason || "")}</p>` : "";
+  const hb = AG.heartbeat_age_s;
+  const xs = ["xs-agent", "xs-risk", "xs-caps", "xs-budget", "xs-last", "xs-next", "xs-open", "xs-keys"];
+  $("agStatus").innerHTML = [
+    ["Agent", `<b>${esc(a.mode || "off")}</b>${AG.review_running ? " <span class=warn>reviewing…</span>" : ""}`],
+    ["Risk controller", `${esc((x.risk || {}).mode || "off")}${hb != null ? ` · ran ${hb}s ago` : ""}`],
+    ["Engine caps", (x.caps || {}).enabled ? "on" : "off"],
+    ["API budget", `$${fmt(Math.max(0, (b.allowance || 0) - (b.spent || 0)), 2)} left of $${fmt(b.allowance || 0, 2)} · ${b.calls || 0} calls this month`],
+    ["Last review", sc.last_outcome ? `${agTime(sc.last_outcome.ts)} · ${esc(sc.last_outcome.kind)} → ${esc(sc.last_outcome.outcome || "")}` : "none yet"],
+    ["Next", `daily after ${a.daily_utc_hour ?? 16}:00 UTC · routine every ${a.routine_h ?? 4} h · ${((AG.sched || {}).pending || []).length} trigger(s) queued`],
+    ["Open plans", AG.open_plans ?? 0],
+    ["API key / Telegram", `${AG.has_api_key ? "<span class=ok>key set</span>" : "<span class=mute>no key</span>"} · ${AG.telegram.linked ? `<span class=ok>linked${AG.telegram.user ? " @" + esc(AG.telegram.user) : ""}</span>` : AG.has_bot_token ? "bot set, not linked" : "<span class=mute>off</span>"}`],
+  ].map(([k, v], i) => `<span class=mute data-help="${xs[i]}">${k}</span><span data-help="${xs[i]}">${v}</span>`).join("");
+  $("agInfo").textContent = "updated " + new Date().toLocaleTimeString();
+  $("agPlans").innerHTML = `<tr><th>Plan</th><th>State</th><th>Summary</th><th>Changes</th><th>Why / checks</th><th></th></tr>` +
+    ((AG.plans || []).length ? AG.plans.map(p => {
+      const ch = (p.changes || []).map(c => `${esc(c.type)} <b>${esc(agPool(c.pool))}</b>${c.target_usd != null ? " → $" + fmt(c.target_usd, 0) : c.start_usd != null ? " $" + fmt(c.start_usd, 0) : ""}`).join("<br>");
+      const why = p.state === "rejected" ? (p.failures || []).map(esc).join("<br>") : (p.approval_reasons || []).map(esc).join("<br>");
+      const act = p.state === "awaiting_approval"
+        ? `<button class="sm" data-help="xb-approve" onclick="agDecide(${agArg(p.plan_id)}, ${agArg(p.plan_hash)}, true)">Approve</button> <button class="sec sm" data-help="xb-reject" onclick="agDecide(${agArg(p.plan_id)}, ${agArg(p.plan_hash)}, false)">Reject</button>`
+        : p.state === "queued" ? `<button class="sec sm" data-help="xb-cancel" onclick="agPost('cancel', {plan_id: ${agArg(p.plan_id)}}, 'Plan cancelled.')">Cancel</button>` : "";
+      const steps = (p.steps || []).length ? `<br><span class="mute small">steps ${p.steps.filter(s => s.state === "done").length}/${p.steps.length}</span>` : "";
+      return `<tr><td class="mono small">${esc(p.plan_id)}<br><span class=mute>${agTime(p.created)}</span></td><td>${agState(p.state)}${steps}</td>
+        <td class=small>${esc(p.summary || "")}</td><td class=small>${ch}</td><td class="small">${why}</td><td style="white-space:nowrap">${act}</td></tr>`;
+    }).join("") : `<tr><td class=mute colspan=6>No plans yet.</td></tr>`);
+  const r = AG.risk || {}, found = r.found || [], locks = ((AG.locks || {}).locks || []).filter(l => !l.lifted);
+  $("agSafety").innerHTML = `<p class="small" style="margin:0 0 6px">${r.ts ? `Last check ${agTime(r.ts)} (${esc(r.mode || "")}, ${r.ms} ms): ` + (found.length ? `<b class=warn>${found.length} finding(s)</b>` : "<span class=ok>nothing found</span>")
+      : "The risk controller has not run (Risk controller: off)."}</p>` +
+    (found.length ? `<table><tr><th>Pool</th><th>Condition</th><th>Detail</th></tr>${found.map(f => `<tr><td>${esc(agPool(f.pool))}</td><td class=${f.severity === "severe" ? "bad" : "warn"}>${esc(f.condition)}</td><td class=small>${esc(f.detail)}</td></tr>`).join("")}</table>` : "") +
+    `<h3 class="small" style="margin:10px 0 4px">Locks</h3>` + (locks.length ? `<table><tr><th>Where</th><th>Reason</th><th>Cleared</th><th></th></tr>${locks.map(l => `<tr><td>${l.pool ? esc(agPool(l.pool)) : "chain " + l.chain_id}</td>
+      <td class=small>${esc(l.reason)}</td><td class=small>${l.cleared_at ? agTime(l.cleared_at) : "<span class=warn>not yet</span>"}</td>
+      <td>${l.cleared_at ? `<button class="sec sm" data-help="xb-lift" onclick="agPost('lock_confirm', {id: ${agArg(l.id)}}, 'Lock lifted.')">Lift</button>` : ""}</td></tr>`).join("")}</table>` : `<p class="mute small" style="margin:0">No locks.</p>`);
+  const perf = Object.entries(AG.performance || {});
+  const w = v => v && v.return != null ? `${pct(v.return)} <span class=mute>(${v.vs_hold != null ? (v.vs_hold >= 0 ? "+" : "") + pct(v.vs_hold) : "–"})</span>` : "–";
+  $("agPerf").innerHTML = `<tr><th>Pool</th><th>Capital</th><th>24 h</th><th>7 d</th><th>30 d</th></tr>` +
+    (perf.length ? perf.map(([k, v]) => `<tr><td><b>${esc(v.name || agPool(k))}</b></td><td class=mono>${v.capital_usd != null ? usd(v.capital_usd) : "–"}</td>
+      <td class=mono>${w(v.h24)}</td><td class=mono>${w(v.d7)}</td><td class=mono>${w(v.d30)}</td></tr>`).join("") : `<tr><td class=mute>No samples yet.</td></tr>`) +
+    `<tr><td colspan=5 class="mute small">Return net of deposits and withdrawals; in brackets, against holding the start tokens.</td></tr>`;
+  $("agReviews").innerHTML = `<tr><th>When</th><th>Kind</th><th>Outcome</th><th>Detail</th><th>Cost</th><th>Tools</th></tr>` +
+    ((AG.reviews || []).length ? AG.reviews.slice().reverse().map(v => `<tr><td class=small>${agTime(v.ts)}</td><td>${esc(v.kind)} <span class="mute small">${esc(v.effort || "")}</span></td>
+      <td>${esc((v.outcome || "").replace(/_/g, " "))}</td><td class=small>${esc(typeof v.detail === "string" ? v.detail : JSON.stringify(v.detail || ""))}</td>
+      <td class=mono>$${fmt(v.cost_usd || 0, 3)}</td><td class=mono>${v.tool_calls || 0}</td></tr>`).join("") : `<tr><td class=mute colspan=6>No reviews yet.</td></tr>`);
+  const ft = AG.forward_test, rep = AG.report;
+  $("agForward").innerHTML = !ft ? `<p class="mute small" style="margin:0">Not started. Starting it freezes each pool's strategy and capital; the report then compares what the agent does with the frozen strategy, the ladder and holding.</p>`
+    : `<p class="small" style="margin:0 0 6px">Since ${agTime(ft.ts)} · ${(ft.pools || []).length} pool(s) · hash <span class=mono>${esc((ft.hash || "").slice(0, 12))}</span></p>` +
+      (rep && rep.pools ? `<table><tr><th>Pool</th><th>Actual</th><th>Frozen</th><th>Ladder</th><th>Hold</th><th>Edge</th></tr>${rep.pools.map(p => `<tr><td>${esc(p.name || agPool(p.pool))}</td>
+        <td class=mono>${pct(p.actual)}</td><td class=mono>${pct(p.static)}</td><td class=mono>${pct(p.ladder)}</td><td class=mono>${pct(p.hold)}</td><td class=mono>${pct(p.edge_vs_static)}</td></tr>`).join("")}</table>
+        <p class="small" style="margin:6px 0 0">API spend $${fmt(rep.api_usd || 0, 2)} · ${fmt(rep.days || 0, 1)} days · verdict <b>${esc(rep.verdict || "")}</b> · built ${agTime(rep.built)}</p>`
+        : `<p class="mute small" style="margin:0">No report yet (rebuilt daily).</p>`);
+  const rows = [...(AG.alerts || []).map(a => ({ts: a.ts, k: a.severity, t: a.title + ": " + a.body})),
+                ...(AG.journal || []).map(j => ({ts: j.ts, k: "journal", t: j.kind + " " + JSON.stringify(j.data).slice(0, 160)}))].sort((a, b) => b.ts - a.ts).slice(0, 60);
+  $("agAlerts").innerHTML = rows.length ? rows.map(r => `<tr><td class="small mute" style="white-space:nowrap">${agTime(r.ts)}</td><td class="small ${r.k === "severe" ? "bad" : r.k === "normal" ? "warn" : "mute"}">${esc(r.k)}</td><td class=small>${esc(r.t)}</td></tr>`).join("")
+    : `<tr><td class=mute>Nothing yet.</td></tr>`;
+  $("agKeyInfo").textContent = (AG.has_api_key ? "An API key is stored (encrypted for your Windows account); it is sent only to api.anthropic.com. " : "No API key: the agent cannot run reviews. ") +
+    (AG.telegram.linked ? "Telegram is linked: alerts and approvals go to that chat." : "");
+  if (!$("agSetDlg").open) renderAgentSettings();
+}
+const AGSET = [
+  ["agent.mode", "Agent", "sel:off,advise,auto"], ["risk.mode", "Risk controller", "sel:off,monitor,act"], ["caps.enabled", "Engine caps", "checkbox"],
+  ["llens", "Liquidity Lens", "sel:placeholder,off"], ["agent.model", "Model", "text"], ["agent.budget_usd_month", "API budget ($ / month)", "number"],
+  ["agent.reserve_pct", "Kept for daily and severe reviews (%)", "number"], ["agent.daily_utc_hour", "Daily review (UTC hour)", "number"],
+  ["agent.routine_h", "Routine review every (h)", "number"], ["agent.web_search", "Web search", "checkbox"], ["agent.searches_per_review", "Searches per review", "number"],
+  ["agent.max_tool_calls", "Tool calls per review", "number"], ["agent.review_minutes", "Minutes per review", "number"],
+  ["risk.stale_min", "Stale data after (min)", "number"], ["risk.disagree_bp_stable", "Price disagreement, stables (bp)", "number"],
+  ["risk.disagree_bp_eth", "Price disagreement, ETH pairs (bp)", "number"], ["risk.disagree_bp_other", "Price disagreement, others (bp)", "number"],
+  ["risk.peg_pct", "Depeg at (%)", "number"], ["risk.loss_24h_pct", "Loss vs hold, 24 h (%)", "number"], ["risk.loss_7d_pct", "Loss vs hold, 7 d (%)", "number"],
+  ["risk.heartbeat_s", "Write gate heartbeat (s)", "number"], ["risk.lock_hours", "Lock lifts after (h, 0 = only by you)", "number"],
+  ["risk.stuck_tx_s", "Stuck transaction after (s)", "number"], ["risk.emergency_gwei", "Max fee replacing a stuck tx (gwei)", "number"],
+  ["caps.turnover_pct_day", "Cap: turnover a day (%)", "number"], ["caps.cost_pct_7d", "Cap: execution cost, 7 d (%)", "number"],
+  ["limits.eth_pct", "Limit: ETH (%)", "number"], ["limits.btc_pct", "Limit: BTC (%)", "number"], ["limits.other_pct", "Limit: other tokens (%)", "number"],
+  ["limits.issuer_pct", "Limit: one issuer (%)", "number"], ["limits.lst_pct", "Limit: LSTs (%)", "number"], ["limits.pool_pct", "Limit: one pool (%)", "number"],
+  ["limits.chain_pct", "Limit: one chain (%)", "number"], ["limits.exit_capacity_pct", "Exit capacity needed (%)", "number"],
+  ["limits.move_pct_day", "Capital moved a day (%)", "number"], ["limits.new_pool_pct", "New pool start (%)", "number"],
+  ["limits.new_pool_days", "New pool: history needed (days)", "number"], ["limits.actions_per_pool_day", "Plans per pool a day", "number"],
+  ["limits.no_reversal_h", "No reversal within (h)", "number"], ["execution.max_cost_bp", "Plan step: max cost (bp)", "number"],
+  ["execution.max_emergency_bp", "Emergency exit: max cost (bp)", "number"], ["execution.quote_age_s", "Quote age (s)", "number"],
+  ["execution.plan_age_h", "Plan expires after (h)", "number"], ["execution.price_move_pct", "Price move voids a plan (%)", "number"],
+];
+function renderAgentSettings() {
+  const x = (AG && AG.settings) || {};
+  $("agSettings").innerHTML = AGSET.map(([k, l, t]) => {
+    const v = getp(x, k);
+    if (t === "checkbox") return `<div data-help="set-experimental.${k}"><label class="sw" style="margin-top:22px"><input type=checkbox data-ak="${k}" ${v ? "checked" : ""}><span class="t"></span>${l}</label></div>`;
+    if (t.startsWith("sel:")) return `<div data-help="set-experimental.${k}"><label class=f>${l}</label><select data-ak="${k}">${t.slice(4).split(",").map(o => `<option ${o === v ? "selected" : ""}>${o}</option>`).join("")}</select></div>`;
+    return `<div data-help="set-experimental.${k}"><label class=f>${l}</label><input data-ak="${k}" type=${t} step=any value="${esc(v ?? "")}"></div>`;
+  }).join("");
+}
+function agSettingsOpen() { renderAgentSettings(); $("agSetDlg").showModal(); }
+async function agSaveSettings() {
+  const out = {};
+  document.querySelectorAll("#agSettings [data-ak]").forEach(el => {
+    const k = el.dataset.ak.split("."), v = el.type === "checkbox" ? el.checked : el.type === "number" ? (el.value === "" ? null : +el.value) : el.value;
+    if (v === null) return;
+    let o = out; k.slice(0, -1).forEach(p => o = o[p] = o[p] || {}); o[k[k.length - 1]] = v;
+  });
+  if (out.agent && out.agent.mode === "auto" && ((AG.settings || {}).agent || {}).mode !== "auto" &&
+      !confirm("Auto mode: plans that pass the policy gate run without your approval (within the limits). Turn it on?")) return;
+  try { await api("/api/settings", {experimental: out}); toast("Agent settings saved."); $("agSetDlg").close(); await refresh(); await loadAgent(); }
+  catch (e) { toast(e.message, true); }
+}
+async function agDecide(id, hash, approve) {
+  if (approve && !confirm(`Approve plan ${id}? Its steps start within a minute, within the execution limits.`)) return;
+  await agPost("decide", {plan_id: id, plan_hash: hash, approve}, approve ? "Plan approved: queued." : "Plan rejected.");
+}
+async function agReview(kind) { await agPost("review", {kind}, "A review starts within a minute."); }
+async function agVerify() {
+  try { const r = await api("/api/agent/journal/verify"); r.ok ? toast(`Journal intact: ${r.records} records.`) : toast("Journal broken: " + r.error, true); }
+  catch (e) { toast(e.message, true); }
+}
+async function agSaveKey(remove) {
+  const key = remove ? "" : $("agKey").value.trim();
+  if (!remove && !key) { toast("Paste the key first.", true); return; }
+  if (await agPost("key", {key}, remove ? "API key removed." : "API key checked and saved.")) $("agKey").value = "";
+}
+async function agTestKey() {
+  try { const r = await api("/api/agent/key_test", {}); toast(`Key works: ${(r.models || []).length} models.`); } catch (e) { toast(e.message, true); }
+}
+async function agSaveBot() {
+  const token = $("agBot").value.trim();
+  const r = await agPost("telegram_token", {token}, token ? "Bot token checked and saved." : "Bot token removed.");
+  if (r) { $("agBot").value = ""; if (r.bot) toast(`Bot @${r.bot} saved. Now press Link a chat.`); }
+}
+async function agLink() {
+  const r = await agPost("telegram_link", {});
+  if (r) alert(`Send this code to your bot in a private chat within 10 minutes:\n\n${r.code}\n\nOnly that chat and user are listened to afterwards.`);
+}
+async function agFreeze() {
+  if (!confirm("Start the forward test: freeze each enabled pool's strategy and capital as the baseline? Restarting it later resets the report.")) return;
+  await agPost("freeze", {}, "Forward test started.");
+}
 // ---------- settings ----------
 const SETTINGS = [
   ["interval_s", "Cycle interval (s)", "number"], ["idle_redeploy_pct", "Redeploy idle above (% of capital)", "number"],
@@ -1032,6 +1289,7 @@ const SETTINGS = [
   ["wallet", "Managed wallet", "text"], ["ui_port", "Dashboard port (127.0.0.1)", "number"],
   ["parking.enabled", "Park waiting tokens in pegged pools", "checkbox"], ["parking.min_usd", "Min value to park ($)", "number"],
   ["parking.range_pct", "Parking range (± % of the price)", "number"],
+  ["experimental.enabled", "Experimental features", "checkbox"],
 ];
 const getp = (o, k) => k.split(".").reduce((a, b) => a?.[b], o);
 function renderRpc() {
@@ -1074,18 +1332,23 @@ async function resetRpc(id) {
 function renderSettings() {
   renderRpc();
   const box = $("settings");
-  if (!box.contains(document.activeElement)) box.innerHTML = SETTINGS.map(([k, l, t]) => t === "solidmode"
+  // the Experimental switch is offered only where it is already on, until the Liquidity Lens data is real
+  // (llens.rs: placeholder data); elsewhere it is left out, and saving leaves the setting as it is
+  const shown = SETTINGS.filter(([k]) => k !== "experimental.enabled" || getp(S.settings, k));
+  if (!box.contains(document.activeElement)) box.innerHTML = shown.map(([k, l, t]) => t === "solidmode"
     ? `<div><label class=f>${l}</label><select data-k="${k}">${$("solidMode").innerHTML.replace(/ selected(="")?/g, "")
         .replace(`value="${solidMode(S.settings)}"`, `value="${solidMode(S.settings)}" selected`)}</select></div>`
     : t === "checkbox"
     ? `<div><label class="sw" style="margin-top:22px"><input type=checkbox data-k="${k}" ${getp(S.settings, k) ? "checked" : ""}><span class="t"></span>${l}</label></div>`
-    : `<div ${k === "wallet" ? 'style="grid-column:1/-1"' : ""}><label class=f>${l}</label><input data-k="${k}" type=${t} step=any value="${esc(getp(S.settings, k) ?? "")}"></div>`).join("");
+    : `<div ${k === "wallet" ? 'style="grid-column:1/-1"' : ""}><label class=f>${l}</label><input data-k="${k}" ${k === "wallet" ? `class="privin" spellcheck=false title="click to show" data-real="${esc(getp(S.settings, k) ?? "")}"` : ""} type=${t} step=any value="${esc(k === "wallet" ? privFake(getp(S.settings, k)) : getp(S.settings, k) ?? "")}"></div>`).join("");
   renderFunding();
   if (!$("parkCard") || !$("parkCard").contains(document.activeElement)) renderParking();
   const sg = S.signer || {};
-  $("keyStatus").innerHTML = sg.error ? `<span class=bad>${esc(sg.error)}</span>` : sg.stored ? `Key set for <b class=mono>${esc(sg.address)}</b>` +
-    (sg.address && sg.address.toLowerCase() !== S.settings.wallet.toLowerCase() ? ` <span class=bad>(≠ managed wallet ${esc(S.settings.wallet)})</span>` : " <span class=ok>(matches the managed wallet)</span>")
+  $("keyStatus").innerHTML = sg.error ? `<span class=bad>${esc(sg.error)}</span>` : sg.stored ? `Key set for <b class=mono>${privAddr(sg.address)}</b>` +
+    (sg.address && sg.address.toLowerCase() !== S.settings.wallet.toLowerCase() ? ` <span class=bad>(≠ managed wallet ${privAddr(S.settings.wallet)})</span>` : " <span class=ok>(matches the managed wallet)</span>")
     : "No key set: the worker runs as a dry run.";
+  // the key field shows only when there is no key, or on Update key; a stored key offers Update and Remove
+  keyRows();
   const where = {"Windows DPAPI": "Encrypted for your Windows account (DPAPI, secrets/private_key.dpapi)",
                  "macOS Keychain": "Kept in your macOS login Keychain"}[sg.storage];
   $("keyStore").textContent = where || "Stored as a plain file (secrets/private_key, mode 600)";
@@ -1282,7 +1545,8 @@ async function saveSettings() {
   for (const el of $("settings").querySelectorAll("[data-k]")) {
     if (el.dataset.k === "solid_mode") { const m = solidModeBody(el.value); for (const k in m) out[k] = {...(out[k] || {}), ...m[k]}; continue; }
     const [a, b] = el.dataset.k.split(".");
-    const v = el.type === "checkbox" ? el.checked : el.type === "number" ? parseFloat(el.value) : el.value.trim();
+    const raw = el.classList.contains("privin") && document.activeElement !== el ? el.dataset.real : el.value;
+    const v = el.type === "checkbox" ? el.checked : el.type === "number" ? parseFloat(raw) : String(raw ?? "").trim();
     if (b) (out[a] = out[a] || {})[b] = v; else out[a] = v;
   }
   try {
@@ -1357,13 +1621,51 @@ async function toggleLive() {
   try { await api("/api/settings", {execute: on}); await api("/api/control", {action: "run_now"});
     toast(on ? "Live trading on: a cycle is starting now." : "Dry run: a cycle is starting now."); refresh(); } catch (e) { toast(e.message, true); }
 }
+let KEY_EDIT = false;
+function keyRows() {
+  const st = !!(S && S.signer && S.signer.stored);
+  $("pkRow").hidden = st && !KEY_EDIT; $("pkCancel").hidden = !st; $("keyUpd").hidden = !st || KEY_EDIT; $("keyDel").hidden = !st;
+}
+function keyEdit(on) { KEY_EDIT = on; $("pk").value = ""; keyRows(); if (on) $("pk").focus(); }
+// The owner's address, shown as a random address of the same form (blurred) until clicked; a click shows
+// the real one and keeps it shown across re-renders. Each address keeps its stand-in for the session.
+const PRIV_SHOWN = new Set(), PRIV_FAKE = new Map();
+function privFake(a) {
+  if (!a) return "";
+  const k = a.toLowerCase();
+  if (!PRIV_FAKE.has(k)) {
+    const hex = "0123456789abcdef", mixed = a !== k && a.slice(2) !== a.slice(2).toUpperCase(), r = new Uint8Array(40);
+    crypto.getRandomValues(r);
+    const body = [...r].map(b => { const c = hex[b & 15]; return mixed && c > "9" && b & 16 ? c.toUpperCase() : c; }).join("").slice(0, Math.max(0, a.length - 2));
+    PRIV_FAKE.set(k, a.slice(0, 2) + body);
+  }
+  return PRIV_FAKE.get(k);
+}
+window.privFake = privFake;
+// the wallet field: the stand-in while it is not being edited, the real address while it is
+document.addEventListener("focusin", ev => { const el = ev.target; if (el.classList && el.classList.contains("privin")) el.value = el.dataset.real || ""; });
+document.addEventListener("focusout", ev => { const el = ev.target; if (el.classList && el.classList.contains("privin")) { el.dataset.real = el.value.trim(); el.value = privFake(el.dataset.real); } });
+function privAddr(a) {
+  if (!a) return "";
+  const shown = PRIV_SHOWN.has(a.toLowerCase());
+  return `<span class="priv mono${shown ? " shown" : ""}" data-priv="${esc(a)}" title="${shown ? "click to hide" : "click to show"}">${esc(shown ? a : privFake(a))}</span>`;
+}
+window.privAddr = privAddr;
+document.addEventListener("click", ev => {
+  const el = ev.target.closest && ev.target.closest(".priv"); if (!el) return;
+  const a = el.dataset.priv, k = a.toLowerCase(), on = !PRIV_SHOWN.has(k);
+  on ? PRIV_SHOWN.add(k) : PRIV_SHOWN.delete(k);
+  document.querySelectorAll(".priv").forEach(x => { if (x.dataset.priv.toLowerCase() === k) {
+    x.classList.toggle("shown", on); x.textContent = on ? x.dataset.priv : privFake(x.dataset.priv); x.title = on ? "click to hide" : "click to show"; } });
+});
 async function setKey() {
   const v = $("pk").value.trim(); if (!v) return;
-  try { const r = await api("/api/key", {private_key: v}); $("pk").value = "";
-    toast(`Key saved for ${r.address}` + (r.wallet_changed ? " (managed wallet switched to it)" : "")); refresh(); }
+  try { const r = await api("/api/key", {private_key: v}); $("pk").value = ""; KEY_EDIT = false;
+    toast("Key saved" + (r.wallet_changed ? " (managed wallet switched to it)" : "")); refresh(); }
   catch (e) { toast(e.message, true); }
 }
-async function delKey() { if (!confirm("Remove the stored private key? Live trading turns off.")) return; try { await api("/api/key/delete", {}); refresh(); } catch (e) { toast(e.message, true); } }
+async function delKey() { if (!confirm("Remove the stored private key? Live trading turns off.")) return;
+  try { await api("/api/key/delete", {}); KEY_EDIT = true; await refresh(); $("pk").focus(); } catch (e) { toast(e.message, true); } }
 try { const s = JSON.parse(localStorage.getItem("alm.sort") || "null"); if (s && s.key) SORT = s; } catch (e) {}
 // after every script (the Strategy lab adds its tab) has run
 document.addEventListener("DOMContentLoaded", () => { try { const t = localStorage.getItem("alm.tab"); if (t) show(t === "discover" ? "pools" : t); } catch (e) {} });
@@ -1371,5 +1673,6 @@ refresh(); setInterval(refresh, 10000);
 </script>
 <script src="/lab.js"></script>
 <script src="/help.js"></script>
+<script src="/wizard.js"></script>
 </body>
 </html>

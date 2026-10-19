@@ -39,7 +39,7 @@ mod store {
         CRYPT_INTEGER_BLOB { cbData: d.len() as u32, pbData: d.as_ptr() as *mut u8 }
     }
 
-    fn run(data: &[u8], protect: bool) -> Result<Vec<u8>, String> {
+    pub fn run(data: &[u8], protect: bool) -> Result<Vec<u8>, String> {
         let inp = blob(data);
         let ent = blob(ENTROPY);
         let mut out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
@@ -169,4 +169,35 @@ pub fn status() -> Value {
         Ok(None) => json!({"stored": false, "address": null, "storage": store::KIND}),
         Err(e) => json!({"stored": true, "address": null, "error": format!("stored key is invalid: {e}"), "storage": store::KIND}),
     }
+}
+
+/// Another secret (the Claude API key, the Telegram bot token), kept like the signer key: DPAPI on
+/// Windows in secrets/<name>.dpapi, elsewhere a 600 file secrets/<name>.
+pub fn save_secret(name: &str, value: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let enc = store::run(value.as_bytes(), true)?;
+        crate::paths::write_secret(&crate::paths::secrets().join(format!("{name}.dpapi")), &enc).map_err(|e| e.to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        crate::paths::write_secret(&crate::paths::secrets().join(name), value.as_bytes()).map_err(|e| e.to_string())
+    }
+}
+
+pub fn load_secret(name: &str) -> Option<String> {
+    #[cfg(windows)]
+    {
+        let b = std::fs::read(crate::paths::secrets().join(format!("{name}.dpapi"))).ok()?;
+        String::from_utf8(store::run(&b, false).ok()?).ok()
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::read_to_string(crate::paths::secrets().join(name)).ok().map(|s| s.trim().to_string())
+    }
+}
+
+pub fn delete_secret(name: &str) {
+    let _ = std::fs::remove_file(crate::paths::secrets().join(format!("{name}.dpapi")));
+    let _ = std::fs::remove_file(crate::paths::secrets().join(name));
 }

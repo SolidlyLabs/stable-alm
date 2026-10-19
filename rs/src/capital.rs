@@ -497,7 +497,9 @@ pub fn prepare(book: &mut Book, cid: u64, pools: &[&PoolConfig], acct: &Value, w
                     crate::warn!("capital", "withdrawal of ${} asked; the pools chosen have ${} between them", crate::engine::commas(usd), crate::engine::commas(given));
                 }
                 let rel: Vec<Value> = split.into_iter().filter(|x| x.1 >= 1.0).enumerate()
-                    .map(|(i, (p, u))| json!({"id": format!("{id}-{i}"), "ts": r["ts"], "kind": "release", "chain_id": cid, "pool": p, "usd": u, "to": to}))
+                    // a plan step or an emergency exit carries its target asset, its cost bound and its tag
+                    .map(|(i, (p, u))| json!({"id": format!("{id}-{i}"), "ts": r["ts"], "kind": "release", "chain_id": cid, "pool": p, "usd": u, "to": to,
+                                             "safe": r["safe"], "max_cost_bp": r["max_cost_bp"], "plan": r["plan"], "emergency": r["emergency"]}))
                     .collect();
                 crate::info!("capital", "withdrawal of ${} split over {} pools; each pool releases its part when it runs", crate::engine::commas(usd), rel.len());
                 replace(&id, rel);

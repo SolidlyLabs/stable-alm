@@ -215,11 +215,12 @@ impl Worker {
             }
             let own = book.pool(cid, &cfg.pool);
             let reserve = capital::reserve(&own, &before);
-            let usdc = chains::get(cid).usd.to_lowercase();
-            let mut rx = Executor::new(cfg.clone(), cid, wallet, s, execute, None)?;
+            // the asset it is sold to: the chain's USDC, or what an emergency exit or a plan chose
+            let usdc = r["safe"].as_str().filter(|a| crate::agent::is_addr(a)).map(|a| a.to_lowercase()).unwrap_or_else(|| chains::get(cid).usd.to_lowercase());
+            let mut rx = Executor::new(crate::agent::exec::bounded(cfg), cid, wallet, s, execute, None)?;
             rx.set_capital(0.0, reserve.clone());
             let others: Vec<String> = own.keys().cloned().collect();
-            let res = rx.release(usd, &usdc, &others);
+            let res = rx.release(usd, &usdc, &others, r["max_cost_bp"].as_f64());
             report.extend(rx.report.drain(..));
             let after = capital::balances(cid, uni, wallet)?;
             let mut mine = capital::after_run(&reserve, &after);
@@ -235,7 +236,8 @@ impl Worker {
             let moved_usd = moved as f64 * capital::px_raw(cid, &usdc).unwrap_or(0.0);
             report.push(format!("  withdrawal: ${} USDC moved to {dest} (asked ${}){}", engine::commas(moved_usd), engine::commas(usd),
                                 res.as_ref().err().map(|e| format!("; stopped early: {e}")).unwrap_or_default()));
-            engine::log(json!({"chain_id": cid, "pool": cfg.pool, "kind": "capital", "what": "withdraw", "usd": moved_usd, "asked_usd": usd, "to": to}));
+            engine::log(json!({"chain_id": cid, "pool": cfg.pool, "kind": "capital", "what": "withdraw", "usd": moved_usd, "asked_usd": usd, "to": to,
+                               "asset": usdc, "plan": r["plan"], "emergency": r["emergency"]}));
             capital::remove(&id);
             capital::save(execute, book);
             before = after;
@@ -264,7 +266,7 @@ impl Worker {
             let reserve = capital::reserve(&own, &before);
             let parts = capital::parts(execute, cid, cfg, &acct, &own);
             budget = if cfg.enabled { parts.budget() } else { 0.0 };
-            let mut ex = Executor::new(cfg.clone(), cid, wallet, s, execute, None)?;
+            let mut ex = Executor::new(crate::agent::exec::bounded(cfg), cid, wallet, s, execute, None)?;
             ex.set_capital(budget, reserve.clone());
             ex.report.extend(released);
             let num = cfg.numeraire;
@@ -472,6 +474,18 @@ impl Worker {
         snap["mode"] = json!(mode);
         extra_value(&by_chain, &wallet, &mut snap);
         self.publish_capital(&by_chain, &wallet, &snap, execute);
+        // each pool's capital (address → USD), for per-pool performance (agent::perf)
+        let mut pc = Map::new();
+        if let Some(chs) = self.status.lock().unwrap()["capital"].as_object() {
+            for ch in chs.values() {
+                for p in ch["pools"].as_object().into_iter().flat_map(|m| m.values()) {
+                    if let (Some(a), Some(u)) = (p["pool"].as_str(), p["capital_usd"].as_f64()) {
+                        pc.insert(a.to_lowercase(), json!(u));
+                    }
+                }
+            }
+        }
+        snap["pool_capital"] = Value::Object(pc);
         let line = {
             let mut o = Map::new();
             o.insert("ts".into(), json!(engine::now()));

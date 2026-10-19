@@ -30,13 +30,18 @@ pub fn defaults() -> Value {
         // parking.rs: tokens a strategy waits in earn in a whitelisted pegged pool meanwhile
         // (pools: [{chain_id, token, pool}]); each strategy opts in with "park": true
         "parking": {"enabled": false, "min_usd": 50.0, "range_pct": 0.5, "pools": []},
+        // experimental.rs: the agent plan's groundwork, shown on the Experimental tab and used by
+        // nothing that trades; llens: "placeholder" (generated data) or "off"
+        "experimental": crate::agent::defaults(),
+        // the first-start wizard was finished (or skipped); it opens while this is false and no key is stored
+        "onboarded": false,
     })
 }
 
 pub fn pool_defaults() -> Value {
     json!({
         "strategy": {"type": "ladder", "lookback": 86400, "span": 3, "every": 72, "turnover": 0.4, "guard": 15},
-        "slippage_bps": 2.0, "max_swap_cost_bps": 3.0, "max_spot_dev_ticks": 3, "max_actions_per_day": 5,
+        "slippage_bps": 2.0, "max_swap_cost_bps": 3.0, "max_spot_dev_ticks": 10, "max_actions_per_day": 5,
         "min_swap_value": 5.0, "numeraire": 0, "max_ranges": 5, "allocation_pct": 0.0, "enabled": false,
     })
 }
@@ -233,6 +238,7 @@ pub fn validate_settings(s: &Value) -> Result<(), String> {
             }
         }
     }
+    crate::agent::validate(&s["experimental"])?;
     if let Some(w) = s["wallet"].as_str() {
         if !w.is_empty() && !(w.len() == 42 && w.starts_with("0x") && w[2..].chars().all(|c| c.is_ascii_hexdigit())) {
             return Err("wallet must be an address (0x + 40 hex digits)".into());

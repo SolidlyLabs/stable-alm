@@ -485,6 +485,48 @@ pub fn send(cid: u64, acct: &Account, to: &str, data: &str, gas: u64) -> Result<
     Err(err(format!("transaction (nonce {nonce}) not mined after 3 fee bumps: {hashes:?}; kept as pending, no new transactions on this chain until it resolves"), "not mined"))
 }
 
+/// The emergency path's replacement of a stuck transaction (plan section 4): a zero-value transfer
+/// to itself at the same nonce, with fees well above what the stuck copies paid (four times the
+/// current base fee and tip), so the nonce is freed and the emergency's own transactions can follow.
+/// Returns the replacement's hash; it is recorded with the pending copies, so whichever is mined
+/// resolves the nonce as before.
+pub fn replace_stuck(cid: u64, acct: &Account, max_fee_gwei: f64) -> Result<Option<String>, String> {
+    let from = acct.address.to_lowercase();
+    let Some(p) = pending_load().into_iter().find(|p| p["chain_id"] == cid && p["from"] == from.as_str()) else { return Ok(None) };
+    let nonce = p["nonce"].as_u64().unwrap_or(0);
+    let blk = rpc::call_ok(cid, "eth_getBlockByNumber", json!(["latest", false]))?;
+    let base = eth::parse_uint(blk["baseFeePerGas"].as_str().unwrap_or("0x0"));
+    let tip0 = eth::parse_uint(rpc::call_ok(cid, "eth_maxPriorityFeePerGas", json!([]))?.as_str().unwrap_or("0x0"));
+    let tip = tip0.max(BigUint::from(1_000_000u64)) * 4u8;
+    let mut max_fee = &base * 4u8 + &tip;
+    let cap = BigUint::from((max_fee_gwei * 1e9) as u128);
+    if max_fee > cap {
+        max_fee = cap;
+    }
+    if max_fee < tip {
+        return Err(format!("the emergency gas limit ({max_fee_gwei} gwei) is below the tip needed"));
+    }
+    let tx = eth::Tx1559 { chain_id: cid, nonce, max_priority_fee: tip, max_fee, gas: 21_000, to: from.clone(), data: vec![] };
+    let signed = tx.sign(acct);
+    let raw = format!("0x{}", eth::hex(&signed));
+    let local = format!("0x{}", eth::hex(&eth::keccak(&signed)));
+    pending_upsert(cid, &from, nonce, &local, &raw, &from);
+    crate::warn!("chain", "replacing stuck nonce {nonce} on chain {cid} with a self-transfer {local}");
+    crate::engine::log(json!({"chain_id": cid, "kind": "replace_stuck", "nonce": nonce, "hash": local}));
+    match rpc::send_call(cid, "eth_sendRawTransaction", json!([raw])) {
+        Ok(Ok(_)) => Ok(Some(local)),
+        Ok(Err(e)) => Err(format!("replacement rejected: {}", revert_reason(&e))),
+        Err(e) => Err(format!("replacement not broadcast: {e}")),
+    }
+}
+
+/// The oldest pending transaction's age on a chain (seconds), if any.
+pub fn pending_age(cid: u64, from: &str) -> Option<i64> {
+    let from = from.to_lowercase();
+    pending_load().into_iter().filter(|p| p["chain_id"] == cid && p["from"] == from.as_str())
+        .filter_map(|p| p["ts"].as_i64()).min().map(|t| crate::engine::now() as i64 - t)
+}
+
 pub fn int(v: i64) -> Tok {
     Tok::Int(BigInt::from(v))
 }

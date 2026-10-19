@@ -6,7 +6,9 @@
 //!   StableALM --once          one cycle in the foreground, then print the status JSON
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod agent;
 mod backtest;
+mod cache;
 mod capital;
 mod chain;
 mod chains;
@@ -15,10 +17,12 @@ mod data;
 mod desktop;
 mod elasticity;
 mod engine;
+mod experimental;
 mod external;
 mod custom;
 mod ledger;
 mod library;
+mod llens;
 mod eth;
 mod graph;
 mod optimize;
@@ -40,6 +44,8 @@ mod signer;
 mod solid_lp;
 mod store;
 mod tickmath;
+mod onboard;
+mod wallet;
 mod webui;
 mod worker;
 

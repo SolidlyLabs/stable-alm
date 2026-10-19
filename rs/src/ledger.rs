@@ -282,8 +282,12 @@ pub fn summary(wallet: &str, chains: &[u64]) -> Value {
                 PoolPx::load(cid, &a).map(|x| (a, x))
             })
             .collect();
+        // per pool: gas and swap cost, all time and over the last 24 h and 7 days (engine caps, accounting)
+        let now = crate::engine::now() as i64;
+        let mut by_pool: HashMap<String, [f64; 7]> = HashMap::new();
         for d in cache.values().filter(|d| d["chain_id"].as_u64() == Some(cid)) {
             txs += 1;
+            let (gas0, swap0) = (gas, swap_cost);
             gas += d["gas_wei"].as_f64().unwrap_or(0.0) / 1e18;
             let what = d["what"].as_str().unwrap_or("");
             let ts = d["ts"].as_i64();
@@ -317,7 +321,27 @@ pub fn summary(wallet: &str, chains: &[u64]) -> Value {
                     swap_cost += out_ - inn;
                 }
             }
+            if let Some(p) = d["pool"].as_str() {
+                let g_usd = (gas - gas0) * native_usd.unwrap_or(0.0);
+                let sc = swap_cost - swap0;
+                let age = now - d["ts"].as_i64().unwrap_or(0);
+                let e = by_pool.entry(p.to_lowercase()).or_default();
+                e[0] += g_usd;
+                e[1] += sc;
+                e[2] += 1.0;
+                if age <= 7 * 86_400 {
+                    e[3] += g_usd;
+                    e[4] += sc;
+                }
+                if age <= 86_400 {
+                    e[5] += g_usd;
+                    e[6] += sc;
+                }
+            }
         }
+        let by_pool_json: Map<String, Value> = by_pool.iter().map(|(p, e)| (p.clone(), json!({
+            "gas_usd": e[0], "swap_cost_usd": e[1], "txs": e[2], "gas_7d_usd": e[3], "swap_cost_7d_usd": e[4], "cost_7d_usd": e[3] + e[4],
+            "gas_24h_usd": e[5], "swap_cost_24h_usd": e[6], "cost_24h_usd": e[5] + e[6]}))).collect();
         let rw = crate::claim::claimable(cid, &wallet);
         let (claimable, pending) = (rw["usd"].as_f64().unwrap_or(0.0), rw["pending_usd"].as_f64().unwrap_or(0.0));
         let gas_usd = native_usd.map(|p| gas * p);
@@ -329,7 +353,7 @@ pub fn summary(wallet: &str, chains: &[u64]) -> Value {
             cid.to_string(),
             json!({"earned_usd": earned, "claimed_usd": claimed, "claimable_usd": claimable, "pending_usd": pending, "il_usd": il, "gas_native": gas,
                    "gas_symbol": ch.gas_symbol, "gas_usd": gas_usd, "swap_cost_usd": swap_cost, "profit_usd": profit,
-                   "txs": txs, "claims": claims, "swaps": swaps, "unpriced_swaps": unpriced}),
+                   "txs": txs, "claims": claims, "swaps": swaps, "unpriced_swaps": unpriced, "by_pool": by_pool_json}),
         );
     }
     let v = Value::Object(out);

@@ -84,6 +84,10 @@ pub fn log(level: Level, name: &str, msg: &str) {
     {
         let _g = LOCK.lock().unwrap();
         let _ = std::io::stdout().write_all(line.as_bytes());
+        // tests never write into the real logs (stdout only)
+        #[cfg(test)]
+        return;
+        #[allow(unreachable_code)]
         let dir = crate::paths::logs();
         let _ = std::fs::create_dir_all(&dir);
         let mut files = vec![dir.join("alm.log")];

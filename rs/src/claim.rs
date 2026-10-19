@@ -51,6 +51,41 @@ pub fn snapshot(cid: u64, wallet: &str) -> Result<Value, String> {
 }
 
 static CACHE: Mutex<Option<HashMap<(u64, String), (Instant, Value)>>> = Mutex::new(None);
+static REFRESHING: Mutex<Vec<(u64, String)>> = Mutex::new(Vec::new());
+
+/// `claimable` for the dashboard, which must never wait on the network: the cached figures of any
+/// age (or the last ones saved, marked loading), with one background refresh when they are older
+/// than 10 minutes. A miss read in the request took seconds, and minutes when the RPC rate-limits.
+pub fn claimable_cached(cid: u64, wallet: &str) -> Value {
+    let key = (cid, wallet.to_lowercase());
+    let hit = CACHE.lock().unwrap().get_or_insert_with(HashMap::new).get(&key).cloned();
+    if matches!(&hit, Some((t, _)) if t.elapsed() < Duration::from_secs(600)) {
+        return hit.unwrap().1;
+    }
+    {
+        let mut busy = REFRESHING.lock().unwrap();
+        if !busy.contains(&key) {
+            busy.push(key.clone());
+            let k = key.clone();
+            std::thread::spawn(move || {
+                claimable(k.0, &k.1);
+                REFRESHING.lock().unwrap().retain(|x| x != &k);
+            });
+        }
+    }
+    if let Some((_, v)) = hit {
+        return v;
+    }
+    let last_path = crate::paths::logs().join(format!("rewards_last_{cid}.json"));
+    match std::fs::read_to_string(&last_path).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()).filter(|v| v["wallet"].as_str() == Some(key.1.as_str())) {
+        Some(mut last) => {
+            last["loading"] = json!(true);
+            last["can_claim"] = json!(false);
+            last
+        }
+        None => json!({"claimable": [], "usd": 0.0, "pending_usd": 0.0, "can_claim": false, "loading": true}),
+    }
+}
 
 /// Unclaimed rewards in USD (cached 10 min; cleared after a claim): `claimable` is in the latest
 /// claim snapshot; `pending` accrued after it and becomes claimable with the next one (about daily).
@@ -147,6 +182,7 @@ fn sync_root(cid: u64, wallet: &str, snap: &Value, execute: bool) -> Result<Valu
         log(json!({"chain_id": cid, "kind": "dry_run", "what": "sync root", "to": rw, "data": data}));
         return Ok(json!({"status": "dry_run", "reason": "would sync the root (triggerRoot), then claim after the delay"}));
     }
+    crate::agent::gate::pre_sign(cid, None, "claim root sync")?;
     let acct = crate::signer::load_account()?;
     let res = chain::send(cid, &acct, rw, &data, gas).map_err(|e| e.message)?;
     crate::info!("claim", "claim: root synced in {}", res.hash);
@@ -261,6 +297,7 @@ fn run_inner(cid: u64, wallet: &str, execute: bool, every_days: f64, force: bool
         log(json!({"chain_id": cid, "kind": "dry_run", "what": "claim", "to": rw, "data": data}));
         return Ok(json!({"status": "dry_run", "rewards": rewards}));
     }
+    crate::agent::gate::pre_sign(cid, None, "claim")?;
     let acct = crate::signer::load_account()?;
     let res = match chain::send(cid, &acct, &rw, &data, gas) {
         Ok(r) => r,

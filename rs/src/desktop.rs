@@ -268,6 +268,7 @@ pub fn run() -> Result<(), String> {
     plat::init();
     let worker = Worker::new();
     let _port = crate::webui::serve(worker.clone(), crate::webui::wanted_port(), true)?;
+    crate::agent::start(worker.clone());
     let w2 = worker.clone();
     let thread = std::thread::Builder::new().name("worker".into()).spawn(move || w2.loop_forever()).map_err(|e| e.to_string())?;
 
@@ -411,6 +412,7 @@ pub fn headless() -> Result<(), String> {
     crate::paths::seed();
     let worker = Worker::new();
     let _port = crate::webui::serve(worker.clone(), crate::webui::wanted_port(), true)?;
+    crate::agent::start(worker.clone());
     let w2 = worker.clone();
     let th = std::thread::spawn(move || w2.loop_forever());
     while !QUIT.load(Ordering::SeqCst) {

@@ -244,7 +244,7 @@
   const RUNCOL = ["var(--acc)", "var(--c1)", "var(--c3)", "var(--c4)", "var(--c6)"];
   const L = {
     chain: null, pool: null, sym: ["", ""], d: [null, null], spacing: 1, pegged: true, num1: false,
-    days: 30, capital: 10000, costs: {swap_bps: 0.3, gas_usd: 0.02, fee_haircut: 0.82, emission_haircut: 0.5, stable_swap_bps: 1},
+    days: 30, capital: 10000, costs: {swap_bps: 0.3, gas_usd: 0.02, fee_haircut: 0.82, emission_haircut: 0.5, stable_swap_bps: 1, max_spot_dev_ticks: 10},
     lib: null, cur: null, dirty: false, compare: ["b:ladder"], hold: true, ov: {},
     res: null, tick: null, job: null, pending: false, step: "", err: "", other: false, sel: null,
   };
@@ -544,6 +544,8 @@
     // the numeraire as the backtest picks it (a pool's setting, else WETH against a non-stable)
     L.num1 = cfg ? cfg.numeraire === 1 : (["WETH", "ETH"].includes((L.sym[1] || "").toUpperCase()) && !["USDC", "USDT"].includes((L.sym[0] || "").toUpperCase()));
     L.capital = defaultCapital(cfg, m);
+    // the live spot check as the pool has it (Pools › ⚙), so the backtest blocks where the worker would
+    L.costs.max_spot_dev_ticks = cfg && cfg.max_spot_dev_ticks > 0 ? cfg.max_spot_dev_ticks : (L.pegged ? 10 : Math.max(10 * sp(), 100));
     if (cfg) {
       // the pool's own strategy opens first
       if (!L.cur || L.cur.fromPool !== L.pool) setCur({id: null, fromPool: L.pool, name: `${cfg.name}: current strategy`, description: "What this pool runs now.",
@@ -817,9 +819,9 @@
       ${live ? "" : `<div class="small" style="color:var(--warn);margin:4px 0 0 46px">⚠ Parking is switched off in Settings › Options: backtests count it, but the worker will not park until it is on.</div>`}</div>`;
   }
   function costsBox() {
-    return `<details class="grp" data-help="lab-costs"><summary class="mute small">Costs &amp; haircuts: swap ${fmt(L.costs.swap_bps, 2)} bp (USDC ${fmt(L.costs.stable_swap_bps ?? 1, 1)} bp) · gas $${fmt(L.costs.gas_usd, 3)} · fees ×${fmt(L.costs.fee_haircut, 2)} · emissions ×${fmt(L.costs.emission_haircut, 2)}</summary>
-      <div class="lf" style="margin-top:10px">${[["swap_bps", "Swap cost (bp)"], ["stable_swap_bps", "Swap to/from USDC (bp)"], ["gas_usd", "Gas per tx ($)"], ["fee_haircut", "Fees received (×)"], ["emission_haircut", "Emissions value (×)"]]
-        .map(([k, l]) => `<div><label class="f">${l}</label><input type="number" step="any" min="0" data-c="${k}" value="${L.costs[k]}"></div>`).join("")}</div></details>`;
+    return `<details class="grp" data-help="lab-costs"><summary class="mute small">Costs &amp; haircuts: swap ${fmt(L.costs.swap_bps, 2)} bp (USDC ${fmt(L.costs.stable_swap_bps ?? 1, 1)} bp) · gas $${fmt(L.costs.gas_usd, 3)} · fees ×${fmt(L.costs.fee_haircut, 2)} · emissions ×${fmt(L.costs.emission_haircut, 2)} · spot check ${L.costs.max_spot_dev_ticks > 0 ? fmt(L.costs.max_spot_dev_ticks, 0) + " ticks" : "off"}</summary>
+      <div class="lf" style="margin-top:10px">${[["swap_bps", "Swap cost (bp)"], ["stable_swap_bps", "Swap to/from USDC (bp)"], ["gas_usd", "Gas per tx ($)"], ["fee_haircut", "Fees received (×)"], ["emission_haircut", "Emissions value (×)"], ["max_spot_dev_ticks", "Spot check: max ticks from 1h median (0 = off)"]]
+        .map(([k, l]) => `<div><label class="f">${l}</label><input type="number" step="any" min="0" data-c="${k}" value="${L.costs[k] ?? 0}"></div>`).join("")}</div></details>`;
   }
   function onCost(el) { const v = parseFloat(el.value); if (v >= 0) { L.costs[el.dataset.c] = v; schedule(); } }
   function onRules(e) {
@@ -2341,7 +2343,7 @@
       `<div class="mute small" style="margin:-2px 0 8px">Amounts in USD${sym && !/^(USDC|USDT|USDC\.E|USDBC|DAI)$/i.test(sym) ? ` (counted in ${esc(sym)} at $${fmt(U, U > 100 ? 0 : 4)})` : ""}. Green is the best of the runs.</div>`;
     $("labMeta").innerHTML = `${new Date(res.from * 1000).toLocaleDateString()} – ${new Date(res.to * 1000).toLocaleDateString()}${res.span_days != null && res.span_days < res.days - 1 ? ` <span class="warn" title="the pool has no swaps before this: the period starts at its history">(all the pool's history: ${fmt(res.span_days, 0)} of ${res.days} days)</span>` : ""} · ${res.swaps.toLocaleString()} swaps · capital $${fmt(res.capital_usd ?? res.capital * U, 0)}${res.entry_cost > 0 ? ` (buying ${esc(sym)} with it cost $${fmt(res.entry_cost * U, 2)})` : ""}`;
     const short = res.span_days && res.span_days < res.days - 1;
-    $("labNotes").textContent = (short ? `The pool's history covers only ${fmt(res.span_days, 0)} of the ${res.days} days asked for; yearly rates use the days covered. ` : "") + res.notes.join(" ") + (res.runs.main.guard_bars ? ` The strategy held still (guard or hold) for ${fmt(res.runs.main.guard_bars * 5 / 60, 1)} hours.` : "")
+    $("labNotes").textContent = (short ? `The pool's history covers only ${fmt(res.span_days, 0)} of the ${res.days} days asked for; yearly rates use the days covered. ` : "") + res.notes.join(" ") + (res.runs.main.guard_bars ? ` The strategy held still (guard or hold) for ${fmt(res.runs.main.guard_bars * 5 / 60, 1)} hours.` : "") + (res.runs.main.spot_blocked_bars ? ` The spot check blocked ${fmt(res.runs.main.spot_blocked_bars, 0)} moves (price too far from its 1h median; the worker would have waited too).` : "")
       + elasticityNote(res.elasticity)
       + (res.runs.main.flow_capped > 0.005 * Math.max(res.runs.main.fees, 1e-9) ? ` This capital is large for the pool: it would draw more than twice the real flow, and the cap held back $${fmt(res.runs.main.flow_capped * (res.numeraire_usd || 1), 2)} of fees.` : "");
     chartEq(cols);

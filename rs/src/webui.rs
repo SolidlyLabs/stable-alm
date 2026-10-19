@@ -7,12 +7,13 @@ use crate::settings::{self, load_pools, load_settings, save_pools, save_settings
 use crate::worker::{pool_chain, Worker};
 use serde_json::{json, Value};
 use std::io::Read;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use tiny_http::{Header, Method, Request, Response, Server};
 
 const INDEX: &str = include_str!("../static/index.html");
 const HELP: &str = include_str!("../static/help.js");
 const LAB: &str = include_str!("../static/lab.js");
+const WIZARD: &str = include_str!("../static/wizard.js");
 const COOKIE: &str = "alm_t";
 
 pub fn ui_token() -> String {
@@ -206,6 +207,9 @@ fn handle(mut req: Request, w: &Arc<Worker>) {
         if path == "/help.js" {
             return send(req, 200, HELP.as_bytes().to_vec(), "application/javascript; charset=utf-8");
         }
+        if path == "/wizard.js" {
+            return send(req, 200, WIZARD.as_bytes().to_vec(), "application/javascript; charset=utf-8");
+        }
         if path == "/lab.js" {
             return send(req, 200, LAB.as_bytes().to_vec(), "application/javascript; charset=utf-8");
         }
@@ -218,7 +222,9 @@ fn handle(mut req: Request, w: &Arc<Worker>) {
         if let Some(rest) = path.strip_prefix("/api/logo/") {
             return send_logo(req, rest);
         }
+        let t0 = std::time::Instant::now();
         let (code, body) = get(&path, w);
+        slow(&path, t0);
         return send_json(req, code, body);
     }
     if *req.method() != Method::Post {
@@ -238,9 +244,21 @@ fn handle(mut req: Request, w: &Arc<Worker>) {
     let mut raw = String::new();
     let _ = req.as_reader().take(1 << 20).read_to_string(&mut raw);
     let body: Value = serde_json::from_str(if raw.is_empty() { "{}" } else { &raw }).unwrap_or(json!({}));
-    match post(&path, body, w) {
+    let t0 = std::time::Instant::now();
+    let res = post(&path, body, w);
+    slow(&path, t0);
+    match res {
         Ok(v) => send_json(req, 200, v),
         Err(e) => send_json(req, 400, json!({"error": if path == "/api/key" { "invalid private key".to_string() } else { e }})),
+    }
+}
+
+/// Requests that keep one of the 4 handler threads busy for long are logged by path (never the
+/// query), so a slow dashboard names its cause in alm.log.
+fn slow(path: &str, t0: std::time::Instant) {
+    let ms = t0.elapsed().as_millis();
+    if ms >= 2000 {
+        crate::warn!("ui", "{path} took {:.1} s", ms as f64 / 1000.0);
     }
 }
 
@@ -250,8 +268,25 @@ fn tail_text(p: &std::path::Path, n: usize) -> Vec<String> {
     lines[lines.len().saturating_sub(n)..].to_vec()
 }
 
+static SNAPS: Mutex<Option<((u64, std::time::SystemTime), Vec<Value>)>> = Mutex::new(None);
+
+/// The chart series, re-read only when snapshots.jsonl changes (once a cycle), not on every poll.
 fn snapshots() -> Vec<Value> {
     let p = crate::paths::logs().join("snapshots.jsonl");
+    let stamp = std::fs::metadata(&p).ok().map(|m| (m.len(), m.modified().unwrap_or(std::time::UNIX_EPOCH)));
+    if let (Some(st), Some((k, v))) = (stamp, SNAPS.lock().unwrap().as_ref()) {
+        if *k == st {
+            return v.clone();
+        }
+    }
+    let rows = snapshots_read(&p);
+    if let Some(st) = stamp {
+        *SNAPS.lock().unwrap() = Some((st, rows.clone()));
+    }
+    rows
+}
+
+fn snapshots_read(p: &std::path::Path) -> Vec<Value> {
     let s = std::fs::read_to_string(p).unwrap_or_default();
     let rows: Vec<Value> = s.lines().rev().take(20000).filter_map(|l| serde_json::from_str(l).ok()).collect::<Vec<_>>().into_iter().rev().collect();
     let step = (rows.len() / 600).max(1);
@@ -288,7 +323,7 @@ fn get(path: &str, w: &Arc<Worker>) -> (u16, Value) {
             chains.sort();
             chains.dedup();
             for cid in &chains {
-                let r = crate::claim::claimable(*cid, &wallet);
+                let r = crate::claim::claimable_cached(*cid, &wallet);
                 total += r["usd"].as_f64().unwrap_or(0.0);
                 rewards[cid.to_string()] = r;
             }
@@ -303,6 +338,23 @@ fn get(path: &str, w: &Arc<Worker>) -> (u16, Value) {
                          "ladder_defaults": settings::pool_defaults()["strategy"], "pool_defaults": settings::pool_defaults()}))
         }
         "/api/chains" => (200, json!({"chains": crate::chains::as_json()})),
+        "/api/onboard" => (200, crate::onboard::status()),
+        "/api/onboard/parking" => (200, crate::onboard::parking_suggestions()),
+        p if p.starts_with("/api/agent") => {
+            if !crate::experimental::enabled(&s) {
+                return (404, json!({"error": crate::experimental::OFF}));
+            }
+            match crate::agent::api_get(&p["/api/agent".len()..], w) {
+                Ok(v) => (200, v),
+                Err(e) => (400, json!({"error": e})),
+            }
+        }
+        "/api/experimental" => {
+            if !crate::experimental::enabled(&s) {
+                return (404, json!({"error": crate::experimental::OFF}));
+            }
+            (200, crate::experimental::overview(&s))
+        }
         p if p.starts_with("/api/market") => match crate::market_data::shortlist(&wallet, &configured()) {
             Ok(mut rows) => {
                 let conf = configured();
@@ -467,6 +519,7 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
                 body["funding_by_chain"] = Value::Object(merged.clone());
                 s["funding_by_chain"] = Value::Object(merged);
             }
+            let old_x = s["experimental"].clone();
             for (k, v) in body.as_object().cloned().unwrap_or_default() {
                 if s.get(&k).is_none() {
                     return Err(format!("unknown setting {k}"));
@@ -486,7 +539,12 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
             if s["execute"].as_bool().unwrap_or(false) && !crate::signer::configured() {
                 return Err("set a private key before turning live trading on".into());
             }
+            // the linked Telegram chat is set by linking only
+            for k in ["chat_id", "user_id", "user_name"] {
+                s["experimental"]["telegram"][k] = old_x["telegram"][k].clone();
+            }
             settings::validate_settings(&s)?;
+            crate::agent::settings_changed(&old_x, &s["experimental"]);
             // a new port is bound before the setting is saved: a port in use is refused, not saved
             let mut moved = None;
             if let Some(p) = body["ui_port"].as_u64() {
@@ -534,6 +592,13 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
             Ok(json!({"ok": true, "chains": crate::chains::as_json()}))
         }
         // /api/backtest/<id>/stop: end an optimization early (it keeps the best found so far)
+        p if p.starts_with("/api/onboard/") => crate::onboard::post(&p["/api/onboard/".len()..], &body),
+        p if p.starts_with("/api/agent/") => {
+            if !crate::agent::enabled() {
+                return Err(crate::experimental::OFF.into());
+            }
+            crate::agent::api_post(&p["/api/agent/".len()..], &body, w)
+        }
         p if p.starts_with("/api/backtest/") && p.ends_with("/stop") => {
             let id = p["/api/backtest/".len()..p.len() - "/stop".len()].parse::<u64>().map_err(|_| "use /api/backtest/<id>/stop")?;
             Ok(json!({"ok": crate::optimize::stop(id)}))
@@ -621,17 +686,7 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
             }
             Ok(json!({"ok": true}))
         }
-        "/api/key" => {
-            let address = crate::signer::save_key(body["private_key"].as_str().unwrap_or(""))?;
-            let mut s = load_settings();
-            let changed = !s["wallet"].as_str().unwrap_or("").eq_ignore_ascii_case(&address);
-            if changed {
-                s["wallet"] = json!(address.to_lowercase());
-                save_settings(&s).map_err(|e| e.to_string())?;
-            }
-            crate::info!("ui", "private key set for {address}");
-            Ok(json!({"ok": true, "address": address, "wallet_changed": changed}))
-        }
+        "/api/key" => crate::onboard::save_key(body["private_key"].as_str().unwrap_or("")),
         "/api/key/delete" => {
             crate::signer::forget();
             let mut s = load_settings();
@@ -642,5 +697,27 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
             Ok(json!({"ok": true}))
         }
         _ => Err("not found".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// How long each page request takes on a copy of a real app folder (never the live one):
+    /// ALM_HOME=<copy> cargo test -- --ignored page_timings --nocapture
+    #[test]
+    #[ignore]
+    fn page_timings() {
+        let home = std::env::var("ALM_HOME").expect("set ALM_HOME to a copy of the app folder");
+        assert!(!home.to_lowercase().replace('\\', "/").trim_end_matches('/').ends_with("appdata/local/stablealm"), "not on the live folder");
+        let w = Worker::new();
+        for round in 0..2 {
+            for p in ["/api/status", "/api/onboard", "/api/experimental", "/api/agent", "/api/chains", "/api/strategies", "/api/parking/names"] {
+                let t = std::time::Instant::now();
+                let (code, v) = get(p, &w);
+                println!("round {round} {p:<22} {code} {:>7} ms {:>8} bytes", t.elapsed().as_millis(), v.to_string().len());
+            }
+        }
     }
 }

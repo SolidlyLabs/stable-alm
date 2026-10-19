@@ -478,6 +478,9 @@ impl Executor {
             if let Some(why) = crate::paths::execution_blocked() {
                 return Err(chain::err(format!("not sent: {why}"), "paused"));
             }
+            if let Err(why) = crate::agent::gate::pre_sign(self.cid, Some(&self.cfg.pool), what) {
+                return Err(chain::err(format!("not sent: {why}"), "gate"));
+            }
             self.broadcasts += 1;
             let res = chain::send(self.cid, self.account.as_ref().unwrap(), to, data, gas)?;
             entry["kind"] = json!("sent");
@@ -514,6 +517,8 @@ impl Executor {
         if actions_today(self.cid, &self.cfg.pool) >= self.cfg.max_actions_per_day {
             problems.push("daily rebalance cap reached".into());
         }
+        // experimental features: safety locks, emergency exits, engine caps, the risk controller's heartbeat
+        problems.extend(crate::agent::gate::engine_problems(self.cid, &self.cfg.pool, self.budget_usd.unwrap_or(0.0), self.cfg.max_actions_per_day));
         Ok(problems)
     }
 
@@ -900,7 +905,9 @@ impl Executor {
                          burns.len() - partial, adds.len() - into, positions.len() - burns.len() - into, tol));
         let bj: Vec<Value> = burns.iter().map(|(a, b, c)| json!([a, b, c.to_string()])).collect();
         let aj: Vec<Value> = adds.iter().map(|(a, b, v)| json!([a, b, v])).collect();
-        log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "plan", "burns": bj, "adds": aj, "tolerance": tol}));
+        // the share of the pool's capital this move redeploys (the engine caps count it per day)
+        let turnover = if budget0 > 0.0 { adds.iter().map(|x| x.2).sum::<f64>() / budget0 } else { 0.0 };
+        log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "plan", "burns": bj, "adds": aj, "tolerance": tol, "turnover": turnover, "live": self.execute}));
         self.burn_all(&burns)?;
         if adds.is_empty() {
             self.say("  nothing to deposit; withdrawn tokens stay in the wallet");
@@ -1312,7 +1319,8 @@ impl Executor {
 
     /// A withdrawal (capital.rs): about `usd` of the pool's capital made USDC (`usdc`), from its idle
     /// tokens first and then from its positions, burned in proportion. The pool's USDC after it (raw).
-    pub fn release(&mut self, usd: f64, usdc: &str, others: &[String]) -> Res<i128> {
+    /// `max_cost_bps`: the step's own bound (a plan's or an emergency's), else the pool's setting (at least 10 bp).
+    pub fn release(&mut self, usd: f64, usdc: &str, others: &[String], max_cost_bps: Option<f64>) -> Res<i128> {
         let usdc = usdc.to_lowercase();
         let (um, uu) = (prices::meta(self.cid, &usdc)?, prices::usd(self.cid, &usdc)?);
         let val = |s: &Self, t: &str| -> Res<f64> {
@@ -1367,7 +1375,7 @@ impl Executor {
                 continue;
             }
             let fair = usd_in / uu * 10f64.powi(um.decimals as i32);
-            let mc = self.cfg.max_swap_cost_bps.max(10.0);
+            let mc = max_cost_bps.unwrap_or_else(|| self.cfg.max_swap_cost_bps.max(10.0));
             let (a, c) = (t.clone(), usdc.clone());
             match self.retry("withdrawal swap", |s| s.swap(&a, &c, amt, fair, mc, "withdrawal swap to USDC")) {
                 Ok(_) => left -= usd_in,

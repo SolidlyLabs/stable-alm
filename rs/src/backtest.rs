@@ -49,6 +49,10 @@ pub struct Costs {
     /// an exit to the dollar stable and its buy-back: a swap through the aggregator between the
     /// pair and USDC, dearer than a swap inside the pool (route fees and impact)
     pub stable_swap_bps: f64,
+    /// the live engine's spot check (engine.rs `checks`): a move or deposit is blocked while the
+    /// price is more than this many ticks from the median of the last hour's swaps (exits are
+    /// not); None: not modelled
+    pub max_spot_dev_ticks: Option<f64>,
 }
 
 impl Costs {
@@ -60,11 +64,12 @@ impl Costs {
             fee_haircut: n("fee_haircut", 0.82).min(1.0),
             emission_haircut: n("emission_haircut", 0.5).min(1.0),
             stable_swap_bps: n("stable_swap_bps", 1.0).min(500.0),
+            max_spot_dev_ticks: v["max_spot_dev_ticks"].as_f64().filter(|x| x.is_finite() && *x > 0.0),
         }
     }
     fn json(&self) -> Value {
         json!({"swap_bps": self.swap_bps, "gas_usd": self.gas_usd, "fee_haircut": self.fee_haircut, "emission_haircut": self.emission_haircut,
-               "stable_swap_bps": self.stable_swap_bps})
+               "stable_swap_bps": self.stable_swap_bps, "max_spot_dev_ticks": self.max_spot_dev_ticks})
     }
 }
 
@@ -529,6 +534,12 @@ pub fn run(c: &Ctx, strat: &Strategy, cost: &Costs, capital: f64, b0: usize, b1:
         Strategy::Ladder { p, .. } => label = p.label(),
     }
     let mut guard_frozen = 0usize;
+    // the live spot check, asked only when the strategy wants to move (as the engine does)
+    let mut spot_blocked = 0usize;
+    let spot_ok = |i: usize| -> bool {
+        let Some(lim) = cost.max_spot_dev_ticks else { return true };
+        spot_dev(m, i) <= lim
+    };
     let mut watch_errors: Vec<String> = vec![];
     let glad = match strat {
         Strategy::Graph(g) => g.ladder(),
@@ -599,6 +610,7 @@ pub fn run(c: &Ctx, strat: &Strategy, cost: &Costs, capital: f64, b0: usize, b1:
                 } else {
                     let range = sim.span();
                     match custom::decide(r, &mut cst, t, tick, range, c.spacing) {
+                        Decision::Move { .. } if !spot_ok(i) => spot_blocked += 1,
                         Decision::Move { tl, tu, reason } => {
                             sim.rebalance(c, cost, i, t, &[(tl, tu, 1.0)], &reason);
                             cst.moved(t);
@@ -614,6 +626,7 @@ pub fn run(c: &Ctx, strat: &Strategy, cost: &Costs, capital: f64, b0: usize, b1:
             Strategy::Graph(g) => {
                 let range = sim.span();
                 match crate::graph::decide(g, gev.as_ref().unwrap(), &mut cst, t, b, tick, range, c.spacing) {
+                    Decision::Move { .. } if !spot_ok(i) => spot_blocked += 1,
                     Decision::Move { tl, tu, reason } => {
                         match &glad {
                             // a ladder block: the ladder's own solve, taken when it moves enough of the value
@@ -650,6 +663,9 @@ pub fn run(c: &Ctx, strat: &Strategy, cost: &Costs, capital: f64, b0: usize, b1:
                 let frozen = p.guard.map(|g| guard_dev(b) > g).unwrap_or(false);
                 if frozen {
                     guard_frozen += 1;
+                } else if due && !spot_ok(i) {
+                    // not solved: the next bar tries again, as the worker's next cycle would
+                    spot_blocked += 1;
                 } else if due {
                     let (x, y) = sim.inventory(c, s);
                     let budget0 = x + y / (s * s);
@@ -698,10 +714,23 @@ pub fn run(c: &Ctx, strat: &Strategy, cost: &Costs, capital: f64, b0: usize, b1:
         "actions": sim.actions,
         "time_in_range": if sim.t_tot > 0.0 { sim.t_in / sim.t_tot } else { 0.0 },
         "guard_bars": guard_frozen,
+        "spot_blocked_bars": spot_blocked,
         "series": series,
         "segments": sim.segments,
         "events": sim.events,
     })
+}
+
+/// How far the tick after swap `i` is from the median tick of the swaps in the hour before it:
+/// the live engine's spot check, on the same swaps.
+fn spot_dev(m: &Market, i: usize) -> f64 {
+    let t0 = m.ts[i] - 3600;
+    let mut j = i;
+    while j > 0 && m.ts[j - 1] >= t0 {
+        j -= 1;
+    }
+    let mut w: Vec<f64> = m.tick[j..=i].iter().map(|k| *k as f64).collect();
+    (m.tick[i] as f64 - data::median(&mut w)).abs()
 }
 
 fn round6(x: f64) -> f64 {
@@ -2062,7 +2091,7 @@ mod tests {
     }
 
     fn no_costs() -> Costs {
-        Costs { swap_bps: 0.0, gas_usd: 0.0, fee_haircut: 1.0, emission_haircut: 1.0, stable_swap_bps: 0.0 }
+        Costs { swap_bps: 0.0, gas_usd: 0.0, fee_haircut: 1.0, emission_haircut: 1.0, stable_swap_bps: 0.0, max_spot_dev_ticks: None }
     }
 
     fn custom(v: Value) -> Strategy {
@@ -2119,7 +2148,7 @@ mod tests {
         let m = market(&vec![0; 6000], 0.0, 1e9);
         let mut c = ctx(&m);
         let rules = |park: bool| custom(json!({"width": 10, "exit_lo": 5, "exit_to": "token0", "park": park}));
-        let cost = Costs { swap_bps: 4.0, gas_usd: 0.5, fee_haircut: 1.0, emission_haircut: 1.0, stable_swap_bps: 0.0 };
+        let cost = Costs { swap_bps: 4.0, gas_usd: 0.5, fee_haircut: 1.0, emission_haircut: 1.0, stable_swap_bps: 0.0, max_spot_dev_ticks: None };
         let b1 = m.bar_end.len() - 1;
         c.park = [ParkRate::flat(0.10), ParkRate::flat(0.0)];
         let off = run(&c, &rules(false), &cost, 10_000.0, 0, b1);
@@ -2201,7 +2230,7 @@ mod tests {
         let ticks: Vec<i64> = (0..3000).map(|k| ((k as f64 / 120.0).sin() * 40.0) as i64).collect();
         let m = market(&ticks, 0.5, 5e8);
         let c = ctx(&m);
-        let cost = Costs { swap_bps: 5.0, gas_usd: 0.5, fee_haircut: 0.8, emission_haircut: 0.5, stable_swap_bps: 0.0 };
+        let cost = Costs { swap_bps: 5.0, gas_usd: 0.5, fee_haircut: 0.8, emission_haircut: 0.5, stable_swap_bps: 0.0, max_spot_dev_ticks: None };
         let r = run(&c, &custom(json!({"width": 10, "cooldown_min": 30})), &cost, 10_000.0, 0, m.bar_end.len() - 1);
         assert!(r["actions"].as_u64().unwrap() > 2);
         let f = |k: &str| r[k].as_f64().unwrap();
@@ -2210,6 +2239,25 @@ mod tests {
         assert!((lhs - rhs).abs() < 1e-4, "{lhs} vs {rhs}");
         assert!(f("il") < 0.0, "moving ranges in a swinging price loses against holding");
         assert!(f("gas") > 0.0 && f("swap_costs") > 0.0);
+    }
+
+    #[test]
+    fn the_spot_check_delays_a_move_after_a_jump_as_the_worker_would() {
+        // flat, then a 100-tick jump that stays: the 1h median catches up after about half an hour
+        let mut ticks = vec![0i64; 600];
+        ticks.extend(vec![100i64; 600]);
+        let m = market(&ticks, 1.0, 1e9);
+        let c = ctx(&m);
+        let strat = custom(json!({"width": 10}));
+        let free = run(&c, &strat, &no_costs(), 10_000.0, 0, m.bar_end.len() - 1);
+        let checked = run(&c, &strat, &Costs { max_spot_dev_ticks: Some(20.0), ..no_costs() }, 10_000.0, 0, m.bar_end.len() - 1);
+        assert_eq!(free["spot_blocked_bars"], json!(0));
+        let blocked = checked["spot_blocked_bars"].as_u64().unwrap();
+        // 60 swaps an hour: the median flips once more than half the hour's swaps are at the new price
+        assert!((4..=8).contains(&blocked), "{blocked}");
+        // it still moves once the median has caught up
+        assert_eq!(checked["actions"], free["actions"]);
+        assert!(spot_dev(&m, 600) == 100.0 && spot_dev(&m, 640) == 0.0);
     }
 
     #[test]

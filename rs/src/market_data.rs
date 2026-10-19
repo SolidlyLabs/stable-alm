@@ -139,12 +139,13 @@ fn remember_tokens(cid: u64, v: &Value) {
     }
 }
 
-const PEGS: [(&str, &[&str]); 5] = [
+const PEGS: [(&str, &[&str]); 6] = [
     ("USD", &["USDC", "USDT", "USDBC", "DAI", "DOLA", "USD+", "USDE", "SUSDE", "USDS", "GHO", "CRVUSD", "FRAX", "LUSD", "PYUSD", "USDA", "EUSD", "USDZ", "USDPLUS", "AXLUSDC", "USDT0", "USDC.E", "SCUSD"]),
     ("ETH", &["WETH", "ETH", "CBETH", "WSTETH", "WEETH", "RETH", "EZETH", "WRSETH", "RSETH", "SUPEROETHB", "OETH", "METH"]),
     ("BTC", &["CBBTC", "WBTC", "TBTC", "LBTC", "SOLVBTC"]),
     ("EUR", &["EURC", "EURE", "EURA", "AGEUR"]),
     ("MXN", &["MXNE", "XOC"]),
+    ("S", &["S", "WS", "STS", "OS", "WOS"]),
 ];
 
 pub fn is_pegged(a: &str, b: &str, ratio: Option<f64>) -> bool {

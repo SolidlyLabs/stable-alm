@@ -1,0 +1,51 @@
+{
+  "$comment": "The submit_plan input (tools.rs builds the same schema; this copy documents it). strategy_json is the strategy object as a JSON string so the schema can be strict.",
+  "type": "object",
+  "required": ["summary", "changes", "requested_bounds"],
+  "additionalProperties": false,
+  "properties": {
+    "summary": {"type": "string"},
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "pool", "chain_id", "target_usd", "start_usd", "strategy_json", "name", "thesis", "invalidation"],
+        "properties": {
+          "type": {"type": "string", "enum": ["strategy", "capital", "add_pool", "exit_pool"]},
+          "pool": {"type": "string"},
+          "chain_id": {"type": ["integer", "null"]},
+          "target_usd": {"type": ["number", "null"]},
+          "start_usd": {"type": ["number", "null"]},
+          "strategy_json": {"type": ["string", "null"]},
+          "name": {"type": ["string", "null"]},
+          "thesis": {"type": "string"},
+          "invalidation": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["metric", "source", "op", "threshold", "persist_minutes", "action"],
+            "properties": {
+              "metric": {"type": "string", "enum": ["zscore_72h", "price_usd", "pool_vs_cex_bp", "vol_24h_pct", "out_of_range_24h", "f_lvr_7d", "net_return_7d", "net_return_vs_hold_7d", "capital_usd"]},
+              "source": {"type": "string"},
+              "op": {"type": "string", "enum": ["<", ">"]},
+              "threshold": {"type": "number"},
+              "persist_minutes": {"type": "number"},
+              "action": {"type": "string", "enum": ["exit_to_safe", "revert_strategy", "withdraw_to_unallocated", "alert"]}
+            }
+          }
+        }
+      }
+    },
+    "requested_bounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_cost_bp", "plan_age_h", "price_move_pct", "quote_age_s"],
+      "properties": {
+        "max_cost_bp": {"type": ["number", "null"]},
+        "plan_age_h": {"type": ["number", "null"]},
+        "price_move_pct": {"type": ["number", "null"]},
+        "quote_age_s": {"type": ["number", "null"]}
+      }
+    }
+  }
+}
