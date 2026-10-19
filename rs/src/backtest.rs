@@ -76,7 +76,6 @@ impl Costs {
 pub enum Strategy {
     Custom(Rules),
     Graph(Box<crate::graph::Graph>),
-    Ladder { p: Params, max_ranges: usize },
     Hodl,
 }
 
@@ -519,7 +518,6 @@ pub fn run(c: &Ctx, strat: &Strategy, cost: &Costs, capital: f64, b0: usize, b1:
     let med = data::rolling_median_trailing(&m.bar_tick, data::week_bars(m), 12);
     let guard_dev = |b: usize| (m.bar_tick[b] as f64 - med[b]).abs();
     let mut cst = custom::State::default();
-    let mut last_solve: Option<usize> = None;
     let (mut last_i, mut last_t) = (i_start, m.bar_end[b0]);
     let mut series = vec![];
     let mut next_mark = m.bar_end[b0];
@@ -531,7 +529,6 @@ pub fn run(c: &Ctx, strat: &Strategy, cost: &Costs, capital: f64, b0: usize, b1:
         }
         Strategy::Custom(r) => label = r.label(),
         Strategy::Graph(g) => label = g.label(),
-        Strategy::Ladder { p, .. } => label = p.label(),
     }
     let mut guard_frozen = 0usize;
     // the live spot check, asked only when the strategy wants to move (as the engine does)
@@ -656,27 +653,6 @@ pub fn run(c: &Ctx, strat: &Strategy, cost: &Costs, capital: f64, b0: usize, b1:
                         }
                     }
                     Decision::Keep(_) => {}
-                }
-            }
-            Strategy::Ladder { p, max_ranges } => {
-                let due = sim.ranges.is_empty() || last_solve.map(|lb| b - lb >= p.every as usize).unwrap_or(true);
-                let frozen = p.guard.map(|g| guard_dev(b) > g).unwrap_or(false);
-                if frozen {
-                    guard_frozen += 1;
-                } else if due && !spot_ok(i) {
-                    // not solved: the next bar tries again, as the worker's next cycle would
-                    spot_blocked += 1;
-                } else if due {
-                    let (x, y) = sim.inventory(c, s);
-                    let budget0 = x + y / (s * s);
-                    let target = crate::engine::cap_ranges(
-                        crate::engine::snap_ranges(ladder::decide_at(m, p, budget0, m.sp[i], tick, i), c.spacing),
-                        *max_ranges,
-                    );
-                    if sim.ranges.is_empty() || turnover(c, &sim, &target, s) >= p.turnover {
-                        sim.rebalance(c, cost, i, t, &target, "ladder re-solve");
-                    }
-                    last_solve = Some(b);
                 }
             }
         }
@@ -1034,7 +1010,11 @@ fn execute(id: u64, cid: u64, pool: &str, days: i64, req: &Value, wallet: &str) 
     if req["walkforward"].as_bool().unwrap_or(false) {
         // the overfit check: the strategy and its neighbours (every setting 1/2 to 2x) on the same
         // replay, BATCH_WORKERS at a time, then walk-forward and PBO over time slices (overfit.rs)
-        let base = if strat_v.get("type").and_then(|t| t.as_str()) == Some("ladder") { ladder_params(&strat_v, spacing, pegged) } else { strat_v.clone() };
+        let base = if strat_v.get("type").and_then(|t| t.as_str()) == Some("ladder") {
+            crate::ladder::as_graph(&Params::from(&ladder_params(&strat_v, spacing, pegged))?).as_object().unwrap().clone()
+        } else {
+            strat_v.clone()
+        };
         let vs = crate::overfit::variants(&base, WF_VARIANTS);
         let rp = rp_for(&strat_v);
         let (c, b0, b1, m) = (&rp.c, rp.b0, rp.b1, rp.c.m);
@@ -1998,14 +1978,18 @@ fn strategy(s: &Map<String, Value>, spacing: i64, max_ranges: usize, pegged: boo
             g.max_ranges = max_ranges.clamp(1, 50);
             Ok(Strategy::Graph(Box::new(g)))
         }
-        "ladder" => Ok(Strategy::Ladder { p: Params::from(&ladder_params(s, spacing, pegged))?, max_ranges: max_ranges.clamp(1, 50) }),
+        // an old plain ladder (a saved strategy, a request): the same ladder as a node strategy
+        "ladder" => {
+            let g = crate::ladder::as_graph(&Params::from(&ladder_params(s, spacing, pegged))?);
+            strategy(g.as_object().unwrap(), spacing, max_ranges, pegged)
+        }
         t => Err(format!("unknown strategy type {t}")),
     }
 }
 
-/// A ladder's settings: the app's defaults for this pool (as adding it would set them), then what was given.
+/// An old plain ladder's settings: the app's defaults for this pool (as adding it set them), then what was given.
 fn ladder_params(s: &Map<String, Value>, spacing: i64, pegged: bool) -> Map<String, Value> {
-    let mut lp = crate::settings::pool_defaults()["strategy"].as_object().cloned().unwrap_or_default();
+    let mut lp = crate::ladder::plain_defaults();
     if pegged {
         let span = lp.get("span").and_then(|v| v.as_i64()).unwrap_or(3).max(3 * spacing);
         lp.insert("span".into(), json!(span));
@@ -2278,12 +2262,33 @@ mod tests {
     }
 
     #[test]
+    fn the_migrated_ladder_block_trades_as_the_plain_ladder() {
+        // a calm peg with a depeg of 40 ticks for two hours: the guard holds through it. The figures
+        // are what the plain ladder (removed in v0.5.1) returned on this market, after a day of warm-up.
+        let ticks: Vec<i64> = (0..6000).map(|k| if (2500..2620).contains(&k) { 40 } else { ((k as f64 / 300.0).sin() * 3.0) as i64 }).collect();
+        let m = market(&ticks, 0.5, 5e8);
+        let c = ctx(&m);
+        for (guard, plain) in [(None, json!({"value": 10022.543486, "fees": 25.032618, "actions": 7, "guard_bars": 0})),
+                               (Some(15.0), json!({"value": 10030.41445, "fees": 31.708518, "actions": 6, "guard_bars": 24}))] {
+            let p = Params { lookback: 86400, span: 3, every: 72, turnover: 0.4, guard };
+            let g = crate::ladder::as_graph(&p);
+            let mut gr = crate::graph::Graph::parse(g.as_object().unwrap(), 1).unwrap();
+            gr.max_ranges = 5;
+            let node = run(&c, &Strategy::Graph(Box::new(gr)), &no_costs(), 10_000.0, 300, m.bar_end.len() - 1);
+            for k in ["value", "fees", "actions", "guard_bars"] {
+                assert_eq!(plain[k], node[k], "{guard:?} {k}");
+            }
+        }
+    }
+
+    #[test]
     fn ladder_and_hold_run() {
         let ticks: Vec<i64> = (0..3000).map(|k| ((k as f64 / 300.0).sin() * 3.0) as i64).collect();
         let m = market(&ticks, 0.5, 5e8);
         let c = ctx(&m);
-        let p = Params { lookback: 86400, span: 3, every: 72, turnover: 0.4, guard: None };
-        let l = run(&c, &Strategy::Ladder { p, max_ranges: 5 }, &no_costs(), 10_000.0, 0, m.bar_end.len() - 1);
+        let mut g = crate::graph::Graph::parse(crate::ladder::as_graph(&Params { lookback: 86400, span: 3, every: 72, turnover: 0.4, guard: None }).as_object().unwrap(), 1).unwrap();
+        g.max_ranges = 5;
+        let l = run(&c, &Strategy::Graph(Box::new(g)), &no_costs(), 10_000.0, 300, m.bar_end.len() - 1);
         assert!(l["actions"].as_u64().unwrap() >= 1);
         assert!(l["fees"].as_f64().unwrap() > 0.0);
         let h = run(&c, &Strategy::Hodl, &no_costs(), 10_000.0, 0, m.bar_end.len() - 1);

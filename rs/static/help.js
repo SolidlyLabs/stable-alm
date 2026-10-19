@@ -170,6 +170,8 @@
     "xh-ladder": ["Ladder", `<p>What the app's ladder strategy would have returned over the same period (backtest).</p>`],
     "xh-hold": ["Hold", `<p>What holding the pool's tokens would have returned over the same period.</p>`],
     "xh-edge": ["Edge", `<p>Actual minus frozen: what the agent added or cost on this pool, before the API spend.</p>`],
+    "xh-rules": ["Rules manager", `<p>The deterministic research manager: the frozen strategy re-tuned every week by the auto optimizer on the four weeks before, then traded for the week (walk-forward backtest over the forward test). It is what the app's own optimizer would have done without the agent.</p><p>Shown once the forward test has run a full week.</p>`],
+    "xh-edge-rules": ["Edge vs rules", `<p>Actual minus the rules manager: what the agent's research added over the optimizer's own, before the API spend. This is the comparison that says whether the agent is worth running.</p>`],
     "xh-alert": ["Alert or journal record", `<p>An alert (severe, normal or info) or a record of the decision journal, newest first. The journal holds every review, plan state, risk action, approval and settings change.</p>`],
     "xh-token": ["Token", `<p>A token of your configured pools, on its chain.</p>`],
     "xh-ref": ["Reference", `<p>Liquidity Lens's on-chain reference price for the token (placeholder). For the agent it never outvotes the exchange prices.</p>`],
@@ -353,6 +355,7 @@
       <li><b>Caveats</b>: these are raw figures. The backtests count fees at 82% (what the rewarder actually paid) and SOLID at 50%. The ladder's 1-tick positions usually earn more than the average in-range LP, and wide ranges earn less.</li></ul>
       <p>Hover a value for its breakdown, shown under "This value" below.</p>`],
     "p-strategy": ["Strategy & limits", `<p>The strategy that decides where the liquidity goes, plus this pool's safety limits. Open it with the ⚙ button on the pool's row; changes apply after <b>Save</b>.</p>
+      <p>The ladder is a block of a node strategy (open it in the Strategy lab); a ladder from an older version was turned into one with the same settings.</p>
       <p><b>ladder</b> (recommended, best in walk-forward backtests on every pair): every <i>every</i> bars it looks at the last <i>lookback</i> seconds and finds which ticks paid fees and how crowded each was with other LPs. It then spreads the capital over single ticks to maximise its fee share, using √(fees × competing liquidity) − competing liquidity. It only re-deposits if more than <i>turnover</i> of the capital would move.</p>`],
     "param-lookback": ["lookback (seconds)", `<p>How much recent history the ladder uses to decide where fees are paid. 86400 = 1 day, which was best in backtests: it follows the peg's slow drift but ignores single bursts. Longer is steadier; shorter reacts faster but churns more.</p>`],
     "param-span": ["span (ticks)", `<p>How far from the median tick (of the lookback window) the ladder may place liquidity: ±span ticks. 3 for USDC/USDT (±0.03%); 6 for cbETH/WETH, which moves more. Wider costs nothing if those ticks pay no fees, because the solver gives them nothing.</p>`],
@@ -368,6 +371,7 @@
     "param-min_swap_value": ["min_swap_value", `<p>The smallest imbalance (in token0 units) worth a swap. Smaller differences are deposited as they are or left idle. 5 for USD stables, 0.002 for ETH pairs.</p>`],
     "param-max_ranges": ["max_ranges", `<p>The most positions this pool may hold. If the strategy wants more (a volatile pair's ladder can ask for dozens of tick ranges), neighbouring ranges are merged into this many contiguous groups of similar weight.</p>
       <p>Each position costs one deposit and one withdrawal transaction per rebalance, so fewer positions mean cheaper, faster rebalances. Stable pairs normally use 1–4 anyway.</p>`],
+    "upd-check": ["Updates", `<p>The app checks GitHub's latest release every 12 hours (Settings › Check for signed updates) and offers it only when the release's checksum file is signed by a key on the signer whitelist built into the app. <b>Update now</b> downloads the installer, checks it against the signed checksum, and installs it; the app stops after its current cycle and starts again.</p><p>A release that is not signed, or signed by another key, is not offered; the reason is shown here.</p>`],
     resolve: ["Re-solve", `<p>Makes this pool's ladder re-solve on the cycle that starts now, instead of waiting for its 6-hour cadence. It only rebalances if the new solution moves more than <i>turnover</i>.</p>`],
     remove: ["Remove", `<p>Deletes the pool from the configuration. Only possible once it holds no positions: switch it off first and let a cycle withdraw it.</p>`],
     savepools: ["Save pools", `<p>Writes enabled flags and strategy settings to <code>config/pools.json</code> and starts a cycle. Money is moved with Add, Withdraw and Move instead.</p>`],
@@ -473,7 +477,7 @@
     const XTH = {"Plan": "xh-plan", "State": "xh-state", "Summary": "xh-summary", "Changes": "xh-changes", "Why / checks": "xh-why", "Pool": "xh-pool",
       "Capital": "xh-capital", "24 h": "xh-ret", "7 d": "xh-ret", "30 d": "xh-ret", "When": "xh-when", "Kind": "xh-kind", "Outcome": "xh-outcome",
       "Detail": "xh-detail", "Cost": "xh-cost", "Tools": "xh-tools", "Condition": "xh-cond", "Where": "xh-where", "Reason": "xh-reason", "Cleared": "xh-cleared",
-      "Actual": "xh-actual", "Frozen": "xh-frozen", "Ladder": "xh-ladder", "Hold": "xh-hold", "Edge": "xh-edge", "Token": "xh-token", "Reference": "xh-ref",
+      "Actual": "xh-actual", "Frozen": "xh-frozen", "Ladder": "xh-ladder", "Hold": "xh-hold", "Edge": "xh-edge", "Rules manager": "xh-rules", "Edge vs rules": "xh-edge-rules", "Token": "xh-token", "Reference": "xh-ref",
       "Depth ±1% (buy / sell)": "xh-depth", "Sell $1k / $10k / $100k": "xh-sell", "Spot vs exec gap ($10k)": "xh-gap", "7d volume": "xh-vol7",
       "Aggregator / bot / organic": "xh-mix", "Competing pools (TVL, ±0.5% liquidity)": "xh-comp", "Best range (width → APR)": "xh-best",
       "+$100k capital earns": "xh-earn", "Source": "xh-src", "Today: requests / hits / failures": "xh-today", "Hit rate today": "xh-hit",

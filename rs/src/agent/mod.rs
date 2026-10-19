@@ -48,6 +48,7 @@ pub mod refdata;
 pub mod review;
 pub mod risk;
 pub mod sched;
+pub mod search;
 pub mod sgate;
 pub mod shadow;
 pub mod snapshot;

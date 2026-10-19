@@ -30,8 +30,10 @@ fn moves(delay: f64, cooldown: f64, buffer_spacings: f64) -> Vec<Value> {
 pub fn builtin() -> Vec<Value> {
     let price = || n("p", "price", 20, 40, json!({}), json!({}));
     let mut out = vec![
+        // the ladder block with the pool's own defaults (span and guard by pegging): the lab and the
+        // backtester open {"type": "ladder"} as that node strategy (ladder.rs, lab.js ladderGraph)
         json!({"id": "b:ladder", "category": "Ladder", "name": "Ladder (app default)",
-               "description": "The app's own strategy: capital spread over single ticks where fees were paid, re-solved every 6 hours, depeg guard on pegged pairs.",
+               "description": "The app's own strategy as a ladder block: capital spread over single ticks where fees were paid, re-solved every 6 hours, depeg guard on pegged pairs. Opens with this pool's defaults.",
                "strategy": {"type": "ladder"}}),
     ];
     let ex = |id: &str, name: &str, desc: &str, nodes: Vec<Value>| json!({"id": format!("b:{id}"), "category": "Indicators", "name": name, "description": desc, "strategy": graph(name, nodes)});

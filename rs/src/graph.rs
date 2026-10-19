@@ -8,6 +8,8 @@
 //!                             single ticks around the trailing median where fees were paid,
 //!                             re-solved every `every_hours` (and whenever the rebalance condition
 //!                             holds), moved only when at least `turnover` of the value would move;
+//!                             with a `guard` (ticks, 0 = off) it holds while the price is further
+//!                             than that from its 7-day median (the depeg guard of pegged pairs);
 //!   rebalance (when)          move to the wanted range when true (default: price left the range),
 //!                             after a delay and not within the cooldown;
 //!   exit      (when, reenter) withdraw everything; deposit again when `reenter` (default: not
@@ -116,7 +118,7 @@ pub const KINDS: &[Spec] = &[
     ("out_of_range", &[], &["out"], &[("below", 0.0, -1e6, 1e6), ("above", 0.0, -1e6, 1e6)]),
     ("range_shift", &[], &["out"], &[("value", 10.0, 0.0, 1e6)]),
     ("range", &["lower", "upper"], &[], &[]),
-    ("ladder", &[], &[], &[("hours", 24.0, 1.0, 168.0), ("span", 3.0, 0.0, 1e6), ("every_hours", 6.0, 0.1, 168.0), ("turnover", 0.4, 0.0, 1.0)]),
+    ("ladder", &[], &[], &[("hours", 24.0, 1.0, 168.0), ("span", 3.0, 0.0, 1e6), ("every_hours", 6.0, 0.1, 168.0), ("turnover", 0.4, 0.0, 1.0), ("guard", 0.0, 0.0, 1e6)]),
     ("rebalance", &["when"], &[], &[("delay_min", 0.0, 0.0, 10080.0), ("cooldown_min", 60.0, 0.0, 43200.0)]),
     ("exit", &["when", "reenter", "to"], &[], &[("delay_min", 0.0, 0.0, 10080.0)]),
     ("hold", &["when"], &[], &[]),
@@ -125,7 +127,7 @@ pub const KINDS: &[Spec] = &[
 const OPTIONAL: &[(&str, &str)] = &[("rebalance", "when"), ("exit", "reenter"), ("exit", "to")];
 /// Params measured in ticks (scaled by the node's unit).
 const TICK_PARAMS: &[(&str, &str)] =
-    &[("const", "value"), ("offset", "value"), ("distance_gt", "value"), ("out_of_range", "below"), ("out_of_range", "above"), ("range_shift", "value"), ("ladder", "span")];
+    &[("const", "value"), ("offset", "value"), ("distance_gt", "value"), ("out_of_range", "below"), ("out_of_range", "above"), ("range_shift", "value"), ("ladder", "span"), ("ladder", "guard")];
 /// Outputs that are prices (ticks): drawn on the chart.
 const PRICE_LIKE: &[&str] = &["price", "high_low", "sma", "ema", "median", "bollinger", "keltner", "donchian", "around", "offset", "add", "sub", "min", "max", "switch",
     "lag", "highest", "lowest", "percentile", "psar", "ichimoku", "heikin_ashi", "gaussian"];
@@ -356,7 +358,7 @@ impl Graph {
             span: self.param(i, "span").round().max(0.0) as i64,
             every: (self.param(i, "every_hours") * BARS_PER_HOUR).round().max(1.0) as i64,
             turnover: self.param(i, "turnover"),
-            guard: None,
+            guard: Some(self.param(i, "guard")).filter(|g| *g > 0.0),
         })
     }
 
@@ -682,7 +684,14 @@ pub fn evaluate_ext(g: &Graph, m: &Market, ext: &Externals) -> Eval {
             "fees" => put("out", fr.fee.clone()),
             "const" => put("value", vec![val; n]),
             // the ladder's centre: the median price over its lookback (what the wanted range is drawn around)
-            "ladder" => put("mid", median(close, bars(hours))),
+            "ladder" => {
+                put("mid", median(close, bars(hours)));
+                // the depeg guard: distance of the bar's tick from its 7-day median, as ladder.rs
+                if par("guard") > 0.0 {
+                    let med = crate::data::rolling_median_trailing(&m.bar_tick, crate::data::week_bars(m), 12);
+                    put("guard_dev", m.bar_tick.iter().zip(&med).map(|(t, md)| (*t as f64 - md).abs()).collect());
+                }
+            }
             "sma" => put("out", ta::sma(&inp("in"), bars(hours))),
             "ema" => put("out", ta::ema(&inp("in"), bars(hours))),
             "median" => put("out", median(&inp("in"), bars(hours))),
@@ -967,6 +976,14 @@ pub fn decide(g: &Graph, ev: &Eval, st: &mut State, now: i64, bar: usize, tick: 
     if let Some(h) = g.sink("hold") {
         if input(g, ev, h, "when", &at).map(truth).unwrap_or(false) {
             return Decision::Wait("hold condition is true: no action".into());
+        }
+    }
+    if let Some(l) = g.sink("ladder") {
+        let guard = g.param(l, "guard");
+        let dev = ev.series.get(&(l, "guard_dev".to_string())).and_then(|v| v.get(bar).copied()).unwrap_or(f64::NAN);
+        // NaN (too little history) never freezes, as in ladder.rs
+        if guard > 0.0 && dev > guard {
+            return Decision::Wait(format!("hold: depeg guard (tick {tick} is {dev:.0} ticks from the 7-day median)"));
         }
     }
     if let Some(x) = g.sink("exit") {

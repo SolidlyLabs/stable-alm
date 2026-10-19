@@ -33,6 +33,8 @@ pub fn defaults() -> Value {
         // experimental.rs: the agent plan's groundwork, shown on the Experimental tab and used by
         // nothing that trades; llens: "placeholder" (generated data) or "off"
         "experimental": crate::agent::defaults(),
+        // update.rs: check GitHub for a newer release signed by a whitelisted key (every 12 hours)
+        "update_check": true,
         // the first-start wizard was finished (or skipped); it opens while this is false and no key is stored
         "onboarded": false,
     })
@@ -40,7 +42,7 @@ pub fn defaults() -> Value {
 
 pub fn pool_defaults() -> Value {
     json!({
-        "strategy": {"type": "ladder", "lookback": 86400, "span": 3, "every": 72, "turnover": 0.4, "guard": 15},
+        "strategy": crate::ladder::as_graph(&crate::ladder::Params::from(&crate::ladder::plain_defaults()).unwrap()),
         "slippage_bps": 2.0, "max_swap_cost_bps": 3.0, "max_spot_dev_ticks": 10, "max_actions_per_day": 5,
         "min_swap_value": 5.0, "numeraire": 0, "max_ranges": 5, "allocation_pct": 0.0, "enabled": false,
     })
@@ -129,7 +131,59 @@ pub fn load_pools() -> Vec<Value> {
         let _g = LOCK.lock().unwrap();
         read(&crate::paths::config().join("pools.json")).unwrap_or(json!([]))
     };
-    raw.as_array().cloned().unwrap_or_default().iter().map(|p| merge(&pool_defaults(), p)).collect()
+    let mut migrated = vec![];
+    let pools: Vec<Value> = raw.as_array().cloned().unwrap_or_default().iter().map(|p| {
+        // the strategy is the pool's own (defaults are not merged into it)
+        let mut m = merge(&pool_defaults(), p);
+        if let Some(s) = p.get("strategy") {
+            m["strategy"] = match crate::ladder::migrate(s) {
+                Some(g) => {
+                    migrated.push(m.clone());
+                    g
+                }
+                None => s.clone(),
+            };
+        }
+        m
+    }).collect();
+    if !migrated.is_empty() {
+        migrate_pools(&raw, &pools, &migrated);
+    }
+    pools
+}
+
+/// Old plain ladders became node strategies with one ladder block (ladder.rs `migrate`): pools.json
+/// is rewritten once (the old file kept as pools.json.v050.bak), and each such pool's next re-solve
+/// stays where its last solve put it (the ladder's last_solve file seeds the node state).
+fn migrate_pools(raw: &Value, pools: &[Value], migrated: &[Value]) {
+    let dir = crate::paths::config();
+    {
+        let _g = LOCK.lock().unwrap();
+        let bak = dir.join("pools.json.v050.bak");
+        if !bak.exists() {
+            let _ = write_atomic(&bak, raw);
+        }
+        let mut out = raw.as_array().cloned().unwrap_or_default();
+        for (o, p) in out.iter_mut().zip(pools) {
+            if o.get("strategy").is_some() {
+                o["strategy"] = p["strategy"].clone();
+            }
+        }
+        if let Err(e) = write_atomic(&dir.join("pools.json"), &Value::Array(out)) {
+            crate::warn!("settings", "could not save the migrated pools: {e}");
+            return;
+        }
+    }
+    for p in migrated {
+        let (cid, pool, name) = (p["chain_id"].as_u64().unwrap_or(crate::chains::BASE), p["pool"].as_str().unwrap_or(""), p["name"].as_str().unwrap_or(""));
+        let ts = read(&crate::paths::logs().join(format!("last_solve_{name}.json"))).and_then(|v| v["ts"].as_i64()).unwrap_or(0);
+        let mut st = crate::custom::load_state(cid, pool, true);
+        if st.last_move == 0 && ts > 0 {
+            st.last_move = ts;
+            crate::custom::save_state(cid, pool, true, &st);
+        }
+        crate::info!("settings", "[{name}] the ladder is now a node strategy with one ladder block (same settings)");
+    }
 }
 
 pub fn save_pools(pools: &[Value]) -> Result<(), String> {
@@ -263,13 +317,8 @@ pub fn validate_pool(p: &Value) -> Result<(), String> {
         check(&p[k], k, lo, hi)?;
     }
     let st = &p["strategy"];
-    match st["type"].as_str().unwrap_or("ladder") {
-        "ladder" => {
-            for (k, lo, hi) in [("lookback", 3600.0, 30.0 * 86400.0), ("span", 1.0, 100000.0), ("every", 1.0, 100000.0),
-                                ("turnover", 0.0, 1.0), ("guard", 0.0, 100000.0)] {
-                check(&st[k], k, lo, hi)?;
-            }
-        }
+    match st["type"].as_str().unwrap_or("") {
+        "ladder" => return Err(format!("{name}: the plain ladder is a node strategy now: a graph with one ladder block")),
         "custom" => {
             for (k, lo, hi) in [("width", 1.0, 1_774_544.0), ("skew", 0.0, 1.0), ("offset_up", -1_000_000.0, 1_000_000.0),
                                 ("offset_down", -1_000_000.0, 1_000_000.0), ("buffer_lo", -1_000_000.0, 1_000_000.0),
@@ -296,4 +345,27 @@ pub fn validate_pool(p: &Value) -> Result<(), String> {
 
 pub fn load_configs() -> Vec<PoolConfig> {
     load_pools().iter().map(PoolConfig::from).collect()
+}
+
+#[cfg(test)]
+mod migrate_tests {
+    /// The plain-ladder migration on a copy of the app's folder: ALM_HOME must point at a copy (never
+    /// the live one). cargo test -- --ignored migrate_on_a_copy --nocapture
+    #[test]
+    #[ignore]
+    fn migrate_on_a_copy() {
+        let home = std::env::var("ALM_HOME").expect("set ALM_HOME to a copy of the app folder");
+        assert!(!home.to_lowercase().replace('\\', "/").trim_end_matches('/').ends_with("appdata/local/stablealm"), "not on the live folder");
+        let pools = super::load_pools();
+        for p in &pools {
+            println!("{}: {}", p["name"], p["strategy"]);
+            assert_ne!(p["strategy"]["type"], "ladder");
+            let state = crate::custom::load_state(p["chain_id"].as_u64().unwrap_or(8453), p["pool"].as_str().unwrap(), true);
+            println!("  state last_move {}", state.last_move);
+        }
+        assert!(crate::paths::config().join("pools.json.v050.bak").exists());
+        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(crate::paths::config().join("pools.json")).unwrap()).unwrap();
+        assert!(saved.as_array().unwrap().iter().all(|p| p["strategy"]["type"] != "ladder"), "pools.json was rewritten");
+        assert_eq!(super::load_pools(), pools, "a second load changes nothing");
+    }
 }

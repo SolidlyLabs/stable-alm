@@ -68,15 +68,6 @@ pub fn variants(s: &Map<String, Value>, n: usize) -> Vec<Map<String, Value>> {
                     changed = true;
                 }
             }
-            "ladder" => {
-                changed |= scale(&mut v, "lookback", 3600.0, 30.0 * 86400.0, false, &mut rng);
-                if let Some(x) = v.get("lookback").and_then(|x| x.as_f64()) {
-                    v.insert("lookback".into(), json!(((x / 3600.0).round() * 3600.0).max(3600.0) as i64));
-                }
-                changed |= scale(&mut v, "span", 1.0, 1e5, true, &mut rng);
-                changed |= scale(&mut v, "every", 1.0, 2016.0, true, &mut rng);
-                changed |= scale(&mut v, "turnover", 0.02, 0.98, false, &mut rng);
-            }
             "graph" => {
                 if let Some(nodes) = v.get_mut("nodes").and_then(|n| n.as_array_mut()) {
                     for node in nodes.iter_mut() {

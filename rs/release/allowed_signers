@@ -1,0 +1,9 @@
+# Keys allowed to sign Stable ALM releases, in OpenSSH's allowed_signers format: a name, the
+# namespace option and the public key. The app accepts an update only when the release's
+# SHA256SUMS.txt is signed by one of these keys in namespace "stable-alm-release". To let someone
+# else sign releases, add their public key here and ship a release signed by a key already listed.
+# Check a signature by hand:
+#   ssh-keygen -Y verify -f rs/release/allowed_signers -I release -n stable-alm-release -s SHA256SUMS.txt.sig < SHA256SUMS.txt
+release namespaces="stable-alm-release" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHYAoVjB666KWk+XZdEjPgoGivdQnyal0FR4LdOIjLij stable-alm-release
+# fallback: Anton's personal key
+anton namespaces="stable-alm-release" ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCe3HZFJCfXGkCjZzhA49ckC1wwN24rKnEDYjX3fRW+QPRNHSUNjEB9vO/VLW6IfQZADAsWGXo4kx/5aGKAWP5xV8s8fOP+mXazes7v3f0rcP9pNF6J0wlDD+pq/ux7XKMJDX546CvEJd18yRp/x8LIa3RIQGUt0nZke5WTdg2TYlVqqdk/Z5uCF46Ih21BJvDJgxp9CwGNku8Q91QKToBU1fyJE7WIKOErCKoPf5+Vl8wf+BS5v7rToM50Z13CPrEC/ImnZmCdfBZeb5fBtfxbbsdzCqlam9eIy4uQ+/TKX/klymbUrDZvpyUKBO2XPaG58fz5LpItvgKaeXmL1kyb anton

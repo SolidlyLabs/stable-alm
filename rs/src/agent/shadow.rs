@@ -8,14 +8,17 @@
 //! |---|---|
 //! | actual | the pool's real result, cash-flow adjusted (perf) |
 //! | static | the frozen strategy, backtested over the period (no agent) |
+//! | rules | the rules manager: the frozen strategy re-tuned every week by the auto optimizer on the 4 weeks before, walk-forward over the period (deterministic research, no agent) |
 //! | ladder | the app's ladder, backtested over the period |
 //! | hold | holding the pool's tokens |
 //!
-//! The agent's net edge is actual minus static, less the API spend over the period. The report is
-//! rebuilt once a day (two backtests per pool, at most 2 at a time). Its verdict follows the
+//! The agent's net edge is actual minus static, less the API spend over the period; its edge over
+//! the rules manager (`edge_vs_rules`) is what the agent's research adds over the optimizer's own,
+//! and is the comparison the release should rest on (plan section 17, 9a). The report is rebuilt
+//! once a day (two backtests and one walk-forward per pool, 2 workers). Its verdict follows the
 //! extension rules: under 30 days "too early"; then "keep" when the net edge is positive on at
 //! least two thirds of the pools and in total, "extend" when it is positive in total only, else
-//! "stop".
+//! "stop"; `verdict_vs_rules` applies the same rule to the edge over the rules manager.
 
 use serde_json::{json, Value};
 
@@ -89,7 +92,31 @@ fn backtest(req: Value) -> Result<Value, String> {
     }
 }
 
-/// Rebuild the report (blocking: a few backtests).
+/// The rules manager's return over [from, now) as a share of capital: the frozen strategy re-tuned
+/// every 7 days on the 4 weeks before, by the same walk-forward the Strategy lab and the agent's
+/// optimize tool use. Weekly periods are laid so the tested ones start at the freeze.
+fn rules_book(p: &Value, from: i64, now: i64, cap: f64) -> Result<(f64, Value), String> {
+    let weeks = ((now - from) as f64 / (7.0 * 86_400.0)).floor() as i64;
+    if weeks < 1 {
+        return Err("needs a full week of the forward test".into());
+    }
+    let until = from + weeks * 7 * 86_400;
+    let spec = json!({"auto": true, "mode": "walk", "holdout": true, "objective": "return", "periods": weeks + 4, "train": 4, "runs": 30,
+                      "workers": 2, "current_in_sample": false});
+    let pool = p["pool"].as_str().unwrap_or("");
+    let cid = p["chain_id"].as_u64().unwrap_or(crate::chains::BASE);
+    let r = backtest(json!({"chain_id": cid, "pool": pool, "days": (weeks + 4) * 7, "until": until, "capital_usd": cap, "strategy": p["strategy"],
+                            "costs": super::sgate::costs(cid, pool, 1.0), "optimize": spec}))?;
+    let w = &r["optimize"]["walk"];
+    let pd = w["period_days"].as_f64().unwrap_or(7.0);
+    let row = |name: &str| w["rows"].as_array().into_iter().flatten().find(|x| x["name"] == name).map(|x| {
+        x["values"].as_array().into_iter().flatten().filter_map(|v| v.as_f64()).map(|v| v / 100.0 * pd / 365.0).sum::<f64>()
+    });
+    let rules = row("re-tuned every period").ok_or("the walk-forward tested no period")?;
+    Ok((rules, json!({"weeks": weeks, "until": until, "rules": rules, "frozen_same_weeks": row("current settings"), "steps": w["steps"], "verdict": r["optimize"]["suggestion"]["why"]})))
+}
+
+/// Rebuild the report (blocking: a few backtests and a walk-forward per pool).
 pub fn build() -> Value {
     let f = frozen();
     if !f.is_object() {
@@ -101,6 +128,7 @@ pub fn build() -> Value {
     let x = super::settings();
     let mut rows = vec![];
     let mut edges = vec![];
+    let mut rule_edges = vec![];
     for p in f["pools"].as_array().into_iter().flatten() {
         let addr = p["pool"].as_str().unwrap_or("");
         let samples = super::perf::samples(addr);
@@ -120,7 +148,14 @@ pub fn build() -> Value {
         if let Some(e) = edge {
             edges.push(e);
         }
-        rows.push(json!({"pool": addr, "name": p["name"], "actual": act, "static": st, "ladder": lad, "hold": hold, "edge_vs_static": edge,
+        let rb = rules_book(p, from, now, cap);
+        let rules = rb.as_ref().ok().map(|r| r.0);
+        let edge_rules = act.zip(rules).map(|(a, r)| a - r);
+        if let Some(e) = edge_rules {
+            rule_edges.push(e);
+        }
+        rows.push(json!({"pool": addr, "name": p["name"], "actual": act, "static": st, "rules": rules, "ladder": lad, "hold": hold, "edge_vs_static": edge,
+                         "edge_vs_rules": edge_rules, "rules_detail": rb.as_ref().map(|r| r.1.clone()).unwrap_or_else(|e| json!({"error": e})),
                          "actual_detail": actual, "backtest_error": bt.err()}));
     }
     let api = super::budget::spent_since(&x, from);
@@ -128,8 +163,10 @@ pub fn build() -> Value {
     let api_share = if cap_total > 0.0 { api / cap_total } else { 0.0 };
     // the API spend is shared out over the pools by capital
     let net: Vec<f64> = edges.iter().map(|e| e - api_share).collect();
+    let net_rules: Vec<f64> = rule_edges.iter().map(|e| e - api_share).collect();
     let r = json!({"frozen": true, "freeze_hash": f["hash"], "from": from, "to": now, "days": days, "pools": rows,
-                   "api_usd": api, "api_share": api_share, "net_edges": net, "verdict": verdict(days, &net), "built": now});
+                   "api_usd": api, "api_share": api_share, "net_edges": net, "verdict": verdict(days, &net),
+                   "net_edges_vs_rules": net_rules, "verdict_vs_rules": verdict(days, &net_rules), "built": now});
     let _ = super::write_json(REPORT, &r);
     r
 }

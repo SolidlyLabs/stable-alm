@@ -44,6 +44,7 @@ mod signer;
 mod solid_lp;
 mod store;
 mod tickmath;
+mod update;
 mod onboard;
 mod wallet;
 mod webui;

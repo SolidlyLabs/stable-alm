@@ -335,9 +335,10 @@ fn get(path: &str, w: &Arc<Worker>) -> (u16, Value) {
             (200, json!({"worker": w.status.lock().unwrap().clone(), "settings": s, "pools": load_pools(), "signer": crate::signer::status(),
                          "paused": crate::paths::stop_file().exists(), "events": events, "errors": errors, "snapshots": snapshots(),
                          "rewards": rw, "chains": crate::chains::as_json(), "now": engine::now(), "runtime": "rust",
-                         "ladder_defaults": settings::pool_defaults()["strategy"], "pool_defaults": settings::pool_defaults()}))
+                         "ladder_defaults": crate::ladder::plain_defaults(), "update": crate::update::status(), "pool_defaults": settings::pool_defaults()}))
         }
         "/api/chains" => (200, json!({"chains": crate::chains::as_json()})),
+        "/api/update" => (200, crate::update::status()),
         "/api/onboard" => (200, crate::onboard::status()),
         "/api/onboard/parking" => (200, crate::onboard::parking_suggestions()),
         p if p.starts_with("/api/agent") => {
@@ -466,12 +467,8 @@ fn add_pool(addr: &str, name: Option<&str>, cid: u64) -> Result<Value, String> {
     ] {
         e[k] = v;
     }
-    if pegged {
-        let span = e["strategy"]["span"].as_i64().unwrap_or(3).max(3 * spacing);
-        e["strategy"]["span"] = json!(span);
-    } else {
-        e["strategy"]["span"] = json!(60 * spacing);
-        e["strategy"]["guard"] = Value::Null;
+    e["strategy"] = crate::ladder::as_graph(&crate::ladder::Params::for_pool(spacing, pegged));
+    if !pegged {
         e["max_spot_dev_ticks"] = json!((10 * spacing).max(100));
         e["slippage_bps"] = json!(10.0);
         e["max_swap_cost_bps"] = json!(15.0);
@@ -569,6 +566,7 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
                     return Err("allocation_pct must be 0-100".into());
                 }
                 p["allocation_pct"] = json!(a);
+                p["strategy"] = crate::ladder::normalized(&p["strategy"]);
                 settings::validate_pool(&p)?;
                 out.push(p);
             }
@@ -576,6 +574,11 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
             w.request(false);
             Ok(json!({"ok": true}))
         }
+        "/api/update" => match body["action"].as_str().unwrap_or("") {
+            "check" => crate::update::check(),
+            "install" => crate::update::install(),
+            _ => Err("expected {action: check | install}".into()),
+        },
         "/api/chains" => {
             let id = body["id"].as_u64().ok_or("expected {id, enabled}")?;
             if body.get("rpc").is_some() || body.get("send_rpc").is_some() || body.get("batch_size").is_some() {

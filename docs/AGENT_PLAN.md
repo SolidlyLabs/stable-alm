@@ -4,7 +4,8 @@ Status: revised 19 Oct 2026 after two external reviews, a code-checked review, a
 decisions. Phases 1 to 6 are built behind Settings → Experimental features (off by default; each
 part has its own switch on top), with Liquidity Lens as placeholder data until its features arrive.
 Phase 7 (the forward test) is elapsed time; phase 8 (the MCP server) is deferred to a later phase (owner's decision, 19 Oct 2026). Section 2a
-records where the build differs from this plan.
+records where the build differs from this plan. Section 17 (phase 9) adds research discipline after an
+external review; its first part (9a) is built.
 
 v4 matches the plan to how the code actually works:
 - a per-chain run lock, because capital is booked from wallet changes;
@@ -717,7 +718,7 @@ does not make injection harmless; provenance, turnover limits and caps apply.
 3. **Scored forward test, 30 days**, against shadow baselines from the same capital:
    - the static setup;
    - holding;
-   - the plain ladder;
+   - the app's default ladder (a ladder block with the pool's defaults);
    - the deterministic rules manager.
 4. **Shadow costs are charged.** Dry-run releases today move tokens "as they are" at no cost. The
    shadow books charge every capital move and strategy switch at the quote-based cost (the *now*
@@ -851,6 +852,7 @@ does not make injection harmless; provenance, turnover limits and caps apply.
 | 6. Baseline and shadow harness | Rules manager; shadow books **with quote-based costs**; scored report; evidence counts | 1–2 weeks |
 | 7. Development shadow → freeze → scored test → small live stage | — | 6+ weeks elapsed |
 | 8. MCP server | Same coordinator, queue, lock and gate | deferred: not part of this build |
+| 9. Research discipline | Section 17: research cutoff, optimizer tool, counted search ledger, switching hurdle, rules-manager book (9a); then the research ledger, candidate watchlist, variance bands, richer signals, allocation research (9b), and pools with untracked tokens (9c) | 9a built 19 Oct 2026; 9b and 9c open |
 
 **Required failure tests** (scripted, each with its expected end state):
 - an emergency exit while a pool run holds the run lock: no tokens booked to the wrong pool, and the
@@ -886,7 +888,79 @@ does not make injection harmless; provenance, turnover limits and caps apply.
 - a restart with a warm cache: no history downloaded again, only top-ups;
 - a damaged cache file: that piece alone downloaded again, nothing read from it.
 
-## 17. Still to confirm
+## 17. Phase 9: research discipline (after the external review of 19 Oct 2026)
+
+An outside review of the whole system made a point this plan already agreed with: the agent's value
+is in choosing **which** strategies, assumptions and pools are worth testing, while the Rust optimizer
+answers which parameters fit them best. The review's warning follows from it: the more the system
+searches, the more it finds strategies that only fit the past. The review also showed where the build
+fell short of this plan. Phase 9 closes those gaps first (9a), then adds what the review proposed that
+the plan did not have (9b), and the owner's request for pools with untracked tokens (9c).
+
+### 9a. Gaps between the plan and the build (built 19 Oct 2026)
+
+| Gap | Plan said | Built |
+|---|---|---|
+| The agent cannot direct the optimizer | section 8 lists `optimize` and `check_overfit` | tool `optimize`: the Strategy lab's auto optimizer (walk-forward or rotating) on a pool and a strategy, behind the research cutoff, its run count bounded; it returns the optimizer's own verdict and the settings it suggests |
+| Research sees the gate's slice | section 9: research tools see data up to 14 days ago | `backtest` and `optimize` end their period 14 days ago (`until`); the gate's recent-window failure is reported without its numbers, and `get_journal` drops the gate's recent-window figures |
+| "Found by search" is self-declared | section 9: every candidate tried is recorded; more than 5 in 7 days is flagged | `agent/search.rs`: code records every strategy the agent backtests, optimizes or submits (its hash, and how many configurations it cost); more than 5 distinct candidates on a pool in 7 days is an advisory flag, so the plan waits for approval |
+| No switching hurdle | section 9: a replacement must beat the current strategy by more than the switching cost | over the long window the new strategy must beat the current one by the estimated switching cost: half the capital swapped at the pool's swap cost, plus three transactions of gas, as a share of capital |
+| No rules-manager baseline | sections 0 and 12: a deterministic baseline in the shadow test | a **rules-manager book** in the shadow report: the pool's frozen strategy re-tuned every 7 days by the auto optimizer on the 4 weeks before (the deterministic research manager the agent has to beat), backtested over the forward-test period |
+
+### 9b. From the review, not yet in the plan
+
+1. **A research ledger across the whole process.** The search ledger counts per pool; the review's
+   arithmetic (100 structures × 2,000 configurations = 200,000 tried) is about the whole programme.
+   Record every hypothesis the agent tests (its thesis, the strategies, the configurations evaluated,
+   the outcome, failures included) and show the running totals. The gate's bar then rises with the
+   number of configurations tried: a deflated threshold (the expected best of N trials with no edge,
+   from the variants' spread) instead of a fixed one.
+2. **A candidate watchlist in shadow.** A strategy that passes the gate need not be applied. It can be
+   put on watch, run forward on live swaps next to the deployed one (same capital, quote-based costs),
+   and promoted only after it has beaten the deployed strategy by the switching cost over at least 14
+   days it was never tuned on. A plan change `watch` adds or drops a candidate; at most 3 per pool.
+3. **Noise, regime change, structural failure, opportunity.** Each pool gets a variance band: the
+   distribution of the deployed strategy's daily return over holding, from its backtest and its live
+   history (bootstrap, 5th to 95th percentile over 3- and 7-day windows). The snapshot says whether
+   the last days are inside the band. A review that proposes a change classifies its reason as one of
+   the four; "noise" may only lead to `hold`. Triggers fire on leaving the band, not on a loss alone.
+4. **A richer vocabulary for hypotheses.** Graph nodes cover prices, indicators, fees and token
+   prices. The review's example (a z-score exit that also weighs volatility, funding and liquidity)
+   cannot be backtested yet. Add nodes for realised volatility, funding rate and open interest (with
+   history: a backfill from Hyperliquid's funding history, not only the hourly snapshots taken since
+   phase 1), and the pool's liquidity and TVL change (from the data processor).
+5. **Allocation research.** The optimizer works per pool. A portfolio backtest over the managed pools
+   with the fee elasticity model (more capital, a diluted fee share) puts a number on "would $2k more
+   in cbETH/WETH pay for its ETH exposure?", and every capital move gets a switching break-even.
+6. **The two-arm experiment.** The rules-manager book (9a) re-tunes strategies only. A second shadow
+   portfolio, run by the rules manager alone and allowed to re-tune and move capital under the same
+   gate and limits, makes the forward test a fair comparison of the agent with deterministic research
+   on the same pools, capital and data; the report puts the API cost against the edge in both arms.
+
+### 9c. Pools with tokens we do not track yet (owner's request, 19 Oct 2026)
+
+The owner wants the agent able to act on an opportunity in a pool whose tokens are not approved,
+including **creating a Solidly V3 pool** (pool creation is permissionless) when none exists for a pair
+and fee tier. This changes the scope row of section 0 ("a pool with a token not yet approved always
+needs approval"). Proposed bounds, all enforced by code, to confirm before it is built:
+
+- **Two plan changes**: `adopt_pool` (an existing pool with a token not approved) and `create_pool`
+  (the factory call, then the first deposit, in one plan).
+- **Token checks before any deposit**: a buy and a sell quote through the aggregator at the deposit
+  size and at 10× it, both within `limits.unknown_token_cost_bp`; not a fee-on-transfer or rebasing
+  token (a transfer round trip in simulation); a CEX or aggregator price; contract age and holder
+  count above minimums.
+- **The starting price of a created pool** comes from the aggregator's quote, never from the agent,
+  and the deposit is re-quoted just before it is sent.
+- **Exposure**: at most `limits.unknown_token_pct` of the account per untracked token (default 2%),
+  at most `limits.unknown_tokens_pct` across all of them (default 5%), and a new pool starts with at
+  most `new_pool_pct`.
+- **No history**: the 14-day history rule cannot apply to a new pool, so only built-in strategies may
+  run on it (no agent-written graphs), with exit to the safe asset on.
+- **Alerts always**, in auto mode too; only the owner adds a token to the approved list.
+- The creation's gas counts in the plan's cost and in the switching hurdle.
+
+## 18. Still to confirm
 
 - The cbETH/ETH exchange-rate source on Base.
 - A source of market-wide liquidations, or drop the field.
@@ -895,3 +969,4 @@ does not make injection harmless; provenance, turnover limits and caps apply.
 - How Claude Desktop loads a local stdio MCP server (phase 8, deferred).
 - Liquidity Lens: the priorities of the request list (`LLENS_REQUESTS.md`), above all key issuance
   (R1) and exposing the traffic mix (R5); the organisation cap and per-key caps.
+- The bounds for pools with untracked tokens and pool creation (section 17, 9c).

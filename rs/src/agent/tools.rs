@@ -9,6 +9,7 @@
 //! | get_liquidity | market | Liquidity Lens data for a token or pool (placeholder data says so) |
 //! | get_journal | read | the last decision records |
 //! | backtest | research | a strategy on a pool against its current one and holding (slow) |
+//! | optimize | research | the auto optimizer (walk-forward) on a pool's strategy: re-tunes it on past periods, trades the next, and says whether that beats keeping it (slow) |
 //! | web_search | research | the API's server-side search, at most `agent.searches_per_review` |
 //! | write_note | memory | a note for the next reviews (kept 30) |
 //! | hold | decision | no change, with the reason |
@@ -16,6 +17,10 @@
 //! | submit_plan | decision | a plan; the policy gate decides what happens to it |
 //!
 //! Routine reviews get no submit_plan.
+//!
+//! Research (backtest, optimize) ends its period `sgate::RECENT_DAYS` ago: the strategy gate's recent
+//! window stays out of sample however much the agent searches, and every strategy tried is counted
+//! (search.rs). `get_journal` leaves the gate's recent-window figures out for the same reason.
 
 use serde_json::{json, Value};
 
@@ -63,9 +68,13 @@ pub fn definitions(x: &Value, routine: bool) -> Vec<Value> {
                  &["kind", "chain_id", "address"])),
         tool("get_journal", "The last decision records (reviews, plans, risk actions, approvals).",
              obj(json!({"n": {"type": "integer"}, "kinds": {"type": "array", "items": {"type": "string"}}}), &["n", "kinds"])),
-        tool("backtest", "Backtest a strategy on a pool over the last N days (1-90) against its current strategy and holding, with the pool's costs. Takes minutes; use sparingly.",
+        tool("backtest", "Backtest a strategy on a pool over N days (1-90) ending 14 days ago (the last 14 days are held out for the strategy gate), against its current strategy and holding, with the pool's costs. Every strategy tried is counted; more than 5 on a pool in 7 days makes a plan wait for approval. Takes minutes; use sparingly.",
              obj(json!({"chain_id": {"type": "integer"}, "pool": {"type": "string"}, "days": {"type": "integer"}, "strategy_json": {"type": "string"}, "capital_usd": {"type": "number"}}),
                  &["chain_id", "pool", "days", "strategy_json", "capital_usd"])),
+        tool("optimize", "Run the auto optimizer on a strategy for a pool: walk-forward over N days (35-180) ending 14 days ago. It picks the settings that matter, re-tunes them on the periods before each period and trades the next, and says whether re-tuning beats keeping the strategy out of sample; if so it returns the settings tuned on the most recent periods (strategy_json to submit). Use it to tune a structure you chose; it cannot invent one. Node strategies (type graph) only; the ladder is a ladder block in one. Empty strategy_json means the pool's current strategy. Takes several minutes; counted as one search per configuration it ran.",
+             obj(json!({"chain_id": {"type": "integer"}, "pool": {"type": "string"}, "days": {"type": "integer"}, "strategy_json": {"type": "string"},
+                        "objective": {"type": "string", "enum": ["return", "vs_hold"]}, "capital_usd": {"type": "number"}}),
+                 &["chain_id", "pool", "days", "strategy_json", "objective", "capital_usd"])),
         tool("write_note", "Keep a short note for the next reviews (what to watch, what was tried). Not a decision.",
              obj(json!({"text": {"type": "string"}}), &["text"])),
         tool("hold", "End the review with no change.", obj(json!({"reason": {"type": "string"}}), &["reason"])),
@@ -183,7 +192,9 @@ pub fn run(name: &str, input: &Value, worker: &crate::worker::Worker) -> Result<
         "get_journal" => {
             let kinds: Vec<String> = input["kinds"].as_array().into_iter().flatten().filter_map(|k| k.as_str().map(String::from)).collect();
             let k: Vec<&str> = kinds.iter().map(|s| s.as_str()).collect();
-            Ok(json!(super::journal::recent(input["n"].as_u64().unwrap_or(20).clamp(1, 100) as usize, &k)))
+            let mut rows = super::journal::recent(input["n"].as_u64().unwrap_or(20).clamp(1, 100) as usize, &k);
+            rows.iter_mut().for_each(held_out);
+            Ok(json!(rows))
         }
         "backtest" => {
             let strategy: Value = serde_json::from_str(&s("strategy_json")).map_err(|e| format!("strategy_json is not JSON: {e}"))?;
@@ -194,8 +205,9 @@ pub fn run(name: &str, input: &Value, worker: &crate::worker::Worker) -> Result<
             let wallet = crate::settings::load_settings()["wallet"].as_str().unwrap_or("").to_string();
             let compare = current.map(|c| json!([{"id": "current", "name": "Current", "strategy": c}])).unwrap_or(json!(false));
             let req = json!({"chain_id": cid, "pool": pool, "days": days, "capital_usd": input["capital_usd"].as_f64().unwrap_or(1000.0).max(10.0),
-                             "strategy": strategy, "compare": compare, "hold": true});
+                             "strategy": strategy, "compare": compare, "hold": true, "until": research_until(), "costs": super::sgate::costs(cid, &pool, 1.0)});
             let id = crate::backtest::start(req, wallet)?;
+            super::search::record(cid, &pool, "backtest", &strategy, 1);
             let until = std::time::Instant::now() + std::time::Duration::from_secs(900);
             loop {
                 let j = crate::backtest::job(id).ok_or("the backtest disappeared")?;
@@ -203,7 +215,7 @@ pub fn run(name: &str, input: &Value, worker: &crate::worker::Worker) -> Result<
                     let r = &j["result"];
                     let brief = |v: &Value| json!({"pnl": v["pnl"], "vs_hold": v["vs_hodl"], "fees": v["fees"], "costs": v["costs"], "actions": v["actions"],
                                                   "time_in_range": v["time_in_range"], "spot_blocked_bars": v["spot_blocked_bars"]});
-                    return Ok(json!({"days": r["span_days"], "capital": r["runs"]["main"]["start_value"], "new": brief(&r["runs"]["main"]),
+                    return Ok(json!({"days": r["span_days"], "from": r["from"], "to": r["to"], "capital": r["runs"]["main"]["start_value"], "new": brief(&r["runs"]["main"]),
                                      "current": r["runs"]["compare"].as_array().and_then(|a| a.first()).map(brief), "hold": brief(&r["runs"]["hold"]),
                                      "units": "the numeraire token of the pool"}));
                 }
@@ -216,6 +228,7 @@ pub fn run(name: &str, input: &Value, worker: &crate::worker::Worker) -> Result<
                 std::thread::sleep(std::time::Duration::from_secs(2));
             }
         }
+        "optimize" => optimize(input),
         "write_note" => {
             let t: String = s("text").chars().take(1000).collect();
             super::append("notes.jsonl", &json!({"ts": super::now(), "text": t}));
@@ -227,9 +240,106 @@ pub fn run(name: &str, input: &Value, worker: &crate::worker::Worker) -> Result<
     }
 }
 
+/// Where research ends: the strategy gate's recent window is never seen by it.
+fn research_until() -> i64 {
+    super::now() - super::sgate::RECENT_DAYS * 86_400
+}
+
+/// Drop the strategy gate's recent-window figures from a journal record (anywhere in it): the agent
+/// learns only that the held-out window passed or failed.
+fn held_out(v: &mut Value) {
+    match v {
+        Value::Object(m) => {
+            if m.contains_key("long") && m.contains_key("thin") {
+                m.remove("recent");
+            }
+            m.values_mut().for_each(held_out);
+        }
+        Value::Array(a) => a.iter_mut().for_each(held_out),
+        _ => {}
+    }
+}
+
+/// The `optimize` tool: the Strategy lab's walk-forward auto optimizer, bounded for a review.
+fn optimize(input: &Value) -> Result<Value, String> {
+    let s = |k: &str| input[k].as_str().unwrap_or("").trim().to_string();
+    let cid = input["chain_id"].as_u64().ok_or("chain_id")?;
+    let pool = s("pool").to_lowercase();
+    let days = input["days"].as_i64().unwrap_or(84).clamp(35, 180);
+    let strategy: Value = if s("strategy_json").is_empty() {
+        pool_cfg(&pool).map(|p| p["strategy"].clone()).filter(|v| v.is_object()).ok_or("the pool has no strategy: give strategy_json")?
+    } else {
+        serde_json::from_str(&s("strategy_json")).map_err(|e| format!("strategy_json is not JSON: {e}"))?
+    };
+    // weekly periods, the first four only train: at most 25 re-tunings, 30 runs each, 2 workers
+    let periods = (days / 7).clamp(5, 26);
+    let spec = json!({"auto": true, "mode": "walk", "holdout": true, "objective": if s("objective") == "vs_hold" { "vs_hold" } else { "return" },
+                      "periods": periods, "train": 4, "runs": 30, "workers": 2, "current_in_sample": false});
+    let req = json!({"chain_id": cid, "pool": pool, "days": days, "capital_usd": input["capital_usd"].as_f64().unwrap_or(1000.0).max(10.0),
+                     "strategy": strategy, "until": research_until(), "costs": super::sgate::costs(cid, &pool, 1.0), "optimize": spec});
+    let wallet = crate::settings::load_settings()["wallet"].as_str().unwrap_or("").to_string();
+    let id = crate::backtest::start(req, wallet)?;
+    // within the review's time: stopped after 8 minutes, the periods tested so far still count
+    let stop_at = std::time::Instant::now() + std::time::Duration::from_secs(480);
+    let give_up = stop_at + std::time::Duration::from_secs(240);
+    let mut stopped = false;
+    let r = loop {
+        let j = crate::backtest::job(id).ok_or("the optimizer run disappeared")?;
+        match j["state"].as_str() {
+            Some("done") => break j["result"]["optimize"].clone(),
+            Some("error") => return Err(j["error"].as_str().unwrap_or("the optimizer failed").into()),
+            _ => {}
+        }
+        let now = std::time::Instant::now();
+        if now > give_up {
+            return Err("the optimizer did not stop in time".into());
+        }
+        if now > stop_at && !stopped {
+            stopped = crate::optimize::stop(id);
+        }
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    };
+    let w = &r["walk"];
+    let configs = w["runs_per_period"].as_u64().unwrap_or(30) * (w["tested"].as_u64().unwrap_or(0) + 1) + r["screen"].as_array().map(|a| a.len() as u64).unwrap_or(0);
+    super::search::record(cid, &pool, "optimize", &strategy, configs);
+    let apply = r["top"].get(0).and_then(|t| t["strategy"].as_object()).filter(|_| r["suggestion"]["apply"] == 0).map(|o| Value::Object(o.clone()).to_string());
+    Ok(json!({"verdict": r["suggestion"]["why"], "apply": apply.is_some(), "strategy_json": apply, "tuned_settings": r["picked"],
+              "rows": w["rows"], "periods_tested": w["tested"], "period_days": w["period_days"], "edge": w["edge"], "stability": w["stability"],
+              "stopped_early": r["stopped"], "configurations_run": configs, "search": super::search::stats(&pool),
+              "units": "annualised % of capital; rows: re-tuned every period vs the current settings (and holding), out of sample"}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_gate_recent_window_is_left_out_of_the_journal() {
+        let mut v = json!([{"kind": "strategy_gate", "result": {"pass": false, "why": "x", "long": {"new": 0.01}, "recent": {"new": -0.02}, "thin": {}}},
+                           {"kind": "plan", "report": {"sgate_1": {"long": {}, "thin": {}, "recent": {"new": 0.5}}}, "recent": "kept: not a gate record"}]);
+        v.as_array_mut().unwrap().iter_mut().for_each(held_out);
+        assert!(v[0]["result"].get("recent").is_none() && v[0]["result"]["long"]["new"] == json!(0.01));
+        assert!(v[1]["report"]["sgate_1"].get("recent").is_none());
+        assert_eq!(v[1]["recent"], json!("kept: not a gate record"));
+        assert!(research_until() <= super::super::now() - 14 * 86_400);
+    }
+
+    /// The optimize tool on a copy of real data: ALM_HOME must point at a copy of the app's folder
+    /// (never the live one) holding the pool's event store. cargo test -- --ignored optimize_on_a_copy --nocapture
+    #[test]
+    #[ignore]
+    fn optimize_on_a_copy() {
+        let home = std::env::var("ALM_HOME").expect("set ALM_HOME to a copy of the app folder");
+        assert!(!home.to_lowercase().replace('\\', "/").trim_end_matches('/').ends_with("appdata/local/stablealm"), "not on the live folder");
+        let t0 = std::time::Instant::now();
+        let r = optimize(&json!({"chain_id": crate::chains::BASE, "pool": "0x74ad64bac8df96af2b63ea50c3d8840b79aa7a3b", "days": 49,
+                                 "strategy_json": "",
+                                 "objective": "return", "capital_usd": 5000.0})).expect("the optimizer ran");
+        println!("{} s\n{}", t0.elapsed().as_secs(), serde_json::to_string_pretty(&r).unwrap());
+        assert!(r["verdict"].is_string() && r["configurations_run"].as_u64().unwrap() >= 1);
+        assert!(r["search"]["candidates"].as_u64().unwrap() >= 1, "the run was counted");
+        assert_eq!(r["apply"].as_bool(), Some(r["strategy_json"].is_string()));
+    }
 
     #[test]
     fn plan_bodies() {

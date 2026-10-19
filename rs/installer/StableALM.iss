@@ -1,13 +1,13 @@
 ; Inno Setup script: per-user Windows installer for the Rust app (rs/target/release/StableALM.exe).
 ;   cd rs && cargo build --release
-;   "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" /DAppVersion=0.5.0 installer\StableALM.iss
+;   "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" /DAppVersion=0.5.1 installer\StableALM.iss
 ; Output: rs\dist\StableALM-Setup-<version>.exe
 ; Program: %LOCALAPPDATA%\Programs\StableALM (no admin). State: %LOCALAPPDATA%\StableALM, kept on
 ; uninstall unless the user chooses to delete it. A running instance is stopped gracefully first
 ; (StableALM.exe --quit waits for the current cycle to finish).
 
 #ifndef AppVersion
-  #define AppVersion "0.5.0"
+  #define AppVersion "0.5.1"
 #endif
 #ifndef ExePath
   #define ExePath "..\target\release\StableALM.exe"
@@ -57,6 +57,8 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{app}\StableALM.exe"; Description: "Start Stable ALM now"; Flags: nowait postinstall skipifsilent
+; an update the app installed itself (silent): start the new version
+Filename: "{app}\StableALM.exe"; Flags: nowait; Check: WizardSilent
 
 [UninstallRun]
 Filename: "{app}\StableALM.exe"; Parameters: "--quit"; Flags: runhidden waituntilterminated; RunOnceId: "QuitApp"

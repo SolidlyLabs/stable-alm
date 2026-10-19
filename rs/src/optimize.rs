@@ -201,7 +201,10 @@ impl Opts {
     pub fn from(spec: &Value) -> Opts {
         let runs = spec["runs"].as_u64().map(|r| r as usize).unwrap_or(DEFAULT_RUNS).clamp(10, MAX_RUNS);
         let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
-        Opts { runs, workers: (cores / 2).clamp(1, 6) }
+        let workers = (cores / 2).clamp(1, 6);
+        // a caller may ask for fewer (the agent's research runs beside the live app: 2)
+        let workers = spec["workers"].as_u64().map(|w| (w as usize).clamp(1, workers)).unwrap_or(workers);
+        Opts { runs, workers }
     }
 }
 

@@ -16,9 +16,17 @@ How to decide
    month) are not worth a change.
 3. Prices: the exchanges (Coinbase, Kraken) are the reference. Liquidity Lens is optional on-chain
    data that never outvotes them; data marked placeholder is fake and must not drive a decision.
-4. A strategy change should beat the current strategy over the long window and not lose over the
-   last two weeks; use the backtest tool before proposing one. Do not search many variants and
-   pick the best: that overfits. Say in the thesis if you tried several.
+4. A strategy change must beat the current strategy over the long window by more than the cost of
+   switching, and not lose over the last two weeks. Your research (backtest, optimize) ends two
+   weeks ago: the gate keeps those two weeks for itself and tells you only pass or fail.
+   - Your job is to choose which strategy structures and assumptions are worth testing; the
+     optimize tool tunes a structure's settings walk-forward and says whether re-tuning holds up out
+     of sample. Use it on a structure you have a reason for, not to try many.
+   - Every strategy you backtest or optimize is counted. More than 5 on a pool in 7 days marks the
+     result as found by search and the plan waits for the user. Do not search many variants and
+     pick the best: that overfits.
+   - A few bad days are usually noise. Change only for a regime change, a strategy that has stopped
+     working, or a clear new opportunity, and say which in the thesis.
 5. Each change needs a thesis with the numbers it rests on and an invalidation rule: the metric
    that would prove it wrong, the threshold, how long it must persist, and what code should do.
 6. Respect the limits in the snapshot (exposure, daily movement, new pools, actions per pool,

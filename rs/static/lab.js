@@ -320,7 +320,7 @@
     out_of_range: ["Price out of range", "pos", "True while the price is outside the current position's range, widened by the buffers (negative buffers trigger inside)."],
     range_shift: ["Range shifted", "pos", "True when the wanted range's middle is further than the value from the current position's middle."],
     range: ["Range", "out", "The range to hold: its lower and upper edges, rounded out to the tick spacing. Required."],
-    ladder: ["Ladder", "out", "Instead of a Range: the app's ladder. Capital is spread over single ticks within the span of the median price over the period, weighted by where fees were paid and how much liquidity others hold there. It is re-solved every 'every' hours (and whenever Rebalance's condition holds, after its delay and cooldown) and moved only when at least 'turnover' of the value would move."],
+    ladder: ["Ladder", "out", "Instead of a Range: the app's ladder. Capital is spread over single ticks within the span of the median price over the period, weighted by where fees were paid and how much liquidity others hold there. It is re-solved every 'every' hours (and whenever Rebalance's condition holds, after its delay and cooldown) and moved only when at least 'turnover' of the value would move. 'guard' (0 = off) is the depeg guard: no action while the price is further than that from its 7-day median."],
     rebalance: ["Rebalance when", "out", "Moves to the wanted range when its condition is true (default: the price left the range), after the delay and not within the cooldown."],
     exit: ["Exit when", "out", "Withdraws everything while its condition is true (after the delay). Deposits again when 're-enter' is true (default: when the exit condition is false). 'to' picks the token to wait in: above 0.5 all token0, below −0.5 all token1, else the strategy's 'Withdraw into'; when it changes sides while out, the wait switches token."],
     hold: ["Hold when", "out", "While true, nothing is done at all: a freeze, like the depeg guard."],
@@ -329,7 +329,7 @@
   const BOOL = new Set(["gt", "lt", "cross_above", "cross_below", "between", "distance_gt", "and", "or", "not", "out_of_range", "range_shift"]);
   const PNAME = {hours: "hours", k: "k", value: "value", below: "below", above: "above", delay_min: "delay (min)", cooldown_min: "cooldown (min)",
     fast: "fast (h)", slow: "slow (h)", signal: "signal (h)", d_hours: "%D (h)", stoch_hours: "stoch (h)", af: "start step", step: "step", max_af: "max step",
-    hot_hours: "hot (h)", span: "span", every_hours: "every (h)", turnover: "turnover", tenkan: "conversion (h)", kijun: "base (h)", span_b: "span B (h)", shift: "shift (h)", unit_hours: "unit (h)", window: "window (h)", smooth: "smooth (h)", q: "q"};
+    hot_hours: "hot (h)", span: "span", every_hours: "every (h)", turnover: "turnover", guard: "guard", tenkan: "conversion (h)", kijun: "base (h)", span_b: "span B (h)", shift: "shift (h)", unit_hours: "unit (h)", window: "window (h)", smooth: "smooth (h)", q: "q"};
   const kcat = k => (L.lib && L.lib.catalog || []).find(x => x.kind === k);
   const gcol = k => (GROUPS.find(g => g[0] === (K[k] || [])[1]) || [, , "var(--mute)"])[2];
 
@@ -601,7 +601,7 @@
     const items = allItems().filter(x => !x.draft).map(x => ({id: x.id, strategy: body(x.strategy)}));
     let id;
     while (true) {
-      try { id = (await api("/api/backtest", {chain_id: L.chain, pool: L.pool, days: L.days, capital_usd: L.capital, costs: L.costs, strategy: {type: "ladder"}, batch: items})).id; break; }
+      try { id = (await api("/api/backtest", {chain_id: L.chain, pool: L.pool, days: L.days, capital_usd: L.capital, costs: L.costs, strategy: ladderGraph({}, sp(), L.pegged), batch: items})).id; break; }
       catch (e) {
         if (!/already running/.test(e.message)) { L.apr.err = e.message; return renderLib(); }
         await new Promise(r => setTimeout(r, 1200));
@@ -668,9 +668,21 @@
       await loadLib(); renderEd(); toast("Deleted.");
     } catch (e) { toast(e.message, true); }
   }
-  const typeLabel = s => s.type === "graph" ? "node strategy" : s.type === "custom" ? "simple rules" : "ladder";
+  const typeLabel = s => s.type === "custom" ? "simple rules" : "node strategy";
+  // the ladder is a block of a node strategy: an old plain ladder (the app default, a saved one) opens
+  // as one ladder block with this pool's defaults, as the app migrates it (ladder.rs)
+  function ladderGraph(s, spacing, pegged) {
+    const d = Object.assign({}, (S && S.ladder_defaults) || {}), own = Object.assign({}, s), spc = Math.max(1, spacing || 1);
+    delete own.type;
+    const q = Object.assign({}, d, pegged ? {span: Math.max(d.span || 3, 3 * spc)} : {span: 60 * spc, guard: null}, own);
+    const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+    return {type: "graph", name: "Ladder", nodes: [{id: "lad", kind: "ladder", unit: "ticks", x: 960, y: 60, in: {},
+      p: {hours: clamp((q.lookback || 86400) / 3600, 1, 168), span: Math.max(0, Math.round(q.span ?? 3)), every_hours: clamp((q.every || 72) * 300 / 3600, 0.1, 168),
+          turnover: clamp(q.turnover ?? 0.4, 0, 1), guard: Math.max(0, q.guard || 0)}}]};
+  }
   // a built-in simple-rules strategy in spacings becomes ticks of this pool, so the form shows ticks
   function forPool(s) {
+    if ((s.type || "ladder") === "ladder") return ladderGraph(s, sp(), L.pegged);
     const x = JSON.parse(JSON.stringify(s));
     if (x.type === "custom" && x.unit === "spacings") {
       for (const k of ["width", "offset_up", "offset_down", "buffer_lo", "buffer_hi"]) if (x[k] != null) x[k] = Math.round(x[k] * sp());
@@ -694,7 +706,6 @@
     if (L.dirty && !confirm("Discard the changes to the strategy you are editing?")) return;
     if (kind === "ladder_nodes") setCur({id: null, name: "My ladder", description: "", strategy: {type: "graph", nodes: [
       {id: "lad", kind: "ladder", unit: "spacings", x: 500, y: 60, p: {hours: 24, span: 3, every_hours: 6, turnover: 0.4}, in: {}}]}});
-    else if (kind === "ladder") setCur({id: null, name: "My ladder", description: "", strategy: {type: "ladder"}});
     else newGraph();
     L.dirty = true;
     renderLib(); renderEd(); chartRange(); schedule(0);
@@ -761,14 +772,13 @@
     $("labOpen").onclick = openBrowser;
     $("labNewBtn").onclick = e => {
       const r = e.currentTarget.getBoundingClientRect();
-      openMenu(r.left, r.bottom + 6, `<div class="ttl">New strategy</div>${item("graph", "Node strategy", "<kbd>blocks</kbd>")}${item("ladder_nodes", "Ladder as blocks", "<kbd>ladder + blocks</kbd>")}${item("ladder", "Ladder", "<kbd>the app's own</kbd>")}`,
+      openMenu(r.left, r.bottom + 6, `<div class="ttl">New strategy</div>${item("graph", "Node strategy", "<kbd>blocks</kbd>")}${item("ladder_nodes", "Ladder", "<kbd>ladder block</kbd>")}`,
         m => { m.onclick = ev => { const a = ev.target.closest("[data-act]"); if (a) { closeMenu(); newStrategy(a.dataset.act); } }; });
     };
     if ($("labDel")) $("labDel").onclick = del;
     const body = $("labEdBody");
-    if (s.type === "graph") renderGraph(body);
-    else if (s.type === "custom") renderRules(body);
-    else renderLadder(body);
+    if (s.type === "custom") renderRules(body);
+    else renderGraph(body);
   }
 
   // simple rules form
@@ -854,21 +864,6 @@
       if (k === "skew") el.previousElementSibling.querySelector("i").textContent = fmt((r.skew ?? .5) * 100, 0) + "%";
     });
   }
-  // ladder form
-  function renderLadder(box) {
-    const s = L.cur.strategy, d = S.ladder_defaults || {};
-    const f = (k, l, step) => `<div data-help="param-${k}"><label class="f">${l}</label><input type="number" step="${step}" data-l="${k}" value="${s[k] ?? ""}" placeholder="${k === "span" ? "pool default" : d[k] ?? ""}"></div>`;
-    box.innerHTML = `<p class="mute small" style="margin-top:0">The app's own strategy. Empty fields use the pool's defaults.</p><div class="lf">
-      ${f("lookback", "Lookback (s)", 3600)}${f("span", "Span (ticks each side)", 1)}${f("every", "Re-solve every (bars of 5 min)", 1)}${f("turnover", "Move when this share changes", 0.05)}${f("guard", "Depeg guard (ticks; empty = off)", 1)}</div>` + costsBox();
-    box.oninput = e => {
-      const el = e.target;
-      if (el.dataset.c) return onCost(el);
-      if (!el.dataset.l) return;
-      if (el.value === "") delete s[el.dataset.l]; else s[el.dataset.l] = parseFloat(el.value);
-      changed();
-    };
-  }
-
   // ---------- node editor ----------
   let nodeDrag = null, wireDrag = null;
   function renderGraph(box) {
@@ -2388,11 +2383,7 @@
       for (const k of ["cutoff_lo", "cutoff_hi", "exit_lo", "exit_hi", "guard"]) if (s[k] == null || s[k] === "") delete s[k];
       return s;
     }
-    if (s.type === "ladder") {
-      const d = Object.assign({}, (S && S.ladder_defaults) || {}), own = Object.assign({}, s);
-      delete own.type;
-      return Object.assign({type: "ladder"}, d, pegged ? {span: Math.max(d.span || 3, 3 * spc)} : {span: 60 * spc, guard: null}, own);
-    }
+    if ((s.type || "ladder") === "ladder") return Object.assign(ladderGraph(s, spacing, pegged), {name: name || "Ladder"});
     if (s.type === "graph") s.name = name || s.name || "";
     return s;
   }

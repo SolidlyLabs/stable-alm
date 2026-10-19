@@ -190,6 +190,20 @@ positions.
 The same release has the plain `StableALM.exe` if you'd rather not install it, and you can always
 build it yourself (below).
 
+**Updates.** The installed app checks for a new release every 12 hours and offers it at the top of
+the dashboard (**Update now** installs it and restarts the app; **Settings › Check for updates**
+checks now). It offers only releases signed with a key on the signer whitelist built into the app,
+and installs an installer only if its checksum is the signed one. Each release has `SHA256SUMS.txt`
+and its signature `SHA256SUMS.txt.sig`; to check them by hand:
+
+```bash
+ssh-keygen -Y verify -f rs/release/allowed_signers -I release -n stable-alm-release -s SHA256SUMS.txt.sig < SHA256SUMS.txt
+```
+
+**Strategies.** The ladder is a block of a node strategy (Strategy lab). A ladder set up with 0.5.0
+or earlier becomes a node strategy with one ladder block and the same settings on the first start
+(the old `pools.json` is kept as `pools.json.v050.bak`).
+
 ## Using the app
 
 1. Start Stable ALM. A tray icon appears: click it for its menu, double-click it to open the dashboard
@@ -231,8 +245,18 @@ It is a single file of about 2.3 MB; copy it anywhere and run it.
 To build the Windows installer, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run, from `rs/`:
 
 ```bash
-ISCC /DAppVersion=0.5.0 installer/StableALM.iss     # -> rs/dist/StableALM-Setup-0.5.0.exe
+ISCC /DAppVersion=0.5.1 installer/StableALM.iss     # -> rs/dist/StableALM-Setup-0.5.1.exe
 ```
+
+To sign a release (writes `SHA256SUMS.txt` and `SHA256SUMS.txt.sig` next to the files; upload both):
+
+```bash
+pwsh release/sign.ps1 -Files dist/StableALM-Setup-0.5.1.exe, dist/StableALM.exe
+```
+
+Signers are listed in `rs/release/allowed_signers` (OpenSSH format). To let someone else sign
+releases, add their public key there; installed copies trust it from the first release that
+contains it (signed by a key they already trust).
 
 Useful command-line options:
 

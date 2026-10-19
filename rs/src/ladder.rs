@@ -1,7 +1,15 @@
-//! The live strategy: Ladder (water-filling across single ticks) with the depeg guard. One
-//! decision at the latest bar (checked against the original Python version in parity.rs).
+//! The ladder (water-filling across single ticks) with the depeg guard: the solve behind the
+//! node strategies' ladder block (graph.rs). One decision at the latest bar (checked against the
+//! original Python version in parity.rs).
+//!
+//! There is no plain ladder strategy type any more: an old one ({"type": "ladder"}, in pools.json, a
+//! saved strategy or a request) is migrated to a node strategy with one ladder block and the same
+//! settings (`migrate`).
 
-use crate::data::{median, rolling_median_trailing, week_bars, Market};
+use crate::data::{median, Market};
+#[cfg(test)]
+use crate::data::{rolling_median_trailing, week_bars};
+use serde_json::{json, Map, Value};
 
 #[derive(Clone, Debug)]
 pub struct Params {
@@ -27,13 +35,51 @@ impl Params {
         })
     }
 
-    pub fn label(&self) -> String {
-        let mut s = format!("ladder(lookback={},span={},every={},turnover={}", self.lookback, self.span, self.every, self.turnover);
-        if let Some(g) = self.guard {
-            s += &format!(",guard={}", g as i64);
+    /// A pool's ladder as adding the pool sets it: 3 ticks (at least 3 spacings) and the depeg guard
+    /// on a pegged pair; 60 spacings and no guard on any other.
+    pub fn for_pool(spacing: i64, pegged: bool) -> Params {
+        let d = Params::from(&plain_defaults()).unwrap();
+        if pegged {
+            Params { span: d.span.max(3 * spacing), ..d }
+        } else {
+            Params { span: 60 * spacing, guard: None, ..d }
         }
-        s + ")"
     }
+}
+
+/// What the old plain ladder's settings defaulted to (pool defaults, settings.rs, before v0.5.1).
+pub fn plain_defaults() -> Map<String, Value> {
+    json!({"type": "ladder", "lookback": 86400, "span": 3, "every": 72, "turnover": 0.4, "guard": 15}).as_object().unwrap().clone()
+}
+
+/// The ladder as a node strategy: one ladder block with these settings (span and guard in ticks).
+/// The block's limits apply: lookback 1 to 168 hours, re-solve every 0.1 to 168 hours.
+pub fn as_graph(p: &Params) -> Value {
+    let hours = (p.lookback as f64 / 3600.0).clamp(1.0, 168.0);
+    let every_hours = (p.every as f64 * crate::data::BAR_S as f64 / 3600.0).clamp(0.1, 168.0);
+    json!({"type": "graph", "name": "Ladder", "nodes": [
+        {"id": "lad", "kind": "ladder", "x": 960, "y": 60, "unit": "ticks",
+         "p": {"hours": hours, "span": p.span.max(0), "every_hours": every_hours, "turnover": p.turnover.clamp(0.0, 1.0), "guard": p.guard.unwrap_or(0.0).max(0.0)}, "in": {}}]})
+}
+
+/// An old plain ladder as the same node strategy; None for any other strategy. A setting it leaves
+/// out takes the old pool default (`plain_defaults`, which the app merged in when loading pools).
+pub fn migrate(s: &Value) -> Option<Value> {
+    let o = s.as_object()?;
+    if o.get("type").and_then(|t| t.as_str()).unwrap_or("ladder") != "ladder" {
+        return None;
+    }
+    let mut m = plain_defaults();
+    for (k, v) in o {
+        m.insert(k.clone(), v.clone());
+    }
+    m.insert("type".into(), json!("ladder"));
+    Params::from(&m).ok().map(|p| as_graph(&p))
+}
+
+/// The strategy, an old plain ladder migrated.
+pub fn normalized(s: &Value) -> Value {
+    migrate(s).unwrap_or_else(|| s.clone())
 }
 
 /// numpy's pairwise summation (np.sum of a float array), for identical weights.
@@ -67,19 +113,14 @@ pub fn np_sum(a: &[f64]) -> f64 {
     }
 }
 
-/// Distance of the latest bar tick from the 7-day (2016-bar) median; None without a guard.
+/// Distance of the latest bar tick from the 7-day (2016-bar) median; None without a guard (the
+/// ladder block's guard, graph.rs, computes the same at every bar).
+#[cfg(test)]
 pub fn guard_dev(m: &Market, p: &Params) -> Option<f64> {
     p.guard?;
     let med = rolling_median_trailing(&m.bar_tick, week_bars(m), 12);
     let b = m.bar_tick.len().checked_sub(1)?;
     Some((m.bar_tick[b] as f64 - med[b]).abs())
-}
-
-pub fn frozen(m: &Market, p: &Params) -> bool {
-    match (guard_dev(m, p), p.guard) {
-        (Some(d), Some(g)) => d > g, // NaN (too little history) never freezes, as in pandas
-        _ => false,
-    }
 }
 
 /// (lowest tick, weights) over [c - span, c + span] from the trailing `lookback`, or None.
@@ -138,5 +179,32 @@ pub fn decide_at(m: &Market, p: &Params, x: f64, sp: f64, tick: i64, i1: usize) 
     match solve(m, p, i1, budget_l) {
         None => vec![(tick - 2, tick + 3, 1.0)],
         Some((lo, w)) => w.iter().enumerate().filter(|(_, x)| **x > 1e-3).map(|(j, x)| (lo + j as i64, lo + j as i64 + 1, *x)).collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_old_plain_ladder_becomes_one_ladder_block_with_the_same_settings() {
+        for (old, guard) in [(json!({"type": "ladder", "lookback": 86400, "span": 3, "every": 72, "turnover": 0.4, "guard": 15}), Some(15.0)),
+                             (json!({"type": "ladder", "span": 120, "guard": null}), None),
+                             (json!({"span": 7}), Some(15.0))] {
+            let g = migrate(&old).expect("a ladder");
+            let p = crate::graph::Graph::parse(g.as_object().unwrap(), 60).unwrap().ladder().unwrap();
+            let want = Params::from(&{
+                let mut m = plain_defaults();
+                m.extend(old.as_object().unwrap().clone());
+                m.insert("type".into(), json!("ladder"));
+                m
+            }).unwrap();
+            assert_eq!((p.lookback, p.span, p.every, p.turnover, p.guard), (want.lookback, want.span, want.every, want.turnover, guard), "{old}");
+        }
+        assert!(migrate(&json!({"type": "graph", "nodes": []})).is_none());
+        assert!(migrate(&json!({"type": "custom", "width": 10})).is_none());
+        let p = Params::for_pool(10, false);
+        assert_eq!((p.span, p.guard), (600, None));
+        assert_eq!(Params::for_pool(10, true).span, 30);
     }
 }

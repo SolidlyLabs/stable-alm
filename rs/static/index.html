@@ -53,6 +53,8 @@ section{animation:rise .35s ease both}@keyframes rise{from{opacity:0;transform:t
 #agSettings{grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px 14px}
 @media (max-width:1100px){.exg .s4,.exg .s5,.exg .s7{grid-column:span 6}}
 @media (max-width:760px){.exg .s4,.exg .s5,.exg .s7{grid-column:span 12}}.g2{grid-template-columns:repeat(auto-fit,minmax(min(100%,480px),1fr))}
+#updBar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:12px auto 0;max-width:var(--maxw,1280px);padding:10px 16px;border:1px solid color-mix(in srgb,var(--acc) 40%,var(--line));
+  background:color-mix(in srgb,var(--acc) 9%,var(--card));border-radius:var(--r);font-size:13px}#updBar .sp{flex:1}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px;min-width:0;box-shadow:var(--shadow)}
 .card h2,.h{font:650 11px/1.2 var(--sans);letter-spacing:1px;text-transform:uppercase;color:var(--mute);margin:0 0 12px}
 /* hero */
@@ -228,6 +230,7 @@ svg.chart{width:100%;height:210px;display:block}
     <button data-t="settings">Settings</button><button data-t="activity">Activity</button><button data-t="experimental" id="expTab" class="hide">Experimental</button>
   </nav>
 </header>
+<div id="updBar" class="hide" role="status"></div>
 <main>
   <!-- OVERVIEW -->
   <section data-tab="overview" class="grid">
@@ -284,7 +287,8 @@ svg.chart{width:100%;height:210px;display:block}
   <section data-tab="settings" class="grid g2 hide">
     <div class="card"><h2>Options</h2>
       <div class="fields" id="settings"></div>
-      <div class="row" style="margin-top:16px"><span class="sp"></span><button onclick="saveSettings()">Save settings</button></div>
+      <div class="row" style="margin-top:16px"><span class="mute small" id="updInfo"></span><button class="sec sm" onclick="updCheck()" data-help="upd-check">Check for updates</button>
+        <span class="sp"></span><button onclick="saveSettings()">Save settings</button></div>
     </div>
     <div class="grid">
       <div class="card"><h2>Private key</h2><p id="keyStatus" class="mute"></p>
@@ -486,6 +490,7 @@ function render() {
   renderChainBar();
   if (!$("pools").contains(document.activeElement)) renderPools();
   renderSettings();
+  renderUpdate();
   renderActivity();
   const exp = !!(S.settings.experimental || {}).enabled;
   $("expTab").classList.toggle("hide", !exp);
@@ -759,7 +764,7 @@ function renderPools() {
       h += `<tr class="mine expand"><td colspan=8 data-help="p-strategy"><div class="row" style="margin-bottom:10px;flex-wrap:wrap;gap:8px"><b>${esc(p.name)}</b>
         <span class="mute small">strategy, its settings &amp; safety limits · saved with the bar below</span><span class="sp"></span>
         <button class="sec sm" data-act="lab" data-arg="${esc(p.pool.toLowerCase())}" data-chain="${+id}" title="open this pool's strategy in the Strategy lab to edit and backtest it">Open in the lab</button>
-        ${sp.type === "ladder" ? `<button class="sec sm" data-act="resolve" data-arg="${esc(p.name)}" title="make the strategy re-solve on the next cycle">Re-solve</button>` : ""}
+        ${(sp.nodes || []).some(n => n.kind === "ladder") ? `<button class="sec sm" data-act="resolve" data-arg="${esc(p.name)}" title="make the strategy re-solve on the next cycle">Re-solve</button>` : ""}
         <button class="sec sm" data-act="remove" data-arg="${esc(p.name)}" title="Remove from the config">Remove</button></div>
         ${stratPicker(i, sp)}
         <div id="ovr-${i}"></div>
@@ -903,7 +908,7 @@ function stratSource(p) {
   if (!L || !L.ready()) return null;
   const sp = p.strategy || {};
   let x = p.strategy_source && L.item(p.strategy_source.id);
-  if (!x && sp.type === "ladder") x = L.item("b:ladder");
+  if (!x && sp.type === "graph" && sp.name === "Ladder" && (sp.nodes || []).length === 1) x = L.item("b:ladder");
   if (!x && sp.type === "graph" && sp.name) x = L.items().find(y => y.name === sp.name && (y.strategy || {}).type === "graph");
   return x || null;
 }
@@ -1032,7 +1037,6 @@ function stratFields(i, sp) {
     `<option value="${c}" ${(v ?? choices[0][0]) === c ? "selected" : ""}>${l}</option>`).join("")}</select></div>`;
   const exitTo = v => sel("exit_to", "exit into", v, [["keep", "both tokens"], ["token0", "token0"], ["token1", "token1"]]);
   const wrap = x => `<div class="fields">${x}</div>`;
-  if (sp.type === "ladder") return wrap(["lookback", "span", "every", "turnover", "guard"].filter(k => k in sp).map(k => `<div data-sp="${i}:${k}"><label class=f>${k}</label><input type=number step=any value="${sp[k] ?? ""}" oninput="editStrat(${i},'${k}',this.value)"></div>`).join(""));
   if (sp.type === "custom") return wrap([
     n("width", "width (ticks)", sp.width, false, 1),
     sel("placement", "placement", sp.placement, [["center", "centred"], ["follow", "follow"]]),
@@ -1189,11 +1193,12 @@ function renderAgent() {
       <td>${esc((v.outcome || "").replace(/_/g, " "))}</td><td class=small>${esc(typeof v.detail === "string" ? v.detail : JSON.stringify(v.detail || ""))}</td>
       <td class=mono>$${fmt(v.cost_usd || 0, 3)}</td><td class=mono>${v.tool_calls || 0}</td></tr>`).join("") : `<tr><td class=mute colspan=6>No reviews yet.</td></tr>`);
   const ft = AG.forward_test, rep = AG.report;
-  $("agForward").innerHTML = !ft ? `<p class="mute small" style="margin:0">Not started. Starting it freezes each pool's strategy and capital; the report then compares what the agent does with the frozen strategy, the ladder and holding.</p>`
+  $("agForward").innerHTML = !ft ? `<p class="mute small" style="margin:0">Not started. Starting it freezes each pool's strategy and capital; the report then compares what the agent does with the frozen strategy, the rules manager (the frozen strategy re-tuned weekly by the optimizer), the ladder and holding.</p>`
     : `<p class="small" style="margin:0 0 6px">Since ${agTime(ft.ts)} · ${(ft.pools || []).length} pool(s) · hash <span class=mono>${esc((ft.hash || "").slice(0, 12))}</span></p>` +
-      (rep && rep.pools ? `<table><tr><th>Pool</th><th>Actual</th><th>Frozen</th><th>Ladder</th><th>Hold</th><th>Edge</th></tr>${rep.pools.map(p => `<tr><td>${esc(p.name || agPool(p.pool))}</td>
-        <td class=mono>${pct(p.actual)}</td><td class=mono>${pct(p.static)}</td><td class=mono>${pct(p.ladder)}</td><td class=mono>${pct(p.hold)}</td><td class=mono>${pct(p.edge_vs_static)}</td></tr>`).join("")}</table>
-        <p class="small" style="margin:6px 0 0">API spend $${fmt(rep.api_usd || 0, 2)} · ${fmt(rep.days || 0, 1)} days · verdict <b>${esc(rep.verdict || "")}</b> · built ${agTime(rep.built)}</p>`
+      (rep && rep.pools ? `<table><tr><th>Pool</th><th>Actual</th><th>Frozen</th><th>Rules manager</th><th>Ladder</th><th>Hold</th><th>Edge</th><th>Edge vs rules</th></tr>${rep.pools.map(p => `<tr><td>${esc(p.name || agPool(p.pool))}</td>
+        <td class=mono>${pct(p.actual)}</td><td class=mono>${pct(p.static)}</td><td class=mono title="${esc((p.rules_detail || {}).error || "")}">${pct(p.rules)}</td><td class=mono>${pct(p.ladder)}</td><td class=mono>${pct(p.hold)}</td>
+        <td class=mono>${pct(p.edge_vs_static)}</td><td class=mono>${pct(p.edge_vs_rules)}</td></tr>`).join("")}</table>
+        <p class="small" style="margin:6px 0 0">API spend $${fmt(rep.api_usd || 0, 2)} · ${fmt(rep.days || 0, 1)} days · verdict <b>${esc(rep.verdict || "")}</b>${rep.verdict_vs_rules ? ` · against the rules manager <b>${esc(rep.verdict_vs_rules)}</b>` : ""} · built ${agTime(rep.built)}</p>`
         : `<p class="mute small" style="margin:0">No report yet (rebuilt daily).</p>`);
   const rows = [...(AG.alerts || []).map(a => ({ts: a.ts, k: a.severity, t: a.title + ": " + a.body})),
                 ...(AG.journal || []).map(j => ({ts: j.ts, k: "journal", t: j.kind + " " + JSON.stringify(j.data).slice(0, 160)}))].sort((a, b) => b.ts - a.ts).slice(0, 60);
@@ -1289,6 +1294,7 @@ const SETTINGS = [
   ["wallet", "Managed wallet", "text"], ["ui_port", "Dashboard port (127.0.0.1)", "number"],
   ["parking.enabled", "Park waiting tokens in pegged pools", "checkbox"], ["parking.min_usd", "Min value to park ($)", "number"],
   ["parking.range_pct", "Parking range (± % of the price)", "number"],
+  ["update_check", "Check for signed updates", "checkbox"],
   ["experimental.enabled", "Experimental features", "checkbox"],
 ];
 const getp = (o, k) => k.split(".").reduce((a, b) => a?.[b], o);
@@ -1614,6 +1620,34 @@ async function setSolidLpPool(pool) {
 }
 // ---------- controls ----------
 async function ctl(action, extra) { try { await api("/api/control", {action, ...(extra || {})}); toast(action.replace("_", " ") + ": done"); setTimeout(refresh, 800); } catch (e) { toast(e.message, true); } }
+// updates (update.rs): offered only when the release is signed by a whitelisted key
+function updLater(v) { try { return sessionStorage.getItem("alm.updLater") === v; } catch (e) { return false; } }
+function renderUpdate() {
+  const u = S.update || {}, bar = $("updBar"), info = $("updInfo");
+  if (info) info.textContent = `Version ${u.current || ""}` + (u.checked ? ` · checked ${ago(u.checked)}` : "") +
+    (u.available ? ` · ${u.latest} available` : u.refused ? ` · ${u.latest} not offered: ${u.refused}` : u.checked ? " · up to date" : "");
+  const on = !!u.available && !updLater(u.latest);
+  bar.classList.toggle("hide", !on);
+  if (!on) return;
+  bar.innerHTML = `<b>Stable ALM ${esc(u.latest)} is available</b><span class="mute">you have ${esc(u.current)} · signed by ${esc(u.signed_by || "")}</span>
+    <a href="${esc(u.url || "")}" target="_blank" rel="noopener">Release notes</a><span class="sp"></span>
+    ${u.installable ? `<button class="sm" onclick="updInstall()" ${u.installing ? "disabled" : ""}>${u.installing ? "Installing…" : "Update now"}</button>`
+      : `<span class="small mute">${esc(u.not_installable || "")}</span>`}
+    <button class="sec sm" onclick="updHide()">Later</button>`;
+}
+function updHide() { try { sessionStorage.setItem("alm.updLater", (S.update || {}).latest || ""); } catch (e) {} renderUpdate(); }
+async function updCheck() {
+  try { S.update = Object.assign(await api("/api/update", {action: "check"}), {installable: (S.update || {}).installable, not_installable: (S.update || {}).not_installable});
+    try { sessionStorage.removeItem("alm.updLater"); } catch (e) {}
+    renderUpdate(); toast(S.update.available ? `Version ${S.update.latest} is available.` : S.update.refused ? `Version ${S.update.latest} is not offered: ${S.update.refused}` : "Up to date.", !!S.update.refused);
+  } catch (e) { toast("update check: " + e.message, true); }
+}
+async function updInstall() {
+  const u = S.update || {};
+  if (!confirm(`Install Stable ALM ${u.latest}?\n\nThe installer is checked against the signed checksum first. The app then stops after its current cycle, updates and starts again.`)) return;
+  try { await api("/api/update", {action: "install"}); toast("Installing the update: the app restarts in a moment."); S.update.installing = true; renderUpdate(); }
+  catch (e) { toast("update: " + e.message, true); }
+}
 function togglePause() { ctl(S.paused ? "resume" : "pause"); }
 async function toggleLive() {
   const on = !S.settings.execute;

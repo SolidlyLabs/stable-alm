@@ -1,6 +1,6 @@
 [package]
 name = "stable-alm"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 description = "Stable ALM: automated liquidity management for Solidly V3 (desktop app)"
 license = "Apache-2.0"
@@ -25,6 +25,7 @@ hmac = "0.12"
 sha2 = "0.10"
 getrandom = "0.2"
 tray-icon = { version = "0.19", default-features = false }
+ssh-key = { version = "0.6", default-features = false, features = ["ed25519", "rsa", "std", "alloc"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

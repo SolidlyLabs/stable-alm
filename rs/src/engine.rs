@@ -5,7 +5,7 @@
 use crate::chain::{self, TxError};
 use crate::data::{self, Market};
 use crate::eth::{self, addr, calldata, u, Tok};
-use crate::ladder::{self, Params};
+use crate::ladder;
 use crate::prices;
 use crate::settings::PoolConfig;
 use crate::tickmath::{amounts_at, liquidity_for_amounts, q96, sqrt_ratio_at_tick, to_f64, MAX_TICK, MIN_TICK};
@@ -583,49 +583,8 @@ impl Executor {
         if budget0 <= 0.0 || !self.cfg.enabled {
             return Ok(summary);
         }
-        if matches!(self.cfg.strategy.get("type").and_then(|t| t.as_str()), Some("custom") | Some("graph")) {
-            return self.run_custom(m, positions, summary, budget0, idle0, pos_val, &sp, p, tick);
-        }
-        let params = Params::from(&self.cfg.strategy)?;
-        if ladder::frozen(m, &params) {
-            self.say(format!("  DEPEG GUARD: holding, no action (tick {tick} too far from the 7-day median)"));
-            log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "guard_freeze", "tick": tick}));
-            summary["mode"] = json!("guard");
-            return Ok(summary);
-        }
-        let spf = to_f64(&sp) / 2f64.powi(96);
-        let mut target = self.strategy_target(m, &params, &positions, &sp, p, budget0, spf, tick)?;
-        let idle_usable = idle0.min((budget0 - pos_val).max(0.0));
-        let thr = budget0 * self.settings["idle_redeploy_pct"].as_f64().unwrap_or(2.0) / 100.0;
-        if target.is_none() && pos_val > budget0 * 1.10 {
-            self.say(format!("  pool holds {} > 110% of its budget {}: rebalance down to budget", commas(pos_val), commas(budget0)));
-            target = self.current_as_target(&positions, &sp, p).or_else(|| Some(self.fresh_target(m, &params, budget0, spf, tick)));
-        }
-        if let Some(t) = target {
-            summary["mode"] = json!("rebalance");
-            let wants: Vec<String> = t.ranges.iter().map(|(a, c, w)| format!("[{a},{c}) {:.0}%", w * 100.0)).collect();
-            self.say(format!("  {} wants: {}", params.label(), wants.join(", ")));
-            if self.blocked(m, tick, false)? {
-                return Ok(summary);
-            }
-            self.begin("rebalance", Some(&t));
-            self.resize(&positions, &t, budget0, &sp, p)?;
-            self.mark_solved();
-        } else if idle_usable > thr.max(self.cfg.min_swap_value) {
-            summary["mode"] = json!("topup");
-            let t = self.current_as_target(&positions, &sp, p).unwrap_or_else(|| self.fresh_target(m, &params, budget0, spf, tick));
-            let rs: Vec<String> = t.ranges.iter().map(|(a, c, _)| format!("[{a},{c})")).collect();
-            self.say(format!("  {} idle (> {}): deploying into {}", commas(idle_usable), commas(thr), rs.join(", ")));
-            if self.blocked(m, tick, false)? {
-                return Ok(summary);
-            }
-            self.begin("topup", Some(&t));
-            self.deploy(&t, budget0)?;
-        } else {
-            self.say(format!("  {}: keep current position", params.label()));
-            log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "keep", "tick": tick}));
-        }
-        Ok(summary)
+        // custom rules or a node strategy: an old plain ladder became a ladder block on load (ladder.rs)
+        self.run_custom(m, positions, summary, budget0, idle0, pos_val, &sp, p, tick)
     }
 
     // -- custom mode (custom.rs) -------------------------------------------------------------------
@@ -806,32 +765,6 @@ impl Executor {
     }
 
     // -- targets -----------------------------------------------------------------------------------
-    #[allow(clippy::too_many_arguments)]
-    fn strategy_target(&mut self, m: &Market, params: &Params, positions: &[(i64, i64, BigUint)], sp: &BigUint, p: f64, budget0: f64,
-                       spf: f64, tick: i64) -> Res<Option<Target>> {
-        let state = crate::paths::logs().join(format!("last_solve_{}.json", self.cfg.name));
-        let saved = std::fs::read_to_string(&state).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()).unwrap_or(Value::Null);
-        let last = saved["ts"].as_f64().unwrap_or(0.0);
-        // a re-solve asked for (a parked lot was handed over): the new target is taken whatever the turnover
-        let force = saved["force"] == true;
-        let period = (params.every * 300) as f64;
-        let el = now() as f64 - last;
-        if !positions.is_empty() && el < period {
-            self.say(format!("  ladder: next re-solve in {:.1} h", (period - el) / 3600.0));
-            return Ok(None);
-        }
-        let ranges = cap_ranges(snap_ranges(ladder::decide(m, params, budget0, spf, tick), self.spacing), self.cfg.max_ranges);
-        if !positions.is_empty() && !force {
-            let moved = self.moved_share(positions, sp, p, &ranges);
-            if moved < params.turnover {
-                self.say(format!("  ladder target differs by {:.0}% < turnover {:.0}%: keep", moved * 100.0, params.turnover * 100.0));
-                self.mark_solved();
-                return Ok(None);
-            }
-        }
-        Ok(Some(Target { ranges, swap: true }))
-    }
-
     /// Share of value that moves between the positions and `ranges` (0 = same, 1 = all).
     fn moved_share(&self, positions: &[(i64, i64, BigUint)], sp: &BigUint, p: f64, ranges: &[(i64, i64, f64)]) -> f64 {
         let mut cur_w: HashMap<i64, f64> = HashMap::new();
@@ -852,21 +785,6 @@ impl Executor {
         }
         let keys: HashSet<i64> = cur_w.keys().chain(new_w.keys()).cloned().collect();
         keys.iter().map(|t| (new_w.get(t).unwrap_or(&0.0) - cur_w.get(t).unwrap_or(&0.0) / s).abs()).sum::<f64>() / 2.0
-    }
-
-    /// Record that the ladder's current solve is in place: the next re-solve is `every` bars from now.
-    /// Called when the solve keeps the positions or after its rebalance succeeded, never before, so a
-    /// blocked or failed rebalance is re-solved on the next cycle.
-    fn mark_solved(&self) {
-        if self.execute {
-            let state = crate::paths::logs().join(format!("last_solve_{}.json", self.cfg.name));
-            let _ = std::fs::create_dir_all(state.parent().unwrap());
-            let _ = std::fs::write(&state, json!({"ts": now()}).to_string());
-        }
-    }
-
-    fn fresh_target(&self, m: &Market, params: &Params, budget0: f64, spf: f64, tick: i64) -> Target {
-        Target { ranges: cap_ranges(snap_ranges(ladder::decide(m, params, budget0, spf, tick), self.spacing), self.cfg.max_ranges), swap: true }
     }
 
     fn current_as_target(&self, positions: &[(i64, i64, BigUint)], sp: &BigUint, p: f64) -> Option<Target> {
@@ -2017,12 +1935,9 @@ mod allowance_tests {
 }
 
 /// Make the pool's strategy decide afresh on its next cycle instead of on its schedule, and take the
-/// new target whatever the turnover: the ladder's last solve is replaced by a forced one, and a node
-/// strategy's last move is forgotten (a ladder block re-solves; a range strategy is past its cooldown).
+/// new target whatever the turnover: the strategy's last move is forgotten (a ladder block re-solves;
+/// a range strategy is past its cooldown).
 pub fn resolve_now(cid: u64, cfg: &PoolConfig, live: bool) {
-    if live {
-        let _ = std::fs::write(crate::paths::logs().join(format!("last_solve_{}.json", cfg.name)), json!({"ts": 0, "force": true}).to_string());
-    }
     let mut st = crate::custom::load_state(cid, &cfg.pool, live);
     st.last_move = 0;
     st.force_solve = true;

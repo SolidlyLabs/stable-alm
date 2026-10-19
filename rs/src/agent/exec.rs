@@ -131,12 +131,6 @@ pub fn reset_strategy_state(cid: u64, pool: &str, live: bool) {
     let mut st = crate::custom::State::default();
     st.force_solve = true;
     crate::custom::save_state(cid, pool, live, &st);
-    if let Some(cfg) = pool_cfg(pool) {
-        let c = crate::settings::PoolConfig::from(&cfg);
-        if live {
-            let _ = std::fs::write(crate::paths::logs().join(format!("last_solve_{}.json", c.name)), json!({"ts": 0, "force": true}).to_string());
-        }
-    }
     super::journal::record("strategy_state_reset", json!({"chain_id": cid, "pool": pool, "live": live, "old_state": serde_json::to_value(&old).unwrap_or(Value::Null)}));
 }
 
@@ -144,7 +138,7 @@ pub fn reset_strategy_state(cid: u64, pool: &str, live: bool) {
 pub fn apply_strategy(pool: &str, strategy: &Value) -> Result<(), String> {
     let mut pools = crate::settings::load_pools();
     let p = pools.iter_mut().find(|p| p["pool"].as_str().map(|a| a.eq_ignore_ascii_case(pool)).unwrap_or(false)).ok_or("pool not configured")?;
-    p["strategy"] = strategy.clone();
+    p["strategy"] = crate::ladder::normalized(strategy);
     crate::settings::validate_pool(p)?;
     crate::settings::save_pools(&pools)
 }
@@ -159,7 +153,7 @@ fn add_pool(cid: u64, pool: &str, strategy: &Value, name: Option<&str>) -> Resul
     e["pool"] = json!(pool);
     e["chain_id"] = json!(cid);
     e["name"] = json!(name.map(String::from).unwrap_or_else(|| format!("{}-{}", s0.to_lowercase(), s1.to_lowercase())));
-    e["strategy"] = strategy.clone();
+    e["strategy"] = crate::ladder::normalized(strategy);
     e["enabled"] = json!(true);
     crate::settings::validate_pool(&e)?;
     let mut pools = crate::settings::load_pools();
