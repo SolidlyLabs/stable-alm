@@ -1,7 +1,9 @@
-//! `--parity DIR`: compare the Rust runtime with the Python reference on fixtures written by
-//! scripts/export_parity.py (recorded events, processor history, and Python's outputs).
-//! Checks: tick math, ABI calldata, transaction signing, resize plans, and per pool the replay
-//! market and the ladder's target ranges. Exit code 0 = everything matches.
+//! Parity with the original Python reference implementation (removed; it is in the git history up
+//! to tag v0.4.0), frozen as a test: rs/parity-fixtures holds what that implementation computed from
+//! recorded events and processor history. Checks: tick math, ABI calldata, transaction signing,
+//! resize plans, and for the cbETH/WETH pool the replay market, the F/LVR figure and the ladder's
+//! target ranges. The wallet in the fixtures is a placeholder (0x1111…1111), swapped in
+//! consistently. The signing key is a throwaway that was never funded.
 
 use crate::data;
 use crate::engine;
@@ -159,7 +161,7 @@ pub fn run(dir: &str) -> i32 {
                 c.ok("F/LVR, trailing 7 days", counts && close(got.f, ef, 1e-9) && close(got.lvr, el, 1e-9) && ratio_ok,
                      format!("ratio {:?} (F {}, LVR {}, {} swaps, {} h) vs {}", got.ratio(), got.f, got.lvr, got.swaps, got.hours, fx));
             }
-            _ => c.ok("F/LVR, trailing 7 days", false, "no reference in expected.json; rerun scripts/export_parity.py".into()),
+            _ => c.ok("F/LVR, trailing 7 days", false, "no reference in expected.json".into()),
         }
         for case in exp["targets"].as_array().unwrap() {
             let raw = ladder::decide(&m, &params, case["budget0"].as_f64().unwrap(), case["sp"].as_f64().unwrap(), case["tick"].as_i64().unwrap());
@@ -172,4 +174,9 @@ pub fn run(dir: &str) -> i32 {
     }
     println!("{} checks, {} failed", c.n, c.fails);
     if c.fails == 0 { 0 } else { 1 }
+}
+
+#[test]
+fn the_runtime_matches_the_frozen_reference() {
+    assert_eq!(run(concat!(env!("CARGO_MANIFEST_DIR"), "/parity-fixtures")), 0, "see the FAIL lines above (cargo test -- --nocapture)");
 }

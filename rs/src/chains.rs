@@ -144,8 +144,9 @@ pub fn all() -> Vec<Chain> {
     v
 }
 
-/// Turn a chain on or off (config/chains.json). Enabled chains are listed in the pools table and
-/// get the all-pools fee vs arbitrage figure; a chain with configured pools is managed either way.
+/// Show or hide a chain in the pools table (config/chains.json, `enabled`). Only a view filter: a
+/// shown chain's other pools are listed and get the all-pools fee vs arbitrage figure. Balances,
+/// funding and every configured pool work on every chain, shown or not.
 pub fn set_enabled(id: u64, on: bool) -> Result<(), String> {
     if RETIRED.contains(&id) || !defaults().as_object().unwrap().contains_key(&id.to_string()) {
         return Err(format!("chain {id} is not supported"));

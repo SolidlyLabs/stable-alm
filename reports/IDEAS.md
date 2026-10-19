@@ -1,6 +1,6 @@
 # Novel stable-pair ideas vs the live ladder
 
-Date: 17 Oct 2026. Code: `alm/ladder_x.py` (LadderX, Dual), grids `ideas` and `ideas2` in `alm/grid.py`, scoring
+Date: 17 Oct 2026. Code (removed; it is in the git history up to tag v0.4.0): `alm/ladder_x.py` (LadderX, Dual), grids `ideas` and `ideas2` in `alm/grid.py`, scoring
 `scripts/ideas_report.py`. Full tables: `reports/ideas_report.md`, `reports/ideas2_report.md`.
 
 **Verdict: keep the live ladder unchanged.** None of the ten ideas improves on it on all three pairs.

@@ -87,6 +87,13 @@ input[type=checkbox]{width:auto;accent-color:var(--acc)}input[type=range]{paddin
 label.f{font-size:12px;color:var(--mute);display:block;margin-bottom:4px}
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.sp{flex:1}
 .fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px 16px}
+.ovr input,.ovr select{border-color:var(--warn)!important;box-shadow:0 0 0 1px color-mix(in srgb,var(--warn) 35%,transparent)}
+.ovr label.f::after{content:" · changed";color:var(--warn);text-transform:none;letter-spacing:0;font-weight:600}
+.ovrsum{border:1px solid var(--line2);border-radius:10px;padding:8px 12px;margin:0 0 10px;font-size:12.5px;display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap}
+.ovrsum.diff{border-color:color-mix(in srgb,var(--warn) 55%,transparent);background:color-mix(in srgb,var(--warn) 8%,transparent)}
+.ovrsum.same{color:var(--ok)}
+.ovrsum ul{margin:4px 0 0;padding-left:18px}.ovrsum .sp{flex:1}
+.chip.changed{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 55%,transparent)}
 .scroll{overflow:auto}.tall{max-height:560px}pre{white-space:pre-wrap;font:12px/1.5 var(--mono);margin:0}
 details summary{cursor:pointer;color:var(--info);list-style:none}details summary::-webkit-details-marker{display:none}
 /* switch + segmented chips */
@@ -131,6 +138,21 @@ details summary{cursor:pointer;color:var(--info);list-style:none}details summary
   #pools td button.sm{padding:5px 6px}}
 .alloc-bar{display:flex;height:8px;border-radius:99px;overflow:hidden;background:var(--card2);border:1px solid var(--line);margin:8px 0 6px}.alloc-bar div{height:100%}
 .legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;color:var(--mute)}.swc{display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:5px;vertical-align:middle}
+/* per-pool capital */
+.capbtns{display:flex;gap:4px;margin-top:5px}.capbtns button{padding:3px 8px;font-size:11.5px}
+.capacts{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.pend{margin-top:10px;border-top:1px dashed var(--line);padding-top:8px;display:grid;gap:5px}
+.pend div{display:flex;align-items:center;gap:8px;font-size:12px}.pend div span{flex:1}
+.unal{background:repeating-linear-gradient(135deg,var(--card2) 0 4px,color-mix(in srgb,var(--line2) 60%,var(--card2)) 4px 8px)}
+dialog.cap{border:1px solid var(--line2);border-radius:14px;background:var(--card);color:var(--fg);padding:0;width:min(460px,calc(100vw - 32px));box-shadow:0 18px 50px rgba(0,0,0,.35)}
+dialog.cap::backdrop{background:rgba(8,10,14,.55)}
+dialog.cap form{padding:18px 18px 16px;display:grid;gap:12px}dialog.cap h3{margin:0;font-size:16px}
+dialog.cap .pick{display:grid;gap:2px;max-height:240px;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:6px}
+dialog.cap .pick label{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:7px;cursor:pointer;font-size:13px}
+dialog.cap .pick label:hover{background:var(--card2)}dialog.cap .pick label span{flex:1}dialog.cap .pick label.all{border-bottom:1px solid var(--line);border-radius:7px 7px 0 0;margin-bottom:2px}
+dialog.cap .amt{display:flex;gap:8px;align-items:center}dialog.cap .amt input{flex:1;font:600 15px var(--mono)}
+dialog.cap .prev{font-size:12px;color:var(--mute);display:grid;gap:3px}dialog.cap .prev div{display:flex;justify-content:space-between}
+dialog.cap .btns{display:flex;justify-content:flex-end;gap:8px}
 .allocs{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
 .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:7px;vertical-align:middle}.d-ok{background:var(--ok)}.d-bad{background:var(--bad)}
 /* positions */
@@ -234,8 +256,9 @@ svg.chart{width:100%;height:210px;display:block}
     <div class="card poolwrap" style="padding:4px 6px">
       <table id="pools"></table>
     </div>
+    <dialog class="cap" id="capDlg"></dialog>
     <div class="savebar" id="saveBar"><span id="allocSum"></span><span class="sp"></span>
-      <button class="sec" onclick="resetPools()">Discard changes</button><button onclick="savePools()">Save pools &amp; allocation</button></div>
+      <button class="sec" onclick="resetPools()">Discard changes</button><button onclick="savePools()">Save pools</button></div>
     <div class="card"><h2>Add by address</h2>
       <div class="row"><select id="newChain" style="width:150px"></select><input id="newPool" placeholder="Solidly V3 pool address 0x…" style="flex:2;min-width:260px"><input id="newName" placeholder="name (optional)" style="flex:1;min-width:140px">
         <button onclick="addPool($('newPool').value,$('newName').value,+$('newChain').value)">Add (disabled, 0%)</button></div>
@@ -255,8 +278,8 @@ svg.chart{width:100%;height:210px;display:block}
         <p class="mute small"><span id="keyStore">Stored as a plain file (secrets/private_key)</span>, so restarts resume on their own. Never shown again,
           only its address. The managed wallet becomes the key's address, the same on every chain.</p></div>
       <div class="card" id="fundCard"><h2>Funding tokens</h2>
-        <p class="mute small" style="margin-top:0">Per chain, the tokens swapped to buy what a pool on that chain needs when its allocation
-          calls for tokens the wallet does not hold (largest balance first). Each chain starts with its USDC and USDT; an empty list turns
+        <p class="mute small" style="margin-top:0">Per chain, the tokens a pool may swap into its own when it holds them (USDC added to it, say;
+          largest balance first). Each chain starts with its USDC and USDT; an empty list turns
           funding off on that chain.</p>
         <div id="fundList"></div></div>
       <div class="card" id="parkCard" data-help="set-parking"><h2>Parking whitelist</h2>
@@ -275,10 +298,6 @@ svg.chart{width:100%;height:210px;display:block}
       <div class="card"><h2>Interface</h2>
         <label class="sw"><input type="checkbox" id="helpVisible" checked onchange="window.almHelp && almHelp.setVisible(this.checked)"><span class="t"></span>
           <span><b>Show explanations panel</b> <span class="mute small">(explains whatever you hover; remembered in this browser)</span></span></label></div>
-      <div class="card"><h2>Safety</h2><ul class="mute small" style="margin:0;padding-left:18px">
-        <li>Depeg guard, 1h-median spot check, daily rebalance cap and gas check run before every action, on every chain.</li>
-        <li>Every transaction is simulated first; swaps only through the Solidly UI aggregator, capped vs the pool price.</li>
-        <li>Pause stops all actions immediately (persists across restarts).</li></ul></div>
     </div>
   </section>
 
@@ -462,7 +481,7 @@ function renderOverview(acct, w) {
   S.pools.forEach(p => {
     const a = pools[p.name] || {}, st = (w.pools || {})[p.name] || {}, id = pchain(p);
     if (!p.enabled && !(a.positions || []).length) return;
-    const ctot = (((acct.chains || {})[id]) || {}).total_usd || 0, target = ctot * (p.enabled ? p.allocation_pct : 0) / 100;
+    const cap = poolCap(p);
     const ps = a.positions || [], mx = Math.max(...ps.map(x => x.usd || 0), 1);
     const pos = ps.map(x => `<div class="r ${x.in_range ? "in" : ""}"><span class="mono">[${x.tl}, ${x.tu})</span><span class="b"><i style="width:${Math.max(2, (x.usd || 0) / mx * 100)}%"></i></span><span class="num">${usd(x.usd, 0)}</span></div>`).join("")
       || "<span class=mute>no positions</span>";
@@ -471,7 +490,7 @@ function renderOverview(acct, w) {
         <span class="small ${a.in_range ? "ok" : ps.length ? "bad" : "mute"}">${a.in_range ? "● in range" : ps.length ? "● out of range" : ""}</span></div>
       <div class="stats">
         <div><div>Deployed</div><b>${usd(a.deployed_usd, 2)}</b></div>
-        <div><div>Target (${fmt(p.enabled ? p.allocation_pct : 0, 0)}%)</div><b>${usd(target, 2)}</b></div>
+        <div data-help="capital"><div title="the pool's own money: positions, idle tokens and what it parked; it keeps what it earns">Capital</div><b>${cap ? usd(cap.capital_usd, 2) : "–"}</b></div>
         <div><div>Tick · fee</div><b>${a.tick ?? "–"}</b> <span class="mute small">· ${a.fee_pips ?? "–"} pips</span></div>
         <div data-help="flvr"><div title="fee income ÷ loss to arbitrage, trailing 7 days; good above 10, warning below 2">Fee / arb loss (7d)</div>${flvrFig(st.flvr)}</div></div>
       <div class="ladder pos-list">${pos}</div>
@@ -554,13 +573,13 @@ function renderChainBar() {
   $("chainBar").innerHTML = `<span class="h" style="margin:0 6px 0 0">Chains</span>` + chains().map(c => {
     const mine = poolsEdit.some(p => pchain(p) === c.id);
     return `<button class="chipbtn ${c.enabled ? "on" : ""}" style="--cc:${cc(c.id)}" onclick="toggleChain(${c.id},${!c.enabled})" aria-pressed="${c.enabled}"
-      title="${c.enabled ? "Shown and scanned. Click to turn off" : "Click to list this chain's pools"}${mine ? " (you have pools here: they are managed either way)" : ""}">
+      title="${c.enabled ? "Shown. Click to hide this chain's other pools" : "Click to show this chain's pools"}${mine ? " (your own pools here are always shown and managed)" : ""}">
       <span class="cdot"></span>${esc(c.name)}${c.enabled && MARKET ? `<span class="n">${n(c.id)}</span>` : ""}</button>`; }).join("") +
-    `<span class="mute small" style="margin-left:4px">Turn a chain on to list and scan its pools. Pools you hold are managed on any chain.</span>`;
+    `<span class="mute small" style="margin-left:4px">Which chains' pools to show. Only a filter: your pools are managed on every chain.</span>`;
 }
 async function toggleChain(id, on) {
   try { const r = await api("/api/chains", {id, enabled: on}); S.chains = r.chains; renderChainBar();
-    toast(`${chainOf(id).name} ${on ? "on: loading its pools…" : "off"}`); loadMarket(true); }
+    toast(`${chainOf(id).name} ${on ? "shown: loading its pools…" : "hidden"}`); loadMarket(true); }
   catch (e) { toast(e.message, true); }
 }
 // ---------- pools: one table for configured and discovered pools, every chain ----------
@@ -582,8 +601,8 @@ function poolApr(p, m, win) {
   const w = m && m.windows && m.windows[win];
   if (!w || !w.hours) return null;
   const mine = ((acct.pools || {})[p.name] || {}).deployed_usd || 0;
-  let dep = total * (p.enabled ? p.allocation_pct : 0) / 100;
-  if (!dep) dep = Math.max(total * 0.1, 1000);  // not allocated: show the APR for a 10% (min $1k) slice
+  let dep = p.enabled ? ((poolCap(p) || {}).capital_usd || 0) : 0;
+  if (!dep) dep = Math.max(total * 0.1, 1000);  // no capital: show the APR for a 10% (min $1k) slice
   const base = Math.max((w.active_tvl || 0) - Math.min(mine, w.active_tvl || 0), 0) + dep;
   return {apr: (w.fees + w.emissions + w.bribes) * 8760 / w.hours / base * 100, dep, w};
 }
@@ -592,7 +611,7 @@ function aprHtml(r) {
   const tip = `at $${fmt(r.dep, 0)} deposited · fees $${fmt(r.w.fees)} · emissions $${fmt(r.w.emissions)} · bribes $${fmt(r.w.bribes)} over ${r.w.hours}h · in-range TVL ${compact(r.w.active_tvl)}`;
   return `<span class="apr ${r.apr >= 5 ? "hi" : ""}" title="${esc(tip)}">${fmt(r.apr, r.apr < 10 ? 2 : 1)}%</span>`;
 }
-// Rows: every configured pool (always shown) plus every listed pool of the enabled chains.
+// Rows: every configured pool (always shown) plus every listed pool of the chains shown.
 function tableRows() {
   const dep = parseFloat($("depSize").value) || (((S.worker || {}).account || {}).total_usd || 0), minTvl = parseFloat($("minTvl").value) || 0;
   const only = $("onlySupported").checked, mineOnly = $("onlyMine").checked, q = $("q").value.trim().toLowerCase();
@@ -617,7 +636,7 @@ const SORTERS = {
   vol: r => r.m ? ((r.m.windows.h24 || {}).volume ?? r.m.volume_24h) || 0 : -1,
   h1: r => (r.apr("h1") || {}).apr ?? -1, h6: r => (r.apr("h6") || {}).apr ?? -1, h24: r => (r.apr("h24") || {}).apr ?? -1,
   flvr: r => { const v = flvrVal(r.m ? r.m.flvr : null); return v == null ? -1 : v === Infinity ? 1e18 : v; },
-  alloc: r => r.cfg ? (r.cfg.enabled ? r.cfg.allocation_pct : 0) + 1000 : -1,
+  alloc: r => r.cfg ? (r.cfg.enabled ? ((poolCap(r.cfg) || {}).capital_usd || 0) : 0) + 1e12 : -1,
   deployed: r => r.cfg ? ((((S.worker || {}).account || {}).pools || {})[r.cfg.name] || {}).deployed_usd || 0 : -1,
 };
 function sortBy(k) { SORT = SORT.key === k ? {key: k, dir: -SORT.dir} : {key: k, dir: ["pair", "chain"].includes(k) ? 1 : -1}; try { localStorage.setItem("alm.sort", JSON.stringify(SORT)); } catch (e) {} renderPools(); }
@@ -628,7 +647,7 @@ function renderPools() {
   if (!poolsEdit) return;
   const acct = (S.worker || {}).account || {};
   let rows = tableRows();
-  // default order: your pools first (by allocation), then the rest by 24h APR
+  // default order: your pools first (by capital), then the rest by 24h APR
   const key = SORT.key === "default" ? null : SORTERS[SORT.key];
   rows.sort((a, b) => {
     if (!key) return ((!!b.cfg) - (!!a.cfg)) || (SORTERS.alloc(b) - SORTERS.alloc(a)) || (SORTERS.h24(b) - SORTERS.h24(a));
@@ -643,21 +662,24 @@ function renderPools() {
     ${th("fee", "Fee", "num c-fee")}${th("tvl", "TVL", "num")}${th("vol", "24h volume", "num c-vol")}
     ${th("h24", "APR 24h", "num", "estimated APR over the last 24 hours (1h and 6h below): at the target size for your pools, at the deposit size above for the rest")}
     ${th("flvr", "Fee / arb 7d", "num", "fee income ÷ loss to arbitrage per unit of at-the-money liquidity, trailing 7 days; good above 10, warning below 2")}
-    ${th("alloc", "Allocation")}<th data-label=""></th></tr></thead><tbody>`;
+    ${th("alloc", "Capital", "", "the pool's own money: it keeps what it earns and loses; moved between pools only by Add, Withdraw and Move")}<th data-label=""></th></tr></thead><tbody>`;
   if (!rows.length) h += `<tr><td colspan=8 class=empty>${MARKET ? "No pools match the filters." : "Loading pools from the Solidly UI…"}</td></tr>`;
   for (const r of rows) {
     const m = r.m, p = r.cfg, id = r.chain_id, rk = id + ":" + r.pool, open = p && OPEN.has(rk);
     const t0 = m ? m.token0 : {symbol: (p.symbols || ["?"])[0]}, t1 = m ? m.token1 : {symbol: (p.symbols || ["?", "?"])[1]};
     const sub = `${ctag(id)} <a href="${explorer(id, "address", r.pool)}" target=_blank title="${esc(r.pool)}${m ? " · tick spacing " + m.tick_spacing : ""}">${r.pool.slice(0, 6)}…${r.pool.slice(-4)}</a>` +
-      (p && p.name.toLowerCase() !== `${t0.symbol}-${t1.symbol}`.toLowerCase() ? ` <span class="chip mine" title="your name for this pool">${esc(p.name)}</span>` : "") + (!r.pegged ? ` <span class="chip volatile" title="volatile pair: the strategy has not been backtested on it">volatile</span>` : "");
+      (p && p.name.toLowerCase() !== `${t0.symbol}-${t1.symbol}`.toLowerCase() ? ` <span class="chip mine" title="your name for this pool">${esc(p.name)}</span>` : "") + (!r.pegged ? ` <span class="chip volatile" title="volatile pair: the strategy has not been backtested on it">volatile</span>` : "") +
+      (p ? changedChip(r.i) : "");
     const a24 = r.apr("h24"), a1 = r.apr("h1"), a6 = r.apr("h6");
     const short = x => x ? fmt(x.apr, x.apr < 10 ? 1 : 0) + "%" : "–";
     let alloc = '<span class="mute small">–</span>', act;
     if (p) {
-      const i = r.i, dep = ((acct.pools || {})[p.name] || {}).deployed_usd;
-      alloc = `<div class="alloc"><label class="sw" title="${p.enabled ? "enabled: click to disable" : "disabled: click to enable"}"><input type=checkbox ${p.enabled ? "checked" : ""} onchange="editPool(${i},'enabled',this.checked)"><span class="t"></span></label>
-        <input type=number min=0 max=100 step=1 value="${p.allocation_pct}" oninput="editPool(${i},'allocation_pct',parseFloat(this.value)||0)" ${p.enabled ? "" : "disabled"} aria-label="allocation %"><span class=mute>%</span></div>
-        <div class="mute small">${dep ? usd(dep, 0) + " deployed" : "nothing deployed"}</div>`;
+      const i = r.i, dep = ((acct.pools || {})[p.name] || {}).deployed_usd, c = poolCap(p), cs = capOf(id);
+      const share = c && cs && cs.pools_usd > 0 ? c.capital_usd / cs.pools_usd * 100 : null;
+      alloc = `<div class="alloc"><label class="sw" title="${p.enabled ? "enabled: click to disable" : "disabled: click to enable (a pool switched off gives its money back to Unallocated)"}"><input type=checkbox ${p.enabled ? "checked" : ""} onchange="editPool(${i},'enabled',this.checked)"><span class="t"></span></label>
+        <b class="mono" title="${c ? esc(capTip(c)) : ""}">${c ? usd(c.capital_usd, 0) : "–"}</b></div>
+        <div class="mute small">${c ? (share == null ? "" : fmt(share, 0) + "% · ") + usd(c.positions_usd, 0) + " in positions" : dep ? usd(dep, 0) + " deployed" : "nothing deployed"}</div>
+        ${cs ? `<div class="capbtns"><button class="sec" onclick="capDlg('add',${+id},'${esc(p.pool.toLowerCase())}')" title="move money from Unallocated into this pool">Add</button><button class="sec" onclick="capDlg('withdraw',${+id},'${esc(p.pool.toLowerCase())}')" title="take money out of this pool to Unallocated, as USDC">Withdraw</button></div>` : ""}`;
       act = `<button class="sec sm icon ${open ? "on" : ""}" data-act="open" data-arg="${esc(rk)}" title="strategy, limits, re-solve and remove" aria-expanded="${!!open}">${open ? "▴" : "⚙"}</button>`;
     } else {
       act = `<div class="row" style="gap:4px;justify-content:flex-end;flex-wrap:nowrap"><button class="sec sm" data-act="lab" data-arg="${esc(m.pool)}" data-chain="${+id}" title="backtest custom rules on this pool in the Strategy lab">Test</button>
@@ -678,38 +700,236 @@ function renderPools() {
         ${sp.type === "ladder" ? `<button class="sec sm" data-act="resolve" data-arg="${esc(p.name)}" title="make the strategy re-solve on the next cycle">Re-solve</button>` : ""}
         <button class="sec sm" data-act="remove" data-arg="${esc(p.name)}" title="Remove from the config">Remove</button></div>
         ${stratPicker(i, sp)}
+        <div id="ovr-${i}"></div>
         ${stratFields(i, sp)}
         <div class="sgh">Safety limits</div>
         <div class="fields">
-        ${["slippage_bps", "max_swap_cost_bps", "max_spot_dev_ticks", "max_actions_per_day", "min_swap_value", "max_ranges"].map(k => `<div><label class=f>${k}</label><input type=number step=any value="${p[k]}" oninput="editPool(${i},'${k}',parseFloat(this.value))"></div>`).join("")}
+        ${SAFETY.map(k => `<div data-sp="${i}:@${k}"><label class=f>${k}</label><input type=number step=any value="${p[k]}" oninput="editPool(${i},'${k}',parseFloat(this.value))"></div>`).join("")}
         </div></td></tr>`;
     }
   }
   $("pools").innerHTML = h + "</tbody>";
+  for (const r of rows) if (r.cfg && OPEN.has(r.chain_id + ":" + r.pool)) markOverrides(r.i);
   updateSum();
 }
-// Allocation is per chain: each pool's % is of everything managed on its own chain.
+// ---- per-pool capital: each pool keeps what it earns; money moves only by Add, Withdraw and Move ----
+const capOf = id => ((S.worker || {}).capital || {})[id] || null;
+const poolCap = p => ((capOf(pchain(p)) || {}).pools || {})[p.name] || null;
+const capTip = c => `positions ${usd(c.positions_usd, 2)} · idle ${usd(c.idle_usd, 2)}` + (c.lots_usd ? ` · parked ${usd(c.lots_usd, 2)}` : "") +
+  (c.owed_usd ? ` · held for it by others ${usd(c.owed_usd, 2)}` : "") + (c.hosted_usd ? ` · less held for others ${usd(c.hosted_usd, 2)}` : "") +
+  ((c.idle || []).length ? "\nidle: " + c.idle.map(t => `${fmt(t.amount, 4)} ${t.symbol}`).join(", ") : "");
+const poolByAddr = (id, a) => poolsEdit.find(p => pchain(p) === id && p.pool.toLowerCase() === (a || "").toLowerCase());
+const pnameOf = (id, a) => a ? ((poolByAddr(id, a) || {}).name || a.slice(0, 10)) : "Unallocated";
+function pendText(id, r) {
+  const amt = usd(r.usd, 2);
+  if (r.kind === "add") return `Add ${amt} to <b>${esc(pnameOf(id, r.pool))}</b> from Unallocated · next cycle`;
+  if (r.kind === "reset") return `Reset every pool's capital to its allocation % · next cycle`;
+  if (r.kind === "withdraw") return `${r.to ? "Move" : "Withdraw"} ${amt} from ${r.pools.map(a => `<b>${esc(pnameOf(id, a))}</b>`).join(", ")} → ${esc(pnameOf(id, r.to))} · being split`;
+  if (r.kind === "release") return `<b>${esc(pnameOf(id, r.pool))}</b> releases ${amt} as USDC → ${esc(pnameOf(id, r.to))} · when it runs next`;
+  return esc(r.kind);
+}
 function updateSum() {
   const ids = [...new Set(poolsEdit.map(pchain))].sort((a, b) => chainTotal(b) - chainTotal(a));
-  let over = false;
   $("allocs").innerHTML = ids.map(id => {
-    const total = chainTotal(id), en = poolsEdit.map((p, i) => ({p, i})).filter(x => pchain(x.p) === id && x.p.enabled && x.p.allocation_pct > 0);
-    const sum = en.reduce((s, x) => s + x.p.allocation_pct, 0); over = over || sum > 100;
+    const cs = capOf(id), mine = poolsEdit.map((p, i) => ({p, i})).filter(x => pchain(x.p) === id);
+    const capv = x => ((cs || {}).pools || {})[x.p.name] ? cs.pools[x.p.name].capital_usd : 0;
+    const total = cs ? cs.pools_usd + cs.unallocated_usd : chainTotal(id), shown = mine.filter(x => capv(x) > 0.5);
+    const pct = v => total > 0 ? v / total * 100 : 0;
     const blend = k => { if (!MARKET || !total) return null; let inc = 0;
-      for (const x of en) { const r = poolApr(x.p, MARKET.find(m => m.chain_id === id && m.pool === x.p.pool.toLowerCase()), k); if (r) inc += r.apr / 100 * r.dep; } return inc / total * 100; };
-    const b = blend("h24");
-    return `<div class="card" style="--cc:${cc(id)}" id="${id === 8453 ? "allocBar" : ""}"><div class="row"><span class="cdot"></span><b>${esc(chainOf(id).name)}</b><span class="sp"></span>
-        <span class="small ${sum > 100 ? "bad" : "mute"}">${fmt(sum, 0)}% of ${usd(total, 0)}</span></div>
-      <div class="alloc-bar">${en.map(x => `<div title="${esc(x.p.name)} ${x.p.allocation_pct}%" style="width:${Math.min(x.p.allocation_pct, 100)}%;background:${COLORS[x.i % COLORS.length]}"></div>`).join("")}</div>
-      <div class="legend">${en.map(x => `<span><span class="swc" style="background:${COLORS[x.i % COLORS.length]}"></span>${esc(x.p.name)} ${fmt(x.p.allocation_pct, 0)}% · ${usd(total * x.p.allocation_pct / 100)}</span>`).join("")}
-        <span><span class="swc" style="background:var(--card2);border:1px solid var(--line2)"></span>idle ${fmt(Math.max(0, 100 - sum), 0)}%</span></div>
+      for (const x of mine.filter(x => x.p.enabled)) { const r = poolApr(x.p, MARKET.find(m => m.chain_id === id && m.pool === x.p.pool.toLowerCase()), k); if (r && capv(x) > 0) inc += r.apr / 100 * r.dep; } return inc / total * 100; };
+    const b = blend("h24"), un = cs ? cs.unallocated_usd : null;
+    const pend = cs && (cs.pending || []).length ? `<div class="pend">${cs.pending.map(r => `<div><span>${pendText(id, r)}</span><button class="sec sm" onclick="capCancel(${+id},'${esc(r.id)}')">Cancel</button></div>`).join("")}</div>` : "";
+    return `<div class="card" style="--cc:${cc(id)}" id="${id === 8453 ? "allocBar" : ""}" data-help="capital"><div class="row"><span class="cdot"></span><b>${esc(chainOf(id).name)}</b><span class="sp"></span>
+        <span class="small mute">${usd(total, 0)} on this chain</span></div>
+      <div class="alloc-bar">${shown.map(x => `<div title="${esc(x.p.name)} ${usd(capv(x), 0)}" style="width:${pct(capv(x))}%;background:${COLORS[x.i % COLORS.length]}"></div>`).join("")}${un ? `<div class="unal" title="Unallocated ${usd(un, 0)}" style="width:${pct(un)}%"></div>` : ""}</div>
+      <div class="legend">${shown.map(x => `<span><span class="swc" style="background:${COLORS[x.i % COLORS.length]}"></span>${esc(x.p.name)} <b class=mono style="color:var(--fg)">${usd(capv(x), 0)}</b> · ${fmt(pct(capv(x)), 0)}%</span>`).join("")}
+        ${cs ? `<span title="${esc((cs.unallocated || []).map(t => `${fmt(t.amount, 4)} ${t.symbol}`).join(", ") || "nothing")}"><span class="swc unal" style="border:1px solid var(--line2)"></span>Unallocated <b class=mono style="color:var(--fg)">${usd(un, 0)}</b></span>` : `<span class=mute>capital shows after the next cycle</span>`}</div>
+      ${cs ? `<div class="capacts"><button class="sec sm" onclick="capDlg('add',${+id})">Add from Unallocated</button><button class="sec sm" onclick="capDlg('withdraw',${+id})">Withdraw to USDC</button>
+        <button class="sec sm" onclick="capDlg('move',${+id})">Move between pools</button><button class="sec sm" onclick="capDlg('reset',${+id})" title="one-off: give every pool its allocation % of this chain again">Reset to %…</button></div>` : ""}
+      ${pend}
       <div class="small" style="margin-top:8px">${b == null ? (MARKET ? "" : '<span class="skel"></span>') : `Blended APR <b class="mono">${fmt(b, 2)}%</b> (24h) → about <b class="mono">${usd(total * b / 100)}</b>/year`}</div></div>`;
   }).join("");
   $("saveBar").classList.toggle("show", dirtyPools);
-  $("allocSum").innerHTML = over ? `<span class=bad>A chain is allocated over 100%</span>` : `<span class=warn>Unsaved changes</span> <span class=mute>· applied on the next cycle</span>`;
+  $("allocSum").innerHTML = `<span class=warn>Unsaved changes</span> <span class=mute>· applied on the next cycle</span>`;
 }
-function editPool(i, k, v) { poolsEdit[i][k] = v; dirtyPools = true; if (k === "enabled") renderPools(); else updateSum(); }
-function editStrat(i, k, v) { poolsEdit[i].strategy[k] = parseFloat(v); dirtyPools = true; updateSum(); }
+// Equal split, none more than it has; what a small pool cannot give is shared by the others (capital.rs split_equal).
+function splitEqual(caps, total) {
+  const out = caps.map(() => 0); let left = Math.max(0, total), open = caps.map((c, i) => i).filter(i => caps[i] > 0);
+  while (left > 1e-9 && open.length) { const each = left / open.length, next = [];
+    for (const i of open) { const g = Math.min(each, caps[i] - out[i]); out[i] += g; left -= g; if (caps[i] - out[i] > 1e-9) next.push(i); }
+    open = next; }
+  return out;
+}
+let CAPDLG = null;
+function capDlg(kind, id, pool) {
+  const cs = capOf(id); if (!cs) { toast("Capital shows after the next cycle", true); return; }
+  if (kind === "reset" && dirtyPools) { toast("Save or discard the pool changes first", true); return; }
+  const mine = poolsEdit.filter(p => pchain(p) === id), capp = p => (cs.pools[p.name] || {}).capital_usd || 0;
+  CAPDLG = {kind, id, pool};
+  const opts = (sel, skip) => mine.filter(p => p.pool.toLowerCase() !== skip).map(p => `<option value="${esc(p.pool.toLowerCase())}" ${p.pool.toLowerCase() === sel ? "selected" : ""}>${esc(p.name)} · ${usd(capp(p), 0)}</option>`).join("");
+  const amt = `<div><label class=f>Amount (USD)</label><div class="amt"><input id="capAmt" type=number min=0 step=any placeholder="0" oninput="capPrev()"><button type=button class="sec sm" onclick="capMax()">Max</button></div></div>`;
+  let body = "";
+  if (kind === "add") body = `<h3>Add from Unallocated</h3>
+    <div class="small mute">Unallocated on ${esc(chainOf(id).name)}: <b>${usd(cs.unallocated_usd, 2)}</b> (${esc((cs.unallocated || []).map(t => `${fmt(t.amount, 2)} ${t.symbol}`).join(", ") || "nothing")}). USDC is used first, then the other stables, then the pool's own tokens.</div>
+    <div><label class=f>Into pool</label><select id="capTo">${opts(pool)}</select></div>${amt}
+    <div class="small mute">The pool deploys it on its next run (swapping into its tokens as needed).</div>`;
+  if (kind === "withdraw") body = `<h3>Withdraw to Unallocated, as USDC</h3>
+    <div class="pick"><label class="all"><input type=checkbox id="capAll" onchange="capAllTog(this.checked)" ${pool ? "" : "checked"}><span><b>All pools</b>, split equally</span></label>
+      ${mine.filter(p => capp(p) > 0.5).map(p => `<label><input type=checkbox class="capPick" value="${esc(p.pool.toLowerCase())}" ${!pool || p.pool.toLowerCase() === pool ? "checked" : ""} onchange="capPrev()"><span>${esc(p.name)}</span><span class="mono mute">${usd(capp(p), 0)}</span></label>`).join("")}</div>
+    ${amt}<div class="prev" id="capPrev"></div>
+    <div class="small mute">Split equally over the pools ticked; a pool with less gives all it has and the others make up the rest. Each pool sells its part to USDC when it next runs: idle tokens first, then the same slice of each position. The USDC stays in the wallet as Unallocated: add it to another pool, or send it out of the wallet yourself.</div>`;
+  if (kind === "move") body = `<h3>Move between pools</h3>
+    <div class="row" style="gap:8px"><div style="flex:1"><label class=f>From</label><select id="capFrom" onchange="capPrev()">${opts(pool)}</select></div><div style="flex:1"><label class=f>To</label><select id="capTo">${opts(null, null)}</select></div></div>
+    ${amt}<div class="small mute">The pool it comes from sells it to USDC when it next runs (idle tokens first, then a slice of each position). The other pool gets that USDC and swaps it into its own tokens when it deploys.</div>`;
+  if (kind === "reset") body = `<h3>Reset capital to these %</h3>
+    <div class="small mute">One-off: every pool's idle tokens go back to Unallocated, and each pool is then given what it needs to reach its % of everything on ${esc(chainOf(id).name)} (${usd(cs.pools_usd + cs.unallocated_usd, 0)}). Positions are not touched: a pool already above its % keeps the difference until you withdraw it.</div>
+    <div class="pick">${mine.map(p => `<label><span>${esc(p.name)}${p.enabled ? "" : " <span class=mute>(off)</span>"}</span><span class="mono mute">${usd(capp(p), 0)} now</span><input type=number class="capPct" data-name="${esc(p.name)}" min=0 max=100 step=1 value="${p.allocation_pct}" style="width:64px" oninput="capPrev()">%</label>`).join("")}</div>
+    <div class="prev" id="capPrev"></div>`;
+  $("capDlg").innerHTML = `<form method=dialog onsubmit="event.preventDefault();capGo()">${body}<div class="btns"><button type=button class="sec" onclick="$('capDlg').close()">Cancel</button><button type=submit>${{add: "Add", withdraw: "Withdraw", move: "Move", reset: "Reset"}[kind]}</button></div></form>`;
+  $("capDlg").showModal(); capPrev();
+}
+function capPicked() { return [...document.querySelectorAll(".capPick")].filter(x => x.checked).map(x => x.value); }
+function capAllTog(on) { document.querySelectorAll(".capPick").forEach(x => x.checked = on); capPrev(); }
+function capMax() {
+  const d = CAPDLG, cs = capOf(d.id), cap = a => ((cs.pools[pnameOf(d.id, a)] || {}).capital_usd) || 0;
+  const v = d.kind === "add" ? cs.unallocated_usd : d.kind === "withdraw" ? capPicked().reduce((s, a) => s + cap(a), 0) : cap($("capFrom").value);
+  $("capAmt").value = Math.floor(v * 100) / 100; capPrev();
+}
+function capPrev() {
+  const d = CAPDLG, cs = capOf(d.id), el = $("capPrev"); if (!el) return;
+  if (d.kind === "withdraw") {
+    const all = $("capAll"), picked = capPicked(); if (all) all.checked = picked.length === document.querySelectorAll(".capPick").length;
+    const caps = picked.map(a => ((cs.pools[pnameOf(d.id, a)] || {}).capital_usd) || 0), parts = splitEqual(caps, parseFloat($("capAmt").value) || 0);
+    el.innerHTML = picked.map((a, i) => `<div><span>${esc(pnameOf(d.id, a))}</span><span class=mono>${usd(parts[i], 2)} of ${usd(caps[i], 0)}</span></div>`).join("");
+  }
+  if (d.kind === "reset") {
+    const tot = cs.pools_usd + cs.unallocated_usd, ins = [...document.querySelectorAll(".capPct")], sum = ins.reduce((s, x) => s + (parseFloat(x.value) || 0), 0);
+    el.innerHTML = `<div><span>Total</span><span class="${sum > 100 ? "bad" : ""}">${fmt(sum, 0)}%${sum > 100 ? " (over 100%)" : ""}</span></div>` + ins.map(x => `<div><span>${esc(x.dataset.name)}</span><span class=mono>${usd(tot * (parseFloat(x.value) || 0) / 100, 0)}</span></div>`).join("");
+  }
+}
+async function capGo() {
+  const d = CAPDLG, usdv = parseFloat(($("capAmt") || {}).value);
+  try {
+    if (d.kind === "add") await api("/api/capital", {action: "add", chain_id: d.id, pool: $("capTo").value, usd: usdv});
+    if (d.kind === "withdraw") await api("/api/capital", {action: "withdraw", chain_id: d.id, pools: capPicked(), usd: usdv});
+    if (d.kind === "move") {
+      if ($("capFrom").value === $("capTo").value) throw new Error("choose two different pools");
+      await api("/api/capital", {action: "move", chain_id: d.id, pools: [$("capFrom").value], to: $("capTo").value, usd: usdv});
+    }
+    if (d.kind === "reset") {
+      const ins = [...document.querySelectorAll(".capPct")], sum = ins.reduce((s, x) => s + (parseFloat(x.value) || 0), 0);
+      if (sum > 100) throw new Error("the % add up to more than 100");
+      for (const x of ins) { const p = poolsEdit.find(p => p.name === x.dataset.name && pchain(p) === d.id); if (p) p.allocation_pct = parseFloat(x.value) || 0; }
+      await api("/api/pools", {pools: poolsEdit});
+      await api("/api/capital", {action: "reset", chain_id: d.id});
+    }
+    $("capDlg").close(); toast("Queued: the worker carries it out now (a withdrawal when each pool runs)."); refresh();
+  } catch (e) { toast(e.message, true); }
+}
+async function capCancel(id, rid) { try { await api("/api/capital", {action: "cancel", chain_id: id, id: rid}); refresh(); } catch (e) { toast(e.message, true); } }
+function editPool(i, k, v) { poolsEdit[i][k] = v; dirtyPools = true; if (k === "enabled") renderPools(); else { updateSum(); markOverrides(i); } }
+function editStrat(i, k, v) { poolsEdit[i].strategy[k] = parseFloat(v); dirtyPools = true; updateSum(); markOverrides(i); }
+
+// ---- settings that differ from the strategy's defaults ----
+// A pool runs a copy of a library strategy; its settings can then be changed here. Backtests in the
+// lab run the library version, so every change is shown: against the strategy it was picked from
+// (strategy_source, saved with the pool; older pools: the app's ladder, or the library strategy of
+// the same name), as that strategy is in the library now. Safety limits against the app's defaults.
+const SAFETY = ["slippage_bps", "max_swap_cost_bps", "max_spot_dev_ticks", "max_actions_per_day", "min_swap_value", "max_ranges"];
+function stratSource(p) {
+  const L = window.LABLIB;
+  if (!L || !L.ready()) return null;
+  const sp = p.strategy || {};
+  let x = p.strategy_source && L.item(p.strategy_source.id);
+  if (!x && sp.type === "ladder") x = L.item("b:ladder");
+  if (!x && sp.type === "graph" && sp.name) x = L.items().find(y => y.name === sp.name && (y.strategy || {}).type === "graph");
+  return x || null;
+}
+function poolMarket(p) { return MARKET && MARKET.find(r => r.chain_id === pchain(p) && r.pool === p.pool.toLowerCase()); }
+function stratBase(p, x) {
+  const m = poolMarket(p);
+  return LABLIB.forPool(x.strategy, p.tick_spacing || (m && m.tick_spacing), m ? m.pegged : p.pegged !== false, x.name);
+}
+const blank = v => v === undefined || v === null || v === "";
+function sameVal(a, b) {
+  if (blank(a) && blank(b)) return true;
+  if (typeof a === "number" && typeof b === "number") return Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(a), Math.abs(b));
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+const showVal = v => blank(v) ? "off" : typeof v === "number" ? fmt(v, Math.abs(v) < 10 && v % 1 ? 4 : 2).replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "") : String(v);
+// {src, fields: {path: {label, was, now}}, structure: [what else differs], safety: {key: {was, now}}}
+function poolDiff(p) {
+  const out = {src: stratSource(p), fields: {}, structure: [], safety: {}};
+  const pd = (S && S.pool_defaults) || {};
+  for (const k of SAFETY) if (k in pd && !sameVal(+p[k], +pd[k])) out.safety[k] = {was: pd[k], now: p[k]};
+  if (!out.src) return out;
+  const base = stratBase(p, out.src), cur = p.strategy || {};
+  if (cur.type !== base.type) { out.structure.push("it is a different kind of strategy"); return out; }
+  const put = (path, label, was, now) => { if (!sameVal(was, now)) out.fields[path] = {label, was, now}; };
+  if (cur.type === "graph") {
+    const cat = LABLIB.catalog(), bn = Object.fromEntries((base.nodes || []).map(n => [n.id, n]));
+    const shape = n => JSON.stringify([n.kind, n.in || {}, n.unit || "", n.tf || null, n.token || null, n.chain_id || null]);
+    const cn = cur.nodes || [];
+    if (cn.length !== (base.nodes || []).length || cn.some(n => !bn[n.id] || shape(n) !== shape(bn[n.id]))) out.structure.push("its blocks or their wiring");
+    cn.forEach((n, k) => {
+      const b = bn[n.id], c = cat.find(q => q.kind === n.kind);
+      if (!b || b.kind !== n.kind) return;
+      const dflt = q => ((c && c.params) || []).find(x => x.name === q)?.default;
+      for (const q of new Set([...Object.keys(n.p || {}), ...Object.keys(b.p || {})]))
+        put(`nodes.${k}.p.${q}`, `${n.label || LABLIB.kindName(n.kind)} · ${LABLIB.paramName(q)}`, (b.p || {})[q] ?? dflt(q), (n.p || {})[q] ?? dflt(q));
+    });
+    put("exit_to", "exit into", base.exit_to || "keep", cur.exit_to || "keep");
+    put("park", "parking", !!base.park, !!cur.park);
+  } else {
+    for (const k of new Set([...Object.keys(cur), ...Object.keys(base)])) if (!["type", "name", "unit"].includes(k)) put(k, k, base[k], cur[k]);
+  }
+  return out;
+}
+function changedChip(i) {
+  const d = poolDiff(poolsEdit[i]), n = Object.keys(d.fields).length + Object.keys(d.safety).length + d.structure.length;
+  if (!n) return "";
+  const what = [...Object.values(d.fields).map(f => `${f.label}: ${showVal(f.now)} (default ${showVal(f.was)})`),
+    ...Object.entries(d.safety).map(([k, f]) => `${k}: ${showVal(f.now)} (default ${showVal(f.was)})`), ...d.structure.map(s => "changed: " + s)];
+  return ` <span class="chip changed" title="${esc(what.join("\n"))}">${n} setting${n === 1 ? "" : "s"} changed</span>`;
+}
+// marks the changed fields of an open pool and says what differs, as the settings are edited
+function markOverrides(i) {
+  const box = $("ovr-" + i), p = poolsEdit[i];
+  if (!box || !p) return;
+  const d = poolDiff(p);
+  document.querySelectorAll(`[data-sp^="${i}:"]`).forEach(el => {
+    const path = el.dataset.sp.slice(String(i).length + 1);
+    const f = path.startsWith("@") ? d.safety[path.slice(1)] : d.fields[path];
+    el.classList.toggle("ovr", !!f);
+    el.title = f ? `${path.startsWith("@") ? "app default" : "strategy default"}: ${showVal(f.was)}` : "";
+  });
+  const nm = d.src ? esc(d.src.name) : "";
+  const list = [...Object.values(d.fields).map(f => `<li>${esc(f.label)}: <b>${esc(showVal(f.now))}</b> <span class="mute">(strategy: ${esc(showVal(f.was))})</span></li>`),
+    ...d.structure.map(s => `<li>${esc(s)}</li>`)];
+  const safe = Object.entries(d.safety).map(([k, f]) => `<li>${esc(k)}: <b>${esc(showVal(f.now))}</b> <span class="mute">(default ${esc(showVal(f.was))})</span></li>`);
+  let h;
+  if (!d.src) h = `<div class="ovrsum"><span class="mute">Not linked to a strategy in the library, so its settings cannot be compared with one. Pick a strategy above to link it.</span></div>`;
+  else if (!list.length) h = `<div class="ovrsum same">✓ Same settings as “${nm}”: its backtests in the lab apply to this pool.</div>`;
+  else h = `<div class="ovrsum diff"><div><b>${list.length} setting${list.length === 1 ? " differs" : "s differ"} from “${nm}”</b>: backtests of “${nm}” do not show what this pool runs.<ul>${list.join("")}</ul></div><span class="sp"></span>
+    <button class="sec sm" onclick="resetStrat(${i})" title="put the strategy's own settings back (save to apply)">Reset to strategy defaults</button></div>`;
+  if (safe.length) h += `<div class="ovrsum diff"><div><b>Safety limits changed from the app's defaults</b><ul>${safe.join("")}</ul></div><span class="sp"></span>
+    <button class="sec sm" onclick="resetSafety(${i})" title="put the app's default limits back (save to apply)">Reset limits</button></div>`;
+  box.innerHTML = h;
+}
+function resetStrat(i) {
+  const p = poolsEdit[i], x = stratSource(p);
+  if (!x) return;
+  p.strategy = stratBase(p, x);
+  p.strategy_source = {id: x.id, name: x.name};
+  dirtyPools = true; renderPools();
+  toast(`${p.name}: settings of “${x.name}” put back. Save to apply.`);
+}
+function resetSafety(i) {
+  const p = poolsEdit[i], pd = (S && S.pool_defaults) || {};
+  for (const k of SAFETY) if (k in pd) p[k] = pd[k];
+  dirtyPools = true; renderPools();
+  toast(`${p.name}: default safety limits put back. Save to apply.`);
+}
 // ---- a pool's strategy: picked from the Strategy lab's library, then its own settings ----
 const STYPE = {ladder: "Ladder", custom: "Simple rules", graph: "Node strategy"};
 function stratLabel(sp) { return (STYPE[sp.type] || sp.type) + (sp.type === "graph" && sp.name ? `: ${sp.name}` : ""); }
@@ -730,6 +950,7 @@ function pickStrat(i, id) {
   if (!x) return;
   const m = MARKET && MARKET.find(r => r.chain_id === pchain(p) && r.pool === p.pool.toLowerCase());
   p.strategy = LABLIB.forPool(x.strategy, p.tick_spacing || (m && m.tick_spacing), m ? m.pegged : p.pegged !== false, x.name);
+  p.strategy_source = {id: x.id, name: x.name};
   dirtyPools = true; renderPools();
   toast(`${p.name}: "${x.name}" picked. Check its settings, then Save.`);
 }
@@ -740,16 +961,16 @@ function editStratPath(i, path, v, opt) {
   for (const k of ks) o = o[k];
   if (v === "" || v === null) { if (opt) delete o[last]; else return; }
   else o[last] = typeof v === "string" && v !== "" && !isNaN(+v) && !["placement", "exit_to", "unit"].includes(last) ? parseFloat(v) : v;
-  dirtyPools = true; updateSum();
+  dirtyPools = true; updateSum(); markOverrides(i);
 }
 function stratFields(i, sp) {
-  const n = (path, label, v, opt, step = "any") => `<div><label class=f>${label}</label><input type=number step="${step}" value="${v ?? ""}" placeholder="${opt ? "off" : ""}"
+  const n = (path, label, v, opt, step = "any") => `<div data-sp="${i}:${path}"><label class=f>${label}</label><input type=number step="${step}" value="${v ?? ""}" placeholder="${opt ? "off" : ""}"
     oninput="editStratPath(${i},'${path}',this.value,${!!opt})"></div>`;
-  const sel = (path, label, v, choices) => `<div><label class=f>${label}</label><select onchange="editStratPath(${i},'${path}',this.value)">${choices.map(([c, l]) =>
+  const sel = (path, label, v, choices) => `<div data-sp="${i}:${path}"><label class=f>${label}</label><select onchange="editStratPath(${i},'${path}',this.value)">${choices.map(([c, l]) =>
     `<option value="${c}" ${(v ?? choices[0][0]) === c ? "selected" : ""}>${l}</option>`).join("")}</select></div>`;
   const exitTo = v => sel("exit_to", "exit into", v, [["keep", "both tokens"], ["token0", "token0"], ["token1", "token1"]]);
   const wrap = x => `<div class="fields">${x}</div>`;
-  if (sp.type === "ladder") return wrap(["lookback", "span", "every", "turnover", "guard"].filter(k => k in sp).map(k => `<div><label class=f>${k}</label><input type=number step=any value="${sp[k] ?? ""}" oninput="editStrat(${i},'${k}',this.value)"></div>`).join(""));
+  if (sp.type === "ladder") return wrap(["lookback", "span", "every", "turnover", "guard"].filter(k => k in sp).map(k => `<div data-sp="${i}:${k}"><label class=f>${k}</label><input type=number step=any value="${sp[k] ?? ""}" oninput="editStrat(${i},'${k}',this.value)"></div>`).join(""));
   if (sp.type === "custom") return wrap([
     n("width", "width (ticks)", sp.width, false, 1),
     sel("placement", "placement", sp.placement, [["center", "centred"], ["follow", "follow"]]),
@@ -794,14 +1015,14 @@ $("onlySupported").addEventListener("change", e => {
 });
 async function addPool(addr, name, chainId) {
   try { const r = await api("/api/pools/add", {pool: addr, name: name || undefined, chain_id: chainId || 8453});
-    toast(`Added ${r.pool.name} on ${chainOf(chainId || 8453).name} (disabled, 0%). Set its allocation in the table; data downloads on the next cycle.`);
+    toast(`Added ${r.pool.name} on ${chainOf(chainId || 8453).name} (disabled). Enable it and give it money with Add in the table; data downloads on the next cycle.`);
     $("newPool").value = ""; $("newName").value = ""; dirtyPools = false; await refresh(); if (MARKET) { MARKET.forEach(p => { if (p.pool === r.pool.pool) p.configured = true; }); renderPools(); } }
   catch (e) { toast(e.message, true); }
 }
 // ---------- settings ----------
 const SETTINGS = [
-  ["interval_s", "Cycle interval (s)", "number"], ["idle_redeploy_pct", "Redeploy idle above (% of allocation)", "number"],
-  ["resize_tolerance_pct", "Resize tolerance (% of allocation)", "number"],
+  ["interval_s", "Cycle interval (s)", "number"], ["idle_redeploy_pct", "Redeploy idle above (% of capital)", "number"],
+  ["resize_tolerance_pct", "Resize tolerance (% of capital)", "number"],
   ["claim.enabled", "Auto-claim rewards", "checkbox"], ["claim.every_days", "Claim every (days)", "number"],
   ["solid_mode", "Claimed SOLID", "solidmode"], ["sell_rewards.max_impact_pct", "Max SOLID sale loss (%)", "number"],
   ["sell_rewards.min_value_usd", "Min SOLID sale value ($)", "number"],
@@ -981,14 +1202,14 @@ function fundChips(id) {
   return sel.map(a => { const t = tokenOn(id, a);
     return `<span class="chip">${t ? logo(t) + `<b>${esc(t.symbol)}</b><span class=mute>${fmt(t.balance, 4)} · ${usd(t.balance_usd, 2)}</span>`
       : known[a] ? `<span class="logo ph">$</span><b>${known[a]}</b><span class=mute title="${esc(a)}">${esc(a.slice(0, 6))}…${esc(a.slice(-4))}</span>`
-      : `<span class=mono>${esc(a.slice(0, 8))}…${esc(a.slice(-4))}</span><span class=mute>${TOKENS || !chainOf(id).enabled ? "" : "loading…"}</span>`}<span class="x" data-act="fund-unpick" data-arg="${id}" data-addr="${esc(a)}" title="Remove">×</span></span>`; }).join("")
+      : `<span class=mono>${esc(a.slice(0, 8))}…${esc(a.slice(-4))}</span><span class=mute>${TOKENS ? "" : "loading…"}</span>`}<span class="x" data-act="fund-unpick" data-arg="${id}" data-addr="${esc(a)}" title="Remove">×</span></span>`; }).join("")
     || `<span class=mute>none: funding off on this chain</span>`;
 }
 function fundRow(id) {
-  const dirty = fundEdit[id] !== undefined, dflt = fundSet(id) === undefined && !dirty;
+  const dirty = fundEdit[id] !== undefined;
   const total = fundCur(id).reduce((x, a) => x + ((tokenOn(id, a) || {}).balance_usd || 0), 0);
   return `<div class="rpcrow fundrow" data-chain="${id}">
-      <div class="nm"><span class="cdot" style="--cc:${cc(id)}"></span><b>${esc(chainOf(id).name)}</b>${dflt ? ` <span class="chip" title="this chain's USDC and USDT">default</span>` : ""}${chainOf(id).enabled ? "" : ` <span class="mute small">chain off: balances not loaded</span>`}
+      <div class="nm"><span class="cdot" style="--cc:${cc(id)}"></span><b>${esc(chainOf(id).name)}</b>
         ${dirty ? ` <span class="small warn">unsaved</span>` : ""}<span class="sp"></span><span class="mute small" data-k="total">${TOKENS ? usd(total, 2) : ""}</span></div>
       <div class="picker"><div class="sel" data-act="fund-open" data-arg="${id}"><span class="chips">${fundChips(id)}</span><span class="sp"></span><span>▾</span></div>
         <div class="menu"><input placeholder="Search symbol, name or paste an address" data-fund-q="${id}"><div class="list"></div></div></div>

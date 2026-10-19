@@ -46,6 +46,9 @@ pub struct Costs {
     pub gas_usd: f64,
     pub fee_haircut: f64,
     pub emission_haircut: f64,
+    /// an exit to the dollar stable and its buy-back: a swap through the aggregator between the
+    /// pair and USDC, dearer than a swap inside the pool (route fees and impact)
+    pub stable_swap_bps: f64,
 }
 
 impl Costs {
@@ -56,10 +59,12 @@ impl Costs {
             gas_usd: n("gas_usd", 0.02).min(100.0),
             fee_haircut: n("fee_haircut", 0.82).min(1.0),
             emission_haircut: n("emission_haircut", 0.5).min(1.0),
+            stable_swap_bps: n("stable_swap_bps", 1.0).min(500.0),
         }
     }
     fn json(&self) -> Value {
-        json!({"swap_bps": self.swap_bps, "gas_usd": self.gas_usd, "fee_haircut": self.fee_haircut, "emission_haircut": self.emission_haircut})
+        json!({"swap_bps": self.swap_bps, "gas_usd": self.gas_usd, "fee_haircut": self.fee_haircut, "emission_haircut": self.emission_haircut,
+               "stable_swap_bps": self.stable_swap_bps})
     }
 }
 
@@ -157,6 +162,8 @@ pub struct Ctx<'a> {
     pub park: [ParkRate; 2],
     /// the pool's chain (other tokens a node strategy watches are priced on it)
     pub cid: u64,
+    /// the numeraire token's address (an exit to the dollar stable is valued with its USD price)
+    pub num_token: String,
 }
 
 impl Ctx<'_> {
@@ -213,6 +220,9 @@ struct Sim {
     waiting: [bool; 2],
     parked: [bool; 2],
     park_yield: f64,
+    /// dollars an exit to the stable holds, and the numeraire's USD price at the current bar
+    usd: f64,
+    upn: f64,
 }
 
 impl Sim {
@@ -328,6 +338,7 @@ impl Sim {
 
     /// Burn everything, swap to the ratio `target` (ranges with value weights) needs, mint it.
     fn rebalance(&mut self, c: &Ctx, cost: &Costs, i: usize, t: i64, target: &[(i64, i64, f64)], why: &str) {
+        self.from_usd(c, cost);
         let s = c.s(i);
         let p = s * s;
         let (x, y) = self.inventory(c, s);
@@ -375,7 +386,60 @@ impl Sim {
         }
     }
 
+    /// Dollars an exit to the stable holds, bought back into the numeraire (a swap) at the bar's price.
+    fn from_usd(&mut self, c: &Ctx, cost: &Costs) {
+        if self.usd <= 0.0 {
+            return;
+        }
+        let v = self.usd / self.upn;
+        let fee = v * cost.stable_swap_bps / 1e4;
+        self.swap_costs += fee;
+        if c.num1 {
+            self.y += v - fee;
+        } else {
+            self.x += v - fee;
+        }
+        self.usd = 0.0;
+        self.pay_gas(c, cost, 1);
+    }
+
+    /// Value (numeraire) of the dollars held now.
+    fn usd_value(&self) -> f64 {
+        if self.usd > 0.0 { self.usd / self.upn } else { 0.0 }
+    }
+
+    /// An exit into the dollar stable: everything withdrawn and both tokens sold for dollars.
+    fn exit_stable(&mut self, c: &Ctx, cost: &Costs, i: usize, t: i64, why: &str) {
+        let s = c.s(i);
+        let (x, y) = self.inventory(c, s);
+        let mut n_tx = if self.ranges.is_empty() { 0 } else { 1 } + (x > 0.0) as usize + (y > 0.0) as usize;
+        let mut v = c.value(x, y, s);
+        if self.parked.iter().any(|p| *p) {
+            v -= self.park_move(c, cost, self.parked_value(c, s));
+            n_tx += 1;
+        }
+        let fee = v * cost.stable_swap_bps / 1e4;
+        self.swap_costs += fee;
+        self.usd += (v - fee).max(0.0) * self.upn;
+        self.close_segment(t);
+        self.ranges.clear();
+        self.x = 0.0;
+        self.y = 0.0;
+        self.waiting = [false; 2];
+        self.parked = [false; 2];
+        self.pay_gas(c, cost, n_tx);
+        self.actions += 1;
+        if self.events.len() < MAX_EVENTS {
+            self.events.push(json!({"ts": t, "kind": "exit", "reason": why, "to": "stable"}));
+        }
+    }
+
     fn exit(&mut self, c: &Ctx, cost: &Costs, i: usize, t: i64, to: ExitTo, why: &str) {
+        if to == ExitTo::Stable {
+            return self.exit_stable(c, cost, i, t, why);
+        }
+        // from the stable into a token: the dollars buy the numeraire back first
+        self.from_usd(c, cost);
         let s = c.s(i);
         let p = s * s;
         let (mut x, mut y) = self.inventory(c, s);
@@ -383,7 +447,7 @@ impl Sim {
         let swapped1 = match to {
             ExitTo::Token0 => y,
             ExitTo::Token1 => x * p,
-            ExitTo::Keep => 0.0,
+            ExitTo::Keep | ExitTo::Stable => 0.0,
         };
         if swapped1 > 0.0 {
             let c1 = swapped1 * cost.swap_bps / 1e4;
@@ -408,7 +472,7 @@ impl Sim {
         self.waiting = match to {
             ExitTo::Token0 => [true, false],
             ExitTo::Token1 => [false, true],
-            ExitTo::Keep => [x > 0.0, y > 0.0],
+            ExitTo::Keep | ExitTo::Stable => [x > 0.0, y > 0.0],
         };
         self.parked = self.waiting;
         for sd in 0..2 {
@@ -478,9 +542,43 @@ pub fn run(c: &Ctx, strat: &Strategy, cost: &Costs, capital: f64, b0: usize, b1:
         }
         _ => None,
     };
+    // an exit to the dollar stable holds dollars: valued with the numeraire's USD price bar by bar
+    // (from the chain's pools, as a watched token is), or today's price when that is not available
+    let flat_upn = if c.num_per_usd > 0.0 { 1.0 / c.num_per_usd } else { 1.0 };
+    let stable_exit = match strat {
+        Strategy::Graph(g) => g.may_exit_to_stable(),
+        Strategy::Custom(r) => r.exit_to == ExitTo::Stable,
+        _ => false,
+    };
+    let upn: Vec<f64> = if !stable_exit || c.num_token.is_empty() {
+        vec![]
+    } else {
+        match crate::external::load(c.cid, &c.num_token, &m.bar_end) {
+            Ok(sr) => {
+                let mut last = flat_upn;
+                sr.close
+                    .iter()
+                    .map(|t| {
+                        if t.is_finite() {
+                            last = 1.0001f64.powf(*t);
+                        }
+                        last
+                    })
+                    .collect()
+            }
+            Err(e) => {
+                watch_errors.push(format!("the numeraire's USD price (exit to stable): {e}; today's price is used"));
+                vec![]
+            }
+        }
+    };
+    sim.upn = flat_upn;
     for b in b0..=b1 {
         let i = m.bar_idx[b];
         let t = m.bar_end[b];
+        if let Some(u) = upn.get(b) {
+            sim.upn = *u;
+        }
         sim.accrue(c, cost, last_i, i, last_t, t);
         (last_i, last_t) = (i, t);
         let tick = m.tick[i];
@@ -520,6 +618,7 @@ pub fn run(c: &Ctx, strat: &Strategy, cost: &Costs, capital: f64, b0: usize, b1:
                         match &glad {
                             // a ladder block: the ladder's own solve, taken when it moves enough of the value
                             Some(p) => {
+                                sim.from_usd(c, cost);
                                 let (x, y) = sim.inventory(c, s);
                                 let target = crate::engine::cap_ranges(
                                     crate::engine::snap_ranges(ladder::decide_at(m, p, x + y / (s * s), m.sp[i], tick, i), c.spacing),
@@ -568,7 +667,7 @@ pub fn run(c: &Ctx, strat: &Strategy, cost: &Costs, capital: f64, b0: usize, b1:
         if t >= next_mark || b == b1 {
             let (x, y) = sim.inventory(c, s);
             let hodl = sim.hodl.map(|(hx, hy)| c.value(hx, hy, s)).unwrap_or(capital);
-            series.push(json!([t, round6(c.value(x, y, s) + sim.cash), round6(hodl)]));
+            series.push(json!([t, round6(c.value(x, y, s) + sim.usd_value() + sim.cash), round6(hodl)]));
             next_mark = (t.div_euclid(3600) + 1) * 3600;
         }
     }
@@ -576,7 +675,7 @@ pub fn run(c: &Ctx, strat: &Strategy, cost: &Costs, capital: f64, b0: usize, b1:
     sim.close_segment(t_end);
     let s_end = c.s(m.bar_idx[b1]);
     let (x, y) = sim.inventory(c, s_end);
-    let inventory = c.value(x, y, s_end);
+    let inventory = c.value(x, y, s_end) + sim.usd_value();
     let value = inventory + sim.cash;
     let hodl = sim.hodl.map(|(hx, hy)| c.value(hx, hy, s_end)).unwrap_or(capital);
     let il = inventory - hodl + sim.swap_costs;
@@ -804,6 +903,7 @@ fn execute(id: u64, cid: u64, pool: &str, days: i64, req: &Value, wallet: &str) 
         beta,
         park: park_rates(cid, [tok0.as_str(), tok1.as_str()], from - WARMUP_S, &Costs::from(&req["costs"]), req["capital_usd"].as_f64().unwrap_or(0.0)),
         cid,
+        num_token: num_tok.to_lowercase(),
     };
     let cost = Costs::from(&req["costs"]);
     // capital: in USD (capital_usd, what the lab sends: you bring USDC) or in the numeraire. USDC
@@ -840,7 +940,7 @@ fn execute(id: u64, cid: u64, pool: &str, days: i64, req: &Value, wallet: &str) 
             if mm.bar_end.is_empty() || a >= mm.bar_end.len() {
                 return Err("not enough swaps in the period".into());
             }
-            Some(Rp { c: Ctx { m: mm, spacing, num1, num_per_usd, emis_usd_h: rp5.c.emis_usd_h.clone(), sqrt_px: mm.px_scale.sqrt(), beta, park: rp5.c.park.clone(), cid }, b0: a, b1: mm.bar_end.partition_point(|t| *t <= end).saturating_sub(1).max(a) })
+            Some(Rp { c: Ctx { m: mm, spacing, num1, num_per_usd, emis_usd_h: rp5.c.emis_usd_h.clone(), sqrt_px: mm.px_scale.sqrt(), beta, park: rp5.c.park.clone(), cid, num_token: rp5.c.num_token.clone() }, b0: a, b1: mm.bar_end.partition_point(|t| *t <= end).saturating_sub(1).max(a) })
         }
         None => None,
     };
@@ -1958,15 +2058,30 @@ mod tests {
     }
 
     fn ctx(m: &Market) -> Ctx<'_> {
-        Ctx { m, spacing: 1, num1: false, num_per_usd: 1.0, emis_usd_h: HashMap::new(), sqrt_px: 1.0, beta: 1.0, park: Default::default(), cid: 8453 }
+        Ctx { m, spacing: 1, num1: false, num_per_usd: 1.0, emis_usd_h: HashMap::new(), sqrt_px: 1.0, beta: 1.0, park: Default::default(), cid: 8453, num_token: String::new() }
     }
 
     fn no_costs() -> Costs {
-        Costs { swap_bps: 0.0, gas_usd: 0.0, fee_haircut: 1.0, emission_haircut: 1.0 }
+        Costs { swap_bps: 0.0, gas_usd: 0.0, fee_haircut: 1.0, emission_haircut: 1.0, stable_swap_bps: 0.0 }
     }
 
     fn custom(v: Value) -> Strategy {
         Strategy::Custom(Rules::from(v.as_object().unwrap(), 1).unwrap())
+    }
+
+    #[test]
+    fn an_exit_to_the_stable_holds_dollars_and_buys_the_numeraire_back() {
+        let m = market(&vec![0; 100], 0.0, 1e9);
+        let c = ctx(&m);
+        let mut sim = Sim { x: 100.0, upn: 2000.0, ..Default::default() };
+        sim.exit(&c, &no_costs(), 0, 0, ExitTo::Stable, "test");
+        assert_eq!((sim.x, sim.y, sim.usd), (0.0, 0.0, 200_000.0), "everything sold for dollars");
+        // the numeraire halves against the dollar: the dollars buy twice as much of it
+        sim.upn = 1000.0;
+        assert!((sim.usd_value() - 200.0).abs() < 1e-9);
+        sim.from_usd(&c, &Costs { stable_swap_bps: 10.0, ..no_costs() });
+        assert!((sim.x - 199.8).abs() < 1e-9 && sim.usd == 0.0, "bought back, less the swap: {}", sim.x);
+        assert!((sim.swap_costs - 0.2).abs() < 1e-9);
     }
 
     #[test]
@@ -2004,7 +2119,7 @@ mod tests {
         let m = market(&vec![0; 6000], 0.0, 1e9);
         let mut c = ctx(&m);
         let rules = |park: bool| custom(json!({"width": 10, "exit_lo": 5, "exit_to": "token0", "park": park}));
-        let cost = Costs { swap_bps: 4.0, gas_usd: 0.5, fee_haircut: 1.0, emission_haircut: 1.0 };
+        let cost = Costs { swap_bps: 4.0, gas_usd: 0.5, fee_haircut: 1.0, emission_haircut: 1.0, stable_swap_bps: 0.0 };
         let b1 = m.bar_end.len() - 1;
         c.park = [ParkRate::flat(0.10), ParkRate::flat(0.0)];
         let off = run(&c, &rules(false), &cost, 10_000.0, 0, b1);
@@ -2086,7 +2201,7 @@ mod tests {
         let ticks: Vec<i64> = (0..3000).map(|k| ((k as f64 / 120.0).sin() * 40.0) as i64).collect();
         let m = market(&ticks, 0.5, 5e8);
         let c = ctx(&m);
-        let cost = Costs { swap_bps: 5.0, gas_usd: 0.5, fee_haircut: 0.8, emission_haircut: 0.5 };
+        let cost = Costs { swap_bps: 5.0, gas_usd: 0.5, fee_haircut: 0.8, emission_haircut: 0.5, stable_swap_bps: 0.0 };
         let r = run(&c, &custom(json!({"width": 10, "cooldown_min": 30})), &cost, 10_000.0, 0, m.bar_end.len() - 1);
         assert!(r["actions"].as_u64().unwrap() > 2);
         let f = |k: &str| r[k].as_f64().unwrap();

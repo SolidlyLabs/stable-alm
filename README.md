@@ -110,6 +110,17 @@ There are two kinds of strategy you can edit:
   tokens can be watched and how much liquidity backs each. Its **stale** output is true while there is
   no reliable price, so it can drive Hold or Exit. Those pools are read from the same local history
   store as everything else, which the worker keeps current.
+- **Capital per pool**: every pool runs on its own money: its positions, the tokens it holds idle
+  and what it parked. What it earns stays in it, and what it loses is its own loss: nothing is moved
+  between pools by itself. Free tokens that no pool holds are **Unallocated** (deposits, withdrawals,
+  what a switched-off pool gave back), and pools never touch them. You move money on the Pools tab:
+  **Add** (from Unallocated, USDC first), **Withdraw** (tick the pools or All and enter a dollar amount,
+  split equally; each pool sells its part to USDC when it next runs, idle tokens first and then the
+  same slice of each position, and the USDC lands in Unallocated), **Move** (a withdrawal from one pool
+  straight into another) and **Reset to %** (a one-off refill of every pool to a share of the chain).
+  Pools run one after another, so what changes in the wallet during a pool's run is that pool's.
+  Rewards claimed go to the pools that earned them. On first start each pool keeps what it holds and
+  is filled from the free tokens up to its allocation %, as before (`logs/capital.json`, `src/capital.rs`).
 - **Parking** (opt-in, Settings › Parking whitelist and per strategy): whatever a pool holds and does
   not use waits in a whitelisted pegged pool (USDC → USDC/USDT, WETH → cbETH/WETH…) until a move needs
   it: out of its pool, the token it waits in (both, after an exit that keeps them as they are, an F/LVR
@@ -126,7 +137,7 @@ There are two kinds of strategy you can edit:
   reward claims, not into positions, so a pegged host adds or takes nothing measurable on top. In a
   pegged pool with no strategy here, a lot gets a range of its own, which that pool never counts or
   moves; a lot that cannot be valued holds the cycle rather than shrink the budgets. When the pool a
-  lot came from is switched off or set to 0%, the lot is handed over to the pool it sits in, if that
+  lot came from is switched off, the lot is handed over to the pool it sits in, if that
   pool runs a strategy: it counts as deployed there and that strategy re-solves on the same cycle,
   whatever its turnover, so the lot is folded into its own ranges; otherwise it stays parked, earning.
   In backtests a parked token earns what its pegged pool paid each day, and nothing before that
@@ -181,10 +192,12 @@ build it yourself (below).
 
 ## Using the app
 
-1. Start Stable ALM. A tray icon appears; double-click it to open the dashboard.
-2. **Pools** lists your pools and every Solidly V3 pool on the chains you turn on with the chain
-   filters at the top. Sort by any column; pegged pairs are shown by default. Add one, give it an
-   allocation (a share of what you hold on that chain), and watch a few dry-run cycles.
+1. Start Stable ALM. A tray icon appears: click it for its menu, double-click it to open the dashboard
+   (on macOS a click opens the menu; choose Open dashboard).
+2. **Pools** lists your pools and every Solidly V3 pool on the chains you show with the chain
+   filters at the top (a view filter only: balances, funding and your pools cover every chain). Sort by any column; pegged pairs are shown by default. Add one, enable it,
+   give it money with **Add** (from Unallocated, the free tokens no pool holds), and watch a few
+   dry-run cycles.
 3. When the plan looks right, paste your wallet's private key under **Settings** and press **Go
    live**.
    - On Windows the key is encrypted for your user account (DPAPI); on macOS it goes into the
@@ -230,40 +243,16 @@ StableALM --quit          stop the running instance after its current cycle
 
 | Folder | What |
 |---|---|
-| `rs/` | The desktop app (Rust): worker, dashboard (`rs/static/`), tray. |
-| `alm/` | The Python backtester and the reference executor that the Rust app is checked against. |
-| `scripts/` | Data downloads, backtest grids, report builders, the parity exporter. |
+| `rs/` | The desktop app (Rust): worker, dashboard (`rs/static/`), tray, backtester and optimizer. |
+| `rs/parity-fixtures/` | What the original Python implementation computed, frozen: `cargo test` checks the app against it. |
 | `reports/` | Backtest reports and research write-ups. |
-| `research/volatile/` | The volatile-pair fee-capture study. |
-| `tests/` | Offline Python tests. |
 | `docs/` | Design notes (`MULTICHAIN_PLAN.md`). |
 
-### Backtesting (optional, Python)
-
-```bash
-python -m venv .venv
-.venv/Scripts/pip install -r requirements.txt     # .venv/bin/pip on macOS/Linux
-python -m pytest tests
-```
-
-Download pool history into `data/` with `scripts/download_pool_events.py <pool> <fromBlock>` and
-`scripts/download_processor.py <pool> <fromBlock>`. Then run a grid and score it:
-
-```bash
-python scripts/run_grid.py --pool usdc-usdt --grid full --start 2025-01-17 --out full_usdc-usdt
-python scripts/compare_pairs.py
-```
-
-Set `ALM_WALLET` to your LP wallet, so your own past positions aren't counted as competing
-liquidity. Grids use 2 worker processes by default, and each holds a full replay market in memory.
-
-To check the Rust engine against the Python reference (tick math, calldata, signing, resize plans,
-ladder targets):
-
-```bash
-python scripts/export_parity.py --data data --out rs/parity
-rs/target/release/StableALM --parity rs/parity
-```
+Backtests run in the app (Strategy lab), on the history it downloads itself. The app was first
+written in Python: that version (backtester, reference executor, data scripts and the research code
+behind the older reports) is no longer in the repository. It is in the git history up to tag v0.4.0.
+Its results are kept: `cargo test` checks the tick math, calldata, signing, resize plans and ladder
+targets against them (`rs/src/parity.rs`).
 
 | Report | Question |
 |---|---|
@@ -271,6 +260,8 @@ rs/target/release/StableALM --parity rs/parity
 | [`IDEAS.md`](reports/IDEAS.md) | Ladder variants that were tried and rejected |
 | [`nested_report.md`](reports/nested_report.md) | Overlapping ranges and centred pyramids vs the ladder |
 | [`VOLATILE.md`](reports/VOLATILE.md) | Fee capture on volatile pairs, and fee vs arbitrage loss |
+
+Every report except `LIBRARY.md` was made with the Python version (see above).
 
 ## License
 

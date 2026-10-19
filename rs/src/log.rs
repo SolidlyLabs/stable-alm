@@ -1,4 +1,4 @@
-//! Logging in the Python app's format ("%(asctime)s %(levelname)-7s %(name)s: %(message)s") to the
+//! Logging as "<time> <LEVEL> <name>: <message>" (the original Python app's format) to the
 //! console, logs/alm.log and (warnings and up) logs/errors.log, each rotated at 5 MB, 5 backups.
 //! Hooks (the tray's notifications) see every warning and error.
 

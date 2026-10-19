@@ -1,7 +1,8 @@
 //! The worker loop, per chain: data refresh, account value, claims, SOLID LP,
-//! one executor pass per pool, and a snapshot for the value history. Each chain's pools are
-//! budgeted from that chain's own total (no bridging; docs/MULTICHAIN_PLAN.md).
+//! one executor pass per pool, and a snapshot for the value history. Each pool runs on its own
+//! capital (capital.rs): what it earns stays with it, and money moves between pools only on request.
 
+use crate::capital;
 use crate::chains;
 use crate::engine::{self, wallet_positions, Executor};
 use crate::prices;
@@ -192,14 +193,80 @@ impl Worker {
         }
     }
 
+    /// A pool's withdrawals (capital.rs releases), before its run: live, its idle tokens and then a
+    /// part of its positions are made USDC, and that USDC leaves its capital; in a dry run its idle
+    /// tokens are moved in the book as they are. The wallet's balances after them, and the report.
+    fn release(&self, cid: u64, cfg: &PoolConfig, wallet: &str, s: &Value, execute: bool, book: &mut capital::Book, uni: &[String], mut before: capital::Tokens)
+        -> Result<(capital::Tokens, Vec<String>, bool), String> {
+        let mut report = vec![];
+        let mut any = false;
+        for r in capital::releases(cid, &cfg.pool) {
+            let id = r["id"].as_str().unwrap_or("").to_string();
+            let usd = r["usd"].as_f64().unwrap_or(0.0);
+            let to = r["to"].as_str().map(|x| x.to_lowercase());
+            let dest = to.clone().unwrap_or_else(|| "Unallocated".into());
+            any = true;
+            if !execute {
+                let moved = capital::move_in_book(book, cid, &cfg.pool, usd, to.as_deref());
+                report.push(format!("  withdrawal (dry run): ${} of idle tokens moved to {dest} as they are (live, positions would be burned and sold to USDC as needed)", engine::commas(moved)));
+                capital::remove(&id);
+                capital::save(execute, book);
+                continue;
+            }
+            let own = book.pool(cid, &cfg.pool);
+            let reserve = capital::reserve(&own, &before);
+            let usdc = chains::get(cid).usd.to_lowercase();
+            let mut rx = Executor::new(cfg.clone(), cid, wallet, s, execute, None)?;
+            rx.set_capital(0.0, reserve.clone());
+            let others: Vec<String> = own.keys().cloned().collect();
+            let res = rx.release(usd, &usdc, &others);
+            report.extend(rx.report.drain(..));
+            let after = capital::balances(cid, uni, wallet)?;
+            let mut mine = capital::after_run(&reserve, &after);
+            let want = (usd / capital::px_raw(cid, &usdc)?) as i128;
+            let moved = mine.get(&usdc).copied().unwrap_or(0).min(want);
+            *mine.entry(usdc.clone()).or_default() -= moved;
+            book.set_pool(cid, &cfg.pool, mine);
+            if let Some(t) = &to {
+                let mut tb = book.pool(cid, t);
+                *tb.entry(usdc.clone()).or_default() += moved;
+                book.set_pool(cid, t, tb);
+            }
+            let moved_usd = moved as f64 * capital::px_raw(cid, &usdc).unwrap_or(0.0);
+            report.push(format!("  withdrawal: ${} USDC moved to {dest} (asked ${}){}", engine::commas(moved_usd), engine::commas(usd),
+                                res.as_ref().err().map(|e| format!("; stopped early: {e}")).unwrap_or_default()));
+            engine::log(json!({"chain_id": cid, "pool": cfg.pool, "kind": "capital", "what": "withdraw", "usd": moved_usd, "asked_usd": usd, "to": to}));
+            capital::remove(&id);
+            capital::save(execute, book);
+            before = after;
+        }
+        Ok((before, report, any))
+    }
+
     fn run_pool(&self, cid: u64, cfg: &PoolConfig, acct: &Value, wallet: &str, s: &Value, execute: bool) -> Value {
-        let chain_total = acct["chains"][cid.to_string()]["total_usd"].as_f64().unwrap_or(0.0);
-        // its share of the chain, plus what it holds for pools that parked with it, less what it parked
-        // with others (parking.rs, claims)
-        let (hosted, owed) = crate::parking::claims_usd(execute, cid, &cfg.pool);
-        let budget = if cfg.enabled { (chain_total * cfg.allocation_pct / 100.0 + hosted - owed).max(0.0) } else { 0.0 };
+        let all = settings::load_pools();
+        let chain_pools: Vec<PoolConfig> = all.iter().filter(|p| pool_chain(p) == cid).map(PoolConfig::from).collect();
+        let refs: Vec<&PoolConfig> = chain_pools.iter().collect();
+        let mut budget = 0.0;
+        let mut book = capital::load(execute);
         let res = (|| -> Result<Value, String> {
-            let mut ex = Executor::new(cfg.clone(), cid, wallet, s, execute, Some(budget))?;
+            // its own tokens only: the rest of the wallet is reserved for the other pools and Unallocated
+            let uni = capital::universe(cid, &refs, s, acct, &book);
+            let before = capital::balances(cid, &uni, wallet).map_err(|e| format!("wallet balances not read, so the pool's own tokens are not known: {e}"))?;
+            let (before, released, any) = self.release(cid, cfg, wallet, s, execute, &mut book, &uni, before)?;
+            let mut acct = acct.clone();
+            if any && execute {
+                if let Ok((info, ..)) = pool_value(cid, cfg, wallet) {
+                    acct["pools"][&cfg.name] = info;
+                }
+            }
+            let own = book.pool(cid, &cfg.pool);
+            let reserve = capital::reserve(&own, &before);
+            let parts = capital::parts(execute, cid, cfg, &acct, &own);
+            budget = if cfg.enabled { parts.budget() } else { 0.0 };
+            let mut ex = Executor::new(cfg.clone(), cid, wallet, s, execute, None)?;
+            ex.set_capital(budget, reserve.clone());
+            ex.report.extend(released);
             let num = cfg.numeraire;
             let bar_s = pool_bar_s(cfg);
             let m = crate::data::live_market_bars(cid, &cfg.pool, wallet, ex.dec0, ex.dec1, num, replay_days(cfg), bar_s)?;
@@ -211,9 +278,20 @@ impl Worker {
                     json!({"chain_id": cid, "pool": cfg.pool, "name": cfg.name, "mode": "error", "error": e.to_string()})
                 }
             };
+            if execute {
+                // what changed in the wallet during the run is the pool's
+                match capital::balances(cid, &uni, wallet) {
+                    Ok(after) => {
+                        book.set_pool(cid, &cfg.pool, capital::after_run(&reserve, &after));
+                        capital::save(execute, &book);
+                    }
+                    Err(e) => crate::error!("worker", "[{}] balances after the run not read ({e}): the pool's idle tokens are as before the run until the next one", cfg.name),
+                }
+            }
             let n = ex.report.len();
             summary["report"] = json!(ex.report[n.saturating_sub(60)..]);
             summary["budget_usd"] = json!(budget);
+            summary["capital_usd"] = json!(parts.capital());
             summary["decides_every_s"] = json!(bar_s);
             // Monitor only (reports/VOLATILE.md): shown on the dashboard, not used for trading.
             summary["flvr"] = crate::data::pool_flvr(cid, &cfg.pool, ex.dec0, ex.dec1, num);
@@ -275,7 +353,7 @@ impl Worker {
         // lots parked by a pool that is now switched off (or at 0%) become the pool's they sit in,
         // when that pool runs a strategy of its own: before valuing, so they count there this cycle
         for (cid, pools) in &by_chain {
-            let on = |addr: &str| pools.iter().any(|(_, c)| c.pool.eq_ignore_ascii_case(addr) && c.enabled && c.allocation_pct > 0.0);
+            let on = |addr: &str| pools.iter().any(|(_, c)| c.pool.eq_ignore_ascii_case(addr) && c.enabled);
             let got = crate::parking::hand_over(execute, *cid, &on, &on);
             // the lot keeps the parking range it was minted in (wide, so it stayed in range without
             // care): the pool that now owns it re-solves on this cycle instead of on its schedule, so
@@ -287,12 +365,42 @@ impl Worker {
         let acct = account_value(&by_chain, &wallet, &s);
         self.set("account", acct.clone());
 
+        // each pool's capital: kept within the wallet, and the queued Add / Withdraw / Reset requests
+        let mut book = capital::load(execute);
+        let mut unis: BTreeMap<u64, Vec<String>> = BTreeMap::new();
+        for (cid, pools) in &by_chain {
+            let refs: Vec<&PoolConfig> = pools.iter().map(|x| &x.1).collect();
+            let uni = capital::universe(*cid, &refs, &s, &acct, &book);
+            match capital::balances(*cid, &uni, &wallet) {
+                Ok(w) => capital::prepare(&mut book, *cid, &refs, &acct, &w, execute),
+                Err(e) => crate::warn!("capital", "chain {cid}: wallet balances not read ({e}); capital requests wait for the next cycle"),
+            }
+            unis.insert(*cid, uni);
+        }
+        capital::save(execute, &book);
+        self.publish_capital(&by_chain, &wallet, &acct, execute);
+
         let force = std::mem::take(&mut *self.force_claim.lock().unwrap());
         if s["claim"]["enabled"].as_bool().unwrap_or(true) || force {
             let mut claims = Map::new();
-            for cid in by_chain.keys() {
+            for (cid, pools) in &by_chain {
                 let every = s["claim"]["every_days"].as_f64().unwrap_or(7.0);
-                claims.insert(cid.to_string(), crate::claim::run(*cid, &wallet, execute, every, force));
+                let uni = unis.get(cid).cloned().unwrap_or_default();
+                let before = capital::balances(*cid, &uni, &wallet).ok();
+                let r = crate::claim::run(*cid, &wallet, execute, every, force);
+                // the rewards claimed go to the pools that earned them
+                if r["status"] == "claimed" {
+                    match (before, capital::balances(*cid, &uni, &wallet)) {
+                        (Some(b), Ok(a)) => {
+                            let refs: Vec<&PoolConfig> = pools.iter().map(|x| &x.1).collect();
+                            let mut book = capital::load(execute);
+                            capital::credit_claim(&mut book, *cid, &refs, &r["rewards"], &b, &a);
+                            capital::save(execute, &book);
+                        }
+                        _ => crate::warn!("capital", "chain {cid}: balances around the claim not read: the rewards stay Unallocated"),
+                    }
+                }
+                claims.insert(cid.to_string(), r);
             }
             let base = claims.get(&chains::BASE.to_string()).cloned().or_else(|| claims.values().next().cloned()).unwrap_or(Value::Null);
             self.set("claim", base);
@@ -323,10 +431,22 @@ impl Worker {
                 let info = &acct["pools"][&cfg.name];
                 let has_pos = info["positions"].as_array().map(|a| !a.is_empty()).unwrap_or(false);
                 if !cfg.enabled && !has_pos {
+                    // a pool that is off and holds no positions gives its idle tokens back to Unallocated
+                    // (or to the pool a move asked for), as they are
+                    let mut book = capital::load(execute);
+                    for r in capital::releases(*cid, &cfg.pool) {
+                        capital::move_in_book(&mut book, *cid, &cfg.pool, r["usd"].as_f64().unwrap_or(0.0), r["to"].as_str());
+                        capital::remove(r["id"].as_str().unwrap_or(""));
+                    }
+                    if !book.pool(*cid, &cfg.pool).is_empty() {
+                        crate::info!("capital", "[{}] is off: its idle tokens are Unallocated now", cfg.name);
+                        book.set_pool(*cid, &cfg.pool, capital::Tokens::new());
+                    }
+                    capital::save(execute, &book);
                     self.status.lock().unwrap()["pools"][&cfg.name] = json!({"mode": "disabled", "chain_id": cid});
                     continue;
                 }
-                let explicit_exit = !cfg.enabled || cfg.allocation_pct <= 0.0;
+                let explicit_exit = !cfg.enabled;
                 if !incomplete.is_empty() && !explicit_exit {
                     let why = format!("valuation incomplete on this chain ({}); holding until everything can be valued", incomplete.join("; "));
                     crate::warn!("worker", "[{}] {why}", cfg.name);
@@ -351,6 +471,7 @@ impl Worker {
         let mut snap = account_value(&by_chain, &wallet, &s);
         snap["mode"] = json!(mode);
         extra_value(&by_chain, &wallet, &mut snap);
+        self.publish_capital(&by_chain, &wallet, &snap, execute);
         let line = {
             let mut o = Map::new();
             o.insert("ts".into(), json!(engine::now()));
@@ -363,6 +484,25 @@ impl Worker {
         }
         self.set("account", snap);
         Ok(())
+    }
+}
+
+impl Worker {
+    /// Each pool's capital and Unallocated, per chain, for the dashboard (status "capital").
+    fn publish_capital(&self, by_chain: &BTreeMap<u64, Vec<(Value, PoolConfig)>>, wallet: &str, acct: &Value, execute: bool) {
+        let book = capital::load(execute);
+        let mut out = Map::new();
+        for (cid, pools) in by_chain {
+            let refs: Vec<&PoolConfig> = pools.iter().map(|x| &x.1).collect();
+            let uni = capital::universe(*cid, &refs, &settings::load_settings(), acct, &book);
+            match capital::balances(*cid, &uni, wallet) {
+                Ok(w) => {
+                    out.insert(cid.to_string(), capital::status(&book, *cid, &refs, acct, &w, execute));
+                }
+                Err(e) => crate::warn!("capital", "chain {cid}: capital not shown ({e})"),
+            }
+        }
+        self.set("capital", Value::Object(out));
     }
 }
 

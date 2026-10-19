@@ -1,6 +1,6 @@
 # Fee capture on volatile pairs: can we build a profitable strategy, and does it carry over to our pools?
 
-Date: 17 Oct 2026. Code and data: `research/volatile/` (simulator `vsim.py`, strategies `vstrat.py`, grid
+Date: 17 Oct 2026. Code and data (removed; it is in the git history up to tag v0.4.0): `research/volatile/` (simulator `vsim.py`, strategies `vstrat.py`, grid
 `grid.py`, scoring `score.py` and `effects.py`, `fee_vs_lvr.py`, `elasticity.py`, pool surveys).
 Goal as set: **fee capture, not emissions farming**. Income in every test here is swap fees only.
 

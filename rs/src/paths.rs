@@ -1,4 +1,4 @@
-//! Where the app keeps its state (same layout as alm/paths.py).
+//! Where the app keeps its state.
 //!
 //! HOME: ALM_HOME if set, else %LOCALAPPDATA%\StableALM (Windows) or
 //! ~/Library/Application Support/StableALM (macOS), else ~/.stable-alm.

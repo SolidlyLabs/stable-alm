@@ -1,0 +1,18 @@
+{
+ "name": "cbeth-weth",
+ "pool": "0x74ad64bac8df96af2b63ea50c3d8840b79aa7a3b",
+ "d0": 18,
+ "d1": 18,
+ "numeraire": 1,
+ "spacing": 1,
+ "max_ranges": 5,
+ "strategy": {
+  "type": "ladder",
+  "lookback": 86400,
+  "span": 6,
+  "every": 72,
+  "turnover": 0.4,
+  "guard": 15
+ },
+ "wallet": "0x1111111111111111111111111111111111111111"
+}

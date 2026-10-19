@@ -1,8 +1,0 @@
-# Backtests, the reference executor and the parity exporter. scripts/make_report.py also needs matplotlib.
-numpy==2.2.6
-pandas==2.2.3
-pyarrow==17.0.0
-eth-abi==5.1.0
-eth-account==0.11.3
-eth-utils==4.1.1
-pytest==9.1.1

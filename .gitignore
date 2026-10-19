@@ -1,4 +1,4 @@
-# Local state (backtest data, reference-executor config, logs, keys)
+# Local state (logs, keys, config of a local run)
 data/
 logs/
 secrets/
@@ -6,19 +6,18 @@ config/settings.json
 config/STOP
 .env
 
-# Python
-__pycache__/
-*.pyc
-.pytest_cache/
-.venv*/
-
 # Generated backtest output (the reports' Markdown is kept)
 reports/*.csv
 reports/*.parquet
 reports/*.png
 
-
-# Leftovers from the old Docker and PyInstaller builds
+# Leftovers from the removed Python version (its venv, caches and research data), and from the old
+# Docker and PyInstaller builds
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv*/
+research/
 docker-data/
 build/
 dist/

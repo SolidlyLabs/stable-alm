@@ -1,4 +1,4 @@
-//! Market data for the UI (alm/market_data.py), per chain: the Solidly UI's getInitData (JWT signed
+//! Market data for the UI, per chain: the Solidly UI's getInitData (JWT signed
 //! with the UI's public key, read from solidly.com's bundle), hourly APR windows, wallet tokens.
 
 use hmac::{Hmac, Mac};
@@ -281,10 +281,11 @@ pub fn shortlist(wallet: &str, configured: &[(u64, String)]) -> Result<Vec<Value
     Ok(rows.into_inner().unwrap())
 }
 
-/// Every token of the chains' Solidly pools (+ extra addresses) with the wallet's balance.
+/// Every token of every chain's Solidly pools (+ extra addresses) with the wallet's balance. Every
+/// supported chain, whatever the pools table shows; a chain whose RPC fails is left out, not the list.
 pub fn tokens(wallet: &str, extra: &[(u64, String)]) -> Result<Vec<Value>, String> {
     let mut out = vec![];
-    for c in crate::chains::all().into_iter().filter(|c| c.enabled) {
+    for c in crate::chains::all() {
         let cid = c.id;
         let mut known: Vec<Value> = vec![];
         if let Ok(ps) = pools(cid, wallet) {
@@ -311,7 +312,13 @@ pub fn tokens(wallet: &str, extra: &[(u64, String)]) -> Result<Vec<Value>, Strin
         let data = format!("0x70a08231{}{}", "0".repeat(24), wallet.trim_start_matches("0x").to_lowercase());
         for chunk in known.chunks(50) {
             let calls: Vec<(&str, Value)> = chunk.iter().map(|t| ("eth_call", json!([{"to": t["address"], "data": data}, "latest"]))).collect();
-            let res = crate::rpc::batch(cid, &calls)?;
+            let res = match crate::rpc::batch(cid, &calls) {
+                Ok(r) => r,
+                Err(e) => {
+                    crate::warn!("market", "{}: wallet balances not read: {e}", c.name);
+                    break;
+                }
+            };
             for (t, r) in chunk.iter().zip(res) {
                 let mut t = t.clone();
                 let raw = r.ok().and_then(|v| v.as_str().map(crate::eth::parse_uint)).map(|b| crate::tickmath::to_f64(&b)).unwrap_or(0.0);

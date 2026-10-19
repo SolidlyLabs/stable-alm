@@ -244,7 +244,7 @@
   const RUNCOL = ["var(--acc)", "var(--c1)", "var(--c3)", "var(--c4)", "var(--c6)"];
   const L = {
     chain: null, pool: null, sym: ["", ""], d: [null, null], spacing: 1, pegged: true, num1: false,
-    days: 30, capital: 10000, costs: {swap_bps: 0.3, gas_usd: 0.02, fee_haircut: 0.82, emission_haircut: 0.5},
+    days: 30, capital: 10000, costs: {swap_bps: 0.3, gas_usd: 0.02, fee_haircut: 0.82, emission_haircut: 0.5, stable_swap_bps: 1},
     lib: null, cur: null, dirty: false, compare: ["b:ladder"], hold: true, ov: {},
     res: null, tick: null, job: null, pending: false, step: "", err: "", other: false, sel: null,
   };
@@ -807,7 +807,7 @@
     box.oninput = box.onchange = onRules;
   }
   function exitToSel(v) {
-    return `<div data-help="lab-exitto"><label class="f">Withdraw into</label><select data-r="exit_to">${[["keep", "both tokens, as withdrawn"], ["token0", "all " + esc(L.sym[0] || "token0")], ["token1", "all " + esc(L.sym[1] || "token1")]]
+    return `<div data-help="lab-exitto"><label class="f">Withdraw into</label><select data-r="exit_to">${[["keep", "both tokens, as withdrawn"], ["token0", "all " + esc(L.sym[0] || "token0")], ["token1", "all " + esc(L.sym[1] || "token1")], ["stable", "all in USDC (sold, parked, bought back)"]]
       .map(([x, l]) => `<option value="${x}" ${(v || "keep") === x ? "selected" : ""}>${l}</option>`).join("")}</select></div>`;
   }
   function parkSel(v) {
@@ -817,8 +817,8 @@
       ${live ? "" : `<div class="small" style="color:var(--warn);margin:4px 0 0 46px">⚠ Parking is switched off in Settings › Options: backtests count it, but the worker will not park until it is on.</div>`}</div>`;
   }
   function costsBox() {
-    return `<details class="grp" data-help="lab-costs"><summary class="mute small">Costs &amp; haircuts: swap ${fmt(L.costs.swap_bps, 2)} bp · gas $${fmt(L.costs.gas_usd, 3)} · fees ×${fmt(L.costs.fee_haircut, 2)} · emissions ×${fmt(L.costs.emission_haircut, 2)}</summary>
-      <div class="lf" style="margin-top:10px">${[["swap_bps", "Swap cost (bp)"], ["gas_usd", "Gas per tx ($)"], ["fee_haircut", "Fees received (×)"], ["emission_haircut", "Emissions value (×)"]]
+    return `<details class="grp" data-help="lab-costs"><summary class="mute small">Costs &amp; haircuts: swap ${fmt(L.costs.swap_bps, 2)} bp (USDC ${fmt(L.costs.stable_swap_bps ?? 1, 1)} bp) · gas $${fmt(L.costs.gas_usd, 3)} · fees ×${fmt(L.costs.fee_haircut, 2)} · emissions ×${fmt(L.costs.emission_haircut, 2)}</summary>
+      <div class="lf" style="margin-top:10px">${[["swap_bps", "Swap cost (bp)"], ["stable_swap_bps", "Swap to/from USDC (bp)"], ["gas_usd", "Gas per tx ($)"], ["fee_haircut", "Fees received (×)"], ["emission_haircut", "Emissions value (×)"]]
         .map(([k, l]) => `<div><label class="f">${l}</label><input type="number" step="any" min="0" data-c="${k}" value="${L.costs[k]}"></div>`).join("")}</div></details>`;
   }
   function onCost(el) { const v = parseFloat(el.value); if (v >= 0) { L.costs[el.dataset.c] = v; schedule(); } }

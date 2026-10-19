@@ -180,12 +180,12 @@ pub fn is_claim(x: &Value) -> bool {
     x["kind"] == "claim"
 }
 
-/// The strategy pool `pool` is, when it runs one now (configured on chain `cid`, switched on, a share
-/// above 0%): what is parked there becomes a claim on it. Its name.
+/// The strategy pool `pool` is, when it runs one now (configured on chain `cid`, switched on): what is
+/// parked there becomes a claim on it. Its name.
 pub fn host(cid: u64, pool: &str) -> Option<String> {
     crate::settings::load_pools().iter().find_map(|p| {
         let c = crate::settings::PoolConfig::from(p);
-        (crate::worker::pool_chain(p) == cid && c.pool.eq_ignore_ascii_case(pool) && c.enabled && c.allocation_pct > 0.0).then(|| c.name.clone())
+        (crate::worker::pool_chain(p) == cid && c.pool.eq_ignore_ascii_case(pool) && c.enabled).then(|| c.name.clone())
     })
 }
 

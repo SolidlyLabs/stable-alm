@@ -317,6 +317,7 @@ impl Graph {
         let exit_to = match s.get("exit_to").and_then(|v| v.as_str()).unwrap_or("keep") {
             "token0" => ExitTo::Token0,
             "token1" => ExitTo::Token1,
+            "stable" => ExitTo::Stable,
             _ => ExitTo::Keep,
         };
         let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("").chars().take(60).collect();
@@ -361,6 +362,11 @@ impl Graph {
 
     fn sink(&self, kind: &str) -> Option<usize> {
         self.nodes.iter().position(|n| n.kind == kind)
+    }
+
+    /// Whether an exit may wait in the dollar stable (the strategy's exit_to).
+    pub fn may_exit_to_stable(&self) -> bool {
+        self.exit_to == ExitTo::Stable
     }
 
     fn param(&self, i: usize, k: &str) -> f64 {
@@ -930,7 +936,7 @@ pub fn wanted(g: &Graph, ev: &Eval, bar: usize, spacing: i64) -> Option<(i64, i6
 }
 
 /// The token an exit at `bar` waits in: the exit sink's `to` input (+1 token0, -1 token1) when
-/// connected and decided, else the strategy's exit_to.
+/// connected and decided, else the strategy's exit_to (which may be the dollar stable).
 pub fn exit_to(g: &Graph, ev: &Eval, bar: usize, tick: i64, range: Option<(i64, i64)>) -> ExitTo {
     let at = At { bar, tick, range, wanted: None };
     match g.sink("exit").and_then(|x| input(g, ev, x, "to", &at)) {
@@ -940,11 +946,12 @@ pub fn exit_to(g: &Graph, ev: &Eval, bar: usize, tick: i64, range: Option<(i64, 
     }
 }
 
-/// How an exit's token is kept in the state: 1 token0, -1 token1, 0 as it was.
+/// How an exit's token is kept in the state: 1 token0, -1 token1, 2 the dollar stable, 0 as it was.
 pub fn side_code(to: ExitTo) -> i8 {
     match to {
         ExitTo::Token0 => 1,
         ExitTo::Token1 => -1,
+        ExitTo::Stable => 2,
         ExitTo::Keep => 0,
     }
 }
@@ -968,7 +975,12 @@ pub fn decide(g: &Graph, ev: &Eval, st: &mut State, now: i64, bar: usize, tick: 
             // out and waiting in one token, and the move turned: wait in the other one
             let to = exit_to(g, ev, bar, tick, range);
             if to != ExitTo::Keep && side_code(to) != st.exit_side {
-                return Decision::Exit(format!("the move turned: waiting in token{} now", if to == ExitTo::Token0 { 0 } else { 1 }));
+                let what = match to {
+                    ExitTo::Token0 => "token0",
+                    ExitTo::Token1 => "token1",
+                    _ => "the dollar stable",
+                };
+                return Decision::Exit(format!("the move turned: waiting in {what} now"));
             }
         }
         if when && !st.exited {

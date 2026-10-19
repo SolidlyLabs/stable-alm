@@ -1,6 +1,6 @@
 # LP as trading: wait out the move, LP after it
 
-Date: 18 Oct 2026. Code: `research/directional/` (simulator `dsim.py`, strategies `dstrat.py`, grids
+Date: 18 Oct 2026. Code (removed; it is in the git history up to tag v0.4.0): `research/directional/` (simulator `dsim.py`, strategies `dstrat.py`, grids
 `grid.py` / `grid2.py` / `grid3.py`, scoring `score.py` / `score3.py`, neighbourhood `neigh.py`, real-swap
 check `onchain.py`, same-window check `window.py`). Goal as set: maximise what the LP has at the end, not
 time in range; good for the protocol too (fees and liquidity growing).

@@ -300,7 +300,7 @@ fn get(path: &str, w: &Arc<Worker>) -> (u16, Value) {
             (200, json!({"worker": w.status.lock().unwrap().clone(), "settings": s, "pools": load_pools(), "signer": crate::signer::status(),
                          "paused": crate::paths::stop_file().exists(), "events": events, "errors": errors, "snapshots": snapshots(),
                          "rewards": rw, "chains": crate::chains::as_json(), "now": engine::now(), "runtime": "rust",
-                         "ladder_defaults": settings::pool_defaults()["strategy"]}))
+                         "ladder_defaults": settings::pool_defaults()["strategy"], "pool_defaults": settings::pool_defaults()}))
         }
         "/api/chains" => (200, json!({"chains": crate::chains::as_json()})),
         p if p.starts_with("/api/market") => match crate::market_data::shortlist(&wallet, &configured()) {
@@ -316,7 +316,7 @@ fn get(path: &str, w: &Arc<Worker>) -> (u16, Value) {
         },
         p if p.starts_with("/api/solidpools") => {
             let mut rows = vec![];
-            for c in crate::chains::all().into_iter().filter(|c| c.enabled && !c.solid.is_empty()) {
+            for c in crate::chains::all().into_iter().filter(|c| !c.solid.is_empty()) {
                 if let Ok(ps) = crate::market_data::pools(c.id, &wallet) {
                     rows.extend(ps.into_iter().filter(|p| p["token0"]["address"] == c.solid.as_str() || p["token1"]["address"] == c.solid.as_str()));
                 }
@@ -358,7 +358,7 @@ fn get(path: &str, w: &Arc<Worker>) -> (u16, Value) {
         p if p.starts_with("/api/tokens") => {
             // (chain, token) pairs to list even without a pool: funding tokens per chain, reward tokens on Base
             let mut extra: Vec<(u64, String)> = vec![];
-            for c in crate::chains::all().into_iter().filter(|c| c.enabled) {
+            for c in crate::chains::all() {
                 extra.extend(crate::settings::funding_tokens(&s, c.id).into_iter().map(|a| (c.id, a)));
             }
             for t in s["sell_rewards"]["tokens"].as_array().cloned().unwrap_or_default() {
@@ -553,11 +553,53 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
             let p = pools.iter().find(|x| x["name"] == name).ok_or("unknown pool")?;
             let wallet = load_settings()["wallet"].as_str().unwrap_or("").to_string();
             if !wallet_positions(pool_chain(p), p["pool"].as_str().unwrap_or(""), &wallet)?.is_empty() {
-                return Err("pool still holds positions: set its allocation to 0 (or disable it) and let the worker withdraw first".into());
+                return Err("pool still holds positions: switch it off and let the worker withdraw first".into());
             }
             let rest: Vec<Value> = pools.iter().filter(|x| x["name"] != name).cloned().collect();
             save_pools(&rest)?;
             Ok(json!({"ok": true}))
+        }
+        // Per-pool capital (capital.rs): queued, carried out by the worker on its next pass
+        "/api/capital" => {
+            let cid = body["chain_id"].as_u64().unwrap_or(crate::chains::BASE);
+            let pools = load_pools();
+            let known = |a: &str| pools.iter().any(|p| pool_chain(p) == cid && p["pool"].as_str().map(|x| x.eq_ignore_ascii_case(a)).unwrap_or(false));
+            let usd = crate::prices::fnum(&body["usd"]);
+            let need_usd = || if usd.is_finite() && usd > 0.0 { Ok(()) } else { Err("enter an amount in $ above 0".to_string()) };
+            let req = match body["action"].as_str().unwrap_or("") {
+                "add" => {
+                    need_usd()?;
+                    let pool = body["pool"].as_str().filter(|a| known(a)).ok_or("unknown pool")?;
+                    json!({"kind": "add", "chain_id": cid, "pool": pool.to_lowercase(), "usd": usd})
+                }
+                "withdraw" | "move" => {
+                    need_usd()?;
+                    let from: Vec<String> = body["pools"].as_array().cloned().unwrap_or_default().iter().filter_map(|x| x.as_str().map(|s| s.to_lowercase())).collect();
+                    if from.is_empty() || from.iter().any(|a| !known(a)) {
+                        return Err("choose the pools to take it from".into());
+                    }
+                    let to = match body["to"].as_str() {
+                        Some(t) if known(t) => Some(t.to_lowercase()),
+                        Some(_) => return Err("unknown pool to move it to".into()),
+                        None => None,
+                    };
+                    json!({"kind": "withdraw", "chain_id": cid, "pools": from, "usd": usd, "to": to})
+                }
+                "reset" => json!({"kind": "reset", "chain_id": cid}),
+                "cancel" => {
+                    let id = body["id"].as_str().unwrap_or("");
+                    let gone: Vec<String> = crate::capital::requests().iter().filter_map(|r| r["id"].as_str())
+                        .filter(|r| *r == id || r.starts_with(&format!("{id}-"))).map(String::from).collect();
+                    for g in &gone {
+                        crate::capital::remove(g);
+                    }
+                    return Ok(json!({"ok": !gone.is_empty()}));
+                }
+                a => return Err(format!("unknown action {a}")),
+            };
+            let id = crate::capital::push(req);
+            w.request(false);
+            Ok(json!({"ok": true, "id": id}))
         }
         "/api/control" => {
             match body["action"].as_str().unwrap_or("") {

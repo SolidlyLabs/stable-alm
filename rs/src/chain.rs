@@ -1,4 +1,4 @@
-//! Chain access for the executor (alm/executor/chain.py): reads pinned past our last mined
+//! Chain access for the executor: reads pinned past our last mined
 //! transaction, simulation (eth_call + estimateGas), EIP-1559 signing and sending with fee bumps.
 
 use crate::eth::{self, calldata, Account, Tok};

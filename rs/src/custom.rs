@@ -28,6 +28,9 @@ pub enum ExitTo {
     Keep,
     Token0,
     Token1,
+    /// both tokens sold for the chain's dollar stable (USDC), which waits parked like any funding
+    /// token and buys the pair back on re-entry (engine.rs `fund`)
+    Stable,
 }
 
 #[derive(Clone, Debug)]
@@ -69,6 +72,7 @@ impl Rules {
         let exit_to = match s.get("exit_to").and_then(|v| v.as_str()).unwrap_or("keep") {
             "token0" => ExitTo::Token0,
             "token1" => ExitTo::Token1,
+            "stable" => ExitTo::Stable,
             _ => ExitTo::Keep,
         };
         let r = Rules {

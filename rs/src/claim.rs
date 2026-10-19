@@ -229,7 +229,7 @@ fn run_inner(cid: u64, wallet: &str, execute: bool, every_days: f64, force: bool
     let flags = Tok::Arr(c["proof"]["flags"].as_array().cloned().unwrap_or_default().iter().map(|f| Tok::Bool(f.as_bool().unwrap_or(false))).collect());
     let arg = Tok::Tup(vec![addrs(&c["earners"]), types, addrs(&c["pools"]), addrs(&c["tokens"]), amounts, Tok::Tup(vec![Tok::Arr(path), flags])]);
     let data = eth::calldata(SIG, &[arg]);
-    let rewards: Vec<Value> = snap["rewards"].as_array().cloned().unwrap_or_default().iter().map(|r| json!({"token": r["token"], "claimable": r["claimable"]})).collect();
+    let rewards: Vec<Value> = snap["rewards"].as_array().cloned().unwrap_or_default().iter().map(|r| json!({"token": r["token"], "claimable": r["claimable"], "pool": r["pool"]})).collect();
     for r in &rewards {
         crate::info!("claim", "claim: {} claimable {}", r["token"].as_str().unwrap_or(""), r["claimable"]);
     }

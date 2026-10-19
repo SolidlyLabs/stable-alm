@@ -179,10 +179,9 @@ Oct 2026 change. They are kept for the depeg-guard and overfitting evidence.
   no recentre, no swap. Resume when price comes back.
 - **Fallback.** If the processor, RPC or volume data is stale, hold a static band of ±8 ticks around
   the 7-day median.
-- **Execution (now built: `alm/executor`, see README).** Burn, swap through the Solidly UI aggregator, then
-  mint. Then submit and confirm, and claim rewards weekly.
-- `scripts/plan.py` already does the read-only part. It refreshes data, reads the wallet's live
-  positions, and prints the exact burns and mints. It never signs anything.
+- **Execution (now built: the desktop app in `rs/`, see README).** Burn, swap through the Solidly UI
+  aggregator, then mint. Then submit and confirm, and claim rewards weekly. (This report was made with
+  the original Python backtester, which is removed; it is in the git history up to tag v0.4.0.)
 
 ## Validation of the simulator
 

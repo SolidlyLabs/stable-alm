@@ -1,4 +1,4 @@
-//! config/settings.json and config/pools.json, merged over the same defaults as settings.py.
+//! config/settings.json and config/pools.json, merged over the defaults.
 //! Kept as JSON values so the web UI can read and write them unchanged.
 
 use serde_json::{json, Map, Value};

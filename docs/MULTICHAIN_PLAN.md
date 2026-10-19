@@ -6,8 +6,8 @@ Goal: no chain is hard-coded in the runtime.
   SOLID, explorer, and Solidly API chain ids.
 - **The dashboard shows positions on every chain** and can be filtered by chain.
 
-This is being built into the Rust port from the start (`rs/`). The Python code stays Base-only and
-is the reference for parity.
+This is built into the Rust app (`rs/`). The original Python code was Base-only; it is
+removed; it is in the git history up to tag v0.4.0.
 
 ## 1. What was Base-specific in the original Python executor
 
@@ -82,8 +82,9 @@ is the reference for parity.
 Tokens can't move between chains without bridging, and the ALM won't bridge: bridging carries its
 own risk and delay. So:
 - **The account total is per chain:** pool positions + free tokens on that chain.
-- **A pool's `allocation_pct` is a share of its own chain's total.** The UI checks each chain's
-  enabled pools stay ≤ 100%.
+- **A pool's capital is on its own chain** (`rs/src/capital.rs`): each pool keeps what it earns, and
+  money moves between pools of a chain only by Add, Withdraw and Move. `allocation_pct` is only the
+  share a pool is filled to on first start, or by Reset to %.
 - **Funding tokens are per chain:** a list in the registry, defaulting to the chain's USD stable.
   Funding swaps stay on-chain.
 - **The UI also shows a grand total across chains,** but nothing is ever allocated from it.

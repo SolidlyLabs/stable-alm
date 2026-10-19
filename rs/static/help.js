@@ -34,11 +34,11 @@
     live: ["Go live / Switch to dry run", `
       <p><b>Go live</b> lets the worker sign and send real transactions with the stored private key from the next cycle on. It needs a key (Settings), and the key's address must equal the managed wallet.</p>
       <p><b>Switch to dry run</b> turns signing off again. Positions stay exactly as they are; nothing is withdrawn.</p>
-      <p>Before going live: check that the wallet has ETH for gas (Overview), the allocations add up to what you want, and the last dry runs look right (Activity, pool cycle logs).</p>`],
+      <p>Before going live: check that the wallet has ETH for gas (Overview), each pool's capital is what you want (Pools), and the last dry runs look right (Activity, pool cycle logs).</p>`],
     "tab-overview": ["Overview tab", `<p>Live state of everything the worker manages: total value, profit and its parts across all chains, one card per chain with its balance, gas and profit, the value history, and one card per active pool with its positions and last decision.</p>`],
     "tab-pools": ["Pools tab", `<p>One table for every pool: the ones you manage (highlighted, at the top by default) and every other Solidly V3 pool on the chains you turned on. Click a column header to sort.</p>
-      <ul><li>Turn chains on or off with the chips at the top.</li><li>Search, show only your pools, or show volatile pairs (after a confirmation).</li>
-      <li>Set each managed pool's allocation, enable it, and tune its strategy; then <b>Save</b> in the bar that appears.</li><li><b>Add</b> any listed pool; it starts disabled at 0%.</li></ul>`],
+      <ul><li>Show or hide chains' pools with the chips at the top (a filter only: your pools are managed on every chain).</li><li>Search, show only your pools, or show volatile pairs (after a confirmation).</li>
+      <li>Enable each managed pool and tune its strategy, then <b>Save</b> in the bar that appears. Give it money with <b>Add</b> (from Unallocated), take it out with <b>Withdraw</b>.</li><li><b>Add</b> any listed pool; it starts disabled, with no capital.</li></ul>`],
     "tab-settings": ["Settings tab", `<p>Global options (cycle interval, claims, reward selling, retries, the private key, funding tokens and RPC endpoints per chain.</p>`],
     "tab-activity": ["Activity tab", `<p>Every decision and transaction the worker made (newest first), and the tail of the warnings/errors log.</p>`],
     "tab-lab": ["Strategy lab tab", `<p>Build strategies, see them on a pool's real price history, backtest them against strategies you pick, and save them under a name.</p>
@@ -114,9 +114,9 @@
     "set-parking.enabled": ["Park waiting tokens", `<p>The master switch for parking (off by default). Each strategy also opts in on its own, in the Strategy lab.</p>`],
     "set-parking.min_usd": ["Min value to park", `<p>A park is two transactions in and two out. Below this value the tokens just wait in the wallet.</p>`],
     "set-parking.range_pct": ["Parking range", `<p>How wide the parking position is, as ± percent of the pegged pool's price (0.5 = ±0.5%). Narrow earns more of the fees; wide stays in range through a small depeg.</p>`],
-    "lab-exitto": ["Withdraw into", `<p>What the exit leaves in the wallet: both tokens as withdrawn, or everything swapped into one of them (costs a swap).</p>`],
+    "lab-exitto": ["Withdraw into", `<p>What the exit leaves in the wallet: both tokens as withdrawn, everything swapped into one of them (costs a swap), or <b>all in USDC</b>: both tokens sold for the chain's dollar stable, which waits parked (when USDC is on the parking whitelist) and buys the pair back on re-entry through the funding step. USDC must be a funding token on the chain.</p>`],
     "lab-guard": ["Depeg guard", `<p>Freezes all action while the price is more than this many ticks from its 7-day median. The position is kept as it is; nothing is moved or withdrawn until the price returns.</p>`],
-    "lab-costs": ["Costs and haircuts", `<p>What the backtest charges and credits:</p><ul><li><b>Swap cost</b>: basis points paid on the value swapped at each move.</li><li><b>Gas</b>: dollars per transaction (withdraw, swap, deposit).</li>
+    "lab-costs": ["Costs and haircuts", `<p>What the backtest charges and credits:</p><ul><li><b>Swap cost</b>: basis points paid on the value swapped at each move.</li><li><b>Swap to/from USDC</b>: the same for an exit into USDC and its buy-back, which go through the aggregator to another pair and can cost more in a fast market (quotes on Base for $1k to $8k round-tripped at about 0 bp in October 2026; 1 bp by default).</li><li><b>Gas</b>: dollars per transaction (withdraw, swap, deposit).</li>
       <li><b>Fees received</b>: the share of the processor's fee attribution that is really paid out (measured at 82% on this wallet).</li><li><b>Emissions value</b>: what SOLID emissions are worth when sold (it has little liquidity).</li></ul>`],
     "lab-chart": ["Price and strategy", `<p>The pool's price over the period (grey), the ranges the backtest held (green blocks) and its moves (ticks at the bottom).</p>
       <p><b>Node strategies</b>: the dashed green lines are the range the strategy wanted at each hour; the coloured lines are its indicators (toggle them with the chips under the chart).</p>
@@ -152,7 +152,7 @@
       <p>Close to 100% is normal. A noticeably lower share means tokens are waiting in the wallet:</p>
       <ul><li>after a failed or partial deposit (redeployed automatically next cycle),</li><li>after a claim,</li><li>or because part of the value is unallocated.</li></ul>`],
     "k-idle": ["Idle in wallet", `<p>Free balances of the managed tokens (pool tokens and the funding tokens) sitting in the wallet, not earning.</p>
-      <p>When a pool's idle share exceeds <i>Redeploy idle above</i> (Settings, default 2% of its allocation), the next cycle tops the position up without withdrawing it. Smaller amounts wait for the next rebalance.</p>`],
+      <p>When a pool's idle tokens exceed <i>Redeploy idle above</i> (Settings, default 2% of its capital), the next cycle tops the position up without withdrawing it. Smaller amounts wait for the next rebalance.</p>`],
     "k-profit": ["Profit", `<p>What the app has made for you across all chains, from its own transactions:</p>
       <p><code>profit = earned − gas − swaps − IL</code></p>
       <ul><li><b>Earned</b>: everything the reward claims paid into the wallet, plus what is claimable now, plus what is <i>pending</i> (earned since the last claim snapshot; it becomes claimable with the next one, about daily). On Solidly V3 all LP income (swap fees, SOLID emissions, bribes) is paid through claims.</li>
@@ -166,9 +166,9 @@
       <li><b>Deployed / Idle</b>: in positions vs free in the wallet.</li>
       <li><b>Gas balance</b>: the chain's native token (ETH, or S on Sonic). Red, with a warning, when it is below the minimum: the worker then takes no action on this chain until you top it up.</li>
       <li><b>Earned, gas paid, swap costs, profit</b>: as in the profit figure at the top, for this chain only.</li></ul>`],
-    chainfilter: ["Chains", `<p>Which chains' pools are listed and scanned (APR windows, fee / arb loss). Turning a chain on downloads its pool list; turning it off hides its other pools.</p>
-      <p>Pools you already manage keep running on any chain, on or off. Fantom is not offered: Solidly retired it.</p>`],
-    chain: ["Chain", `<p>The chain the pool is on. Each chain has its own balances, gas and allocation: a pool's % is of what is managed on its own chain.</p>`],
+    chainfilter: ["Chains", `<p>A filter for the pools table: which chains' pools are listed (with their APR windows and fee / arb loss). Showing a chain loads its pool list; hiding it hides its other pools.</p>
+      <p>Nothing else depends on it: your own pools are always listed and managed, and wallet balances and funding tokens cover every chain. Fantom is not offered: Solidly retired it.</p>`],
+    chain: ["Chain", `<p>The chain the pool is on. Each chain has its own balances, gas and Unallocated: a pool's capital is on its own chain.</p>`],
     search: ["Search", `<p>Filters the table by pair, token symbol, pool name, chain name or pool address.</p>`],
     onlymine: ["My pools", `<p>Shows only the pools in your configuration, on every chain.</p>`],
     newchain: ["Chain for the address", `<p>The chain the pasted pool address is on.</p>`],
@@ -181,7 +181,7 @@
       <p>Jumps can come from your own deposits and withdrawals, claims and token price moves, as well as from LP performance. Small dips right after a rebalance are swap costs and the price difference paid to move ranges.</p>`],
     poolcard: ["Pool card", `<p>One active pool.</p><ul>
       <li><b>Deployed</b>: value in its positions now.</li>
-      <li><b>Target</b>: its allocation % of the managed value.</li>
+      <li><b>Capital</b>: the pool's own money (positions, idle tokens, what it parked). It keeps what it earns.</li>
       <li><b>Tick · fee</b>: the pool's current price tick and current dynamic fee (pips, 100 pips = 1 bp).</li>
       <li>The position list shows each range [lower tick, upper tick) with a green dot when the current price is inside it (earning fees) and red when outside.</li>
       <li><b>Last decision</b>: what the strategy decided in the last cycle. Open <i>cycle log</i> for the full step-by-step plan.</li></ul>`],
@@ -189,9 +189,9 @@
       <p>A position only earns fees while the price is inside its range (green dot). The ladder strategy uses 1-tick-wide positions: very capital-efficient while the peg holds, re-solved every few hours as the price moves.</p>`],
     decision: ["Last decision", `<p>What the pool's strategy decided in the last cycle:</p><ul>
       <li><b>keep</b>: nothing to do.</li>
-      <li><b>rebalance</b>: withdraw everything and redeploy into new ranges (the ladder re-solved and more than its turnover threshold moved, or the pool held more than 110% of its budget).</li>
+      <li><b>rebalance</b>: withdraw everything and redeploy into new ranges (the ladder re-solved and more than its turnover threshold moved).</li>
       <li><b>topup</b>: add idle tokens to the current ranges without withdrawing.</li>
-      <li><b>exit</b>: allocation 0% or pool disabled, so all positions are withdrawn.</li>
+      <li><b>exit</b>: the pool was switched off, so all positions are withdrawn.</li>
       <li><b>guard</b>: the depeg guard froze the pool because the price is far from its 7-day median.</li>
       <li><b>error</b>: the pass failed. Details are in the log and Activity, and it is retried next cycle.</li></ul>`],
     wallet: ["Wallet (managed tokens)", `<p>Free balances of the tokens the worker manages: every configured pool's two tokens plus the funding tokens.</p>
@@ -201,19 +201,22 @@
       <p>Compounding: claimed pool tokens join the next rebalance. SOLID is sold into the pool's numeraire during that rebalance, in the largest chunk that loses at most the configured %. SOLID liquidity is thin, so small amounts are kept until they are worth selling.</p>`],
 
     // ---- pools ----
-    allocation: ["Allocation of the managed value", `<p>Allocation is per chain: each enabled pool targets its percentage of the value managed <i>on its own chain</i>. Example: with $15,000 managed on Base, 60% → $9,000 target. Each chain's pools may add up to at most 100%.</p>
-      <ul><li>Unallocated percent stays idle in the wallet.</li>
-      <li>Raising a pool's % makes the next cycle top it up from idle tokens. If the pool needs tokens the wallet does not hold, they are bought with the funding tokens through the aggregator.</li>
-      <li>Lowering a pool's % below what it holds (by more than 10%) triggers a rebalance down to the new target.</li>
-      <li>0% or disabled withdraws the pool completely.</li></ul>
-      <p>Changes apply after <b>Save</b>, on the cycle that starts right away.</p>`],
-    blend: ["Blended APR", `<p>The estimated APR of the <i>whole</i> managed value with the current allocation: each pool's estimated APR at its target size, weighted by its target. Idle percent counts as 0%.</p>
+    capital: ["Capital per pool", `<p>Every pool runs on its own money, its <b>capital</b>: its positions, the tokens it holds idle, and what it parked in other pools. What a pool earns stays in it, and what it loses is its own loss. Nothing is moved between pools by itself, so the shares grow and shrink with each pool's results.</p>
+      <ul><li><b>Unallocated</b>: free tokens in the wallet that no pool holds, such as deposits, withdrawals and anything a switched-off pool gave back. Pools never touch it.</li>
+      <li><b>Add from Unallocated</b>: moves dollars into a pool, USDC first, then the other stables, then the pool's own tokens. The pool deploys them on its next run.</li>
+      <li><b>Withdraw to USDC</b>: tick one pool, several or All, and enter a dollar amount. It is split equally over them: a pool with less gives all it has, and the others make up the rest. Each pool sells its part to USDC when it next runs, from its idle tokens first and then the same slice of each position. The USDC lands in Unallocated, where you can add it to another pool or send it out of the wallet yourself.</li>
+      <li><b>Move between pools</b>: a withdrawal from one pool whose USDC goes straight into another. That pool swaps it into its own tokens when it deploys.</li>
+      <li><b>Reset to %</b>: a one-off. Every pool's idle tokens go back to Unallocated, then each pool is given what it needs to reach the % you set of everything on the chain. Positions are not touched.</li></ul>
+      <p>Requests wait in the list under the bar until they are done, and can be cancelled there. Rewards claimed go to the pools that earned them (the rewards API reports them per pool). Tokens sent out of the wallet shrink every pool's holding of that token in proportion. A pool switched off withdraws its positions and gives its idle tokens back to Unallocated.</p>
+      <p>The first time this version runs, each pool keeps what it holds and is filled up from the free tokens to its allocation %, as before.</p>`],
+    allocation: "capital",
+    blend: ["Blended APR", `<p>The estimated APR of everything on the chain: each pool's estimated APR at its capital, weighted by it. Unallocated counts as 0%.</p>
       <p>Shown for the last 1 h, 6 h and 24 h, with the yearly dollars at the 24 h rate. These are raw processor figures: the backtests assume 82% of fees are actually paid and SOLID is worth half, so real results tend to be lower. Short windows are noisy, because volume is lumpy.</p>`],
-    "p-color": ["Colour", `<p>The pool's colour in the allocation bar.</p>`],
+    "p-color": ["Colour", `<p>The pool's colour in the capital bar.</p>`],
     "p-pool": ["Pool", `<p>The pool's name in this app, its token pair and its contract on the chain's explorer.</p>`],
-    "p-enabled": ["Enabled", `<p>Disabled pools get no new deposits. If a disabled pool still holds positions, the next cycle withdraws them. Use it to exit a pair without deleting its settings.</p>`],
-    "p-alloc": ["Allocation %", `<p>The pool's share of the value managed on its chain. Type it, then <b>Save pools &amp; allocation</b>. Enabled pools on one chain may add up to at most 100%. The switch enables or disables the pool; The ⚙ button opens its strategy parameters, Re-solve and Remove; the line below shows what it holds now.</p>`],
-    "p-target": ["Target", `<p>Allocation % × managed value: the dollars this pool should hold. The worker tops up when the pool holds clearly less (idle tokens above the redeploy threshold) and rebalances down when it holds more than 110% of it.</p>`],
+    "p-enabled": ["Enabled", `<p>A disabled pool gets no new deposits. If it still holds positions, the next cycle withdraws them, and its idle tokens then go back to Unallocated. Use it to exit a pair without deleting its settings.</p>`],
+    "p-alloc": ["Capital", `<p>The pool's own money: its positions, idle tokens and what it parked (hover for the parts). Below it: its share of the pools' capital on the chain, and what is in positions. <b>Add</b> moves money in from Unallocated; <b>Withdraw</b> takes it out to Unallocated as USDC. The switch enables or disables the pool; the ⚙ button opens its strategy parameters, Re-solve and Remove.</p>`],
+    "p-target": "capital",
     "p-deployed": ["Deployed", `<p>The value of this pool's positions right now.</p>`],
     apr: ["Estimated APR (if deposited)", `<p>What a deposit would have earned over the window, annualised:</p>
       <p><code>(fees + emissions + bribes) × 8760 / hours ÷ (in-range TVL + deposit)</code></p>
@@ -239,8 +242,8 @@
     "param-max_ranges": ["max_ranges", `<p>The most positions this pool may hold. If the strategy wants more (a volatile pair's ladder can ask for dozens of tick ranges), neighbouring ranges are merged into this many contiguous groups of similar weight.</p>
       <p>Each position costs one deposit and one withdrawal transaction per rebalance, so fewer positions mean cheaper, faster rebalances. Stable pairs normally use 1–4 anyway.</p>`],
     resolve: ["Re-solve", `<p>Makes this pool's ladder re-solve on the cycle that starts now, instead of waiting for its 6-hour cadence. It only rebalances if the new solution moves more than <i>turnover</i>.</p>`],
-    remove: ["Remove", `<p>Deletes the pool from the configuration. Only possible once it holds no positions: set it to 0% (or disable it) first and let a cycle withdraw it.</p>`],
-    savepools: ["Save pools & allocation", `<p>Writes enabled flags, allocations and strategy settings to <code>config/pools.json</code> and starts a cycle. Enabled allocations above 100% are rejected.</p>`],
+    remove: ["Remove", `<p>Deletes the pool from the configuration. Only possible once it holds no positions: switch it off first and let a cycle withdraw it.</p>`],
+    savepools: ["Save pools", `<p>Writes enabled flags and strategy settings to <code>config/pools.json</code> and starts a cycle. Money is moved with Add, Withdraw and Move instead.</p>`],
     discard: ["Discard changes", `<p>Throws away unsaved edits in this table and reloads the saved configuration.</p>`],
 
     // ---- discover ----
@@ -279,8 +282,8 @@
 
     // ---- settings ----
     "set-interval_s": ["Cycle interval", `<p>Seconds between worker cycles (default 300). Strategies keep their own cadence (the ladder re-solves every 6 h), so a shorter interval mostly means faster reaction to failures, idle tokens and depeg-guard releases. Very short intervals add RPC and aggregator load.</p>`],
-    "set-idle_redeploy_pct": ["Redeploy idle above", `<p>When a pool's free tokens exceed this % of its allocation, the next cycle deposits them into the current ranges (a top-up) without waiting for the next rebalance. It recovers failed or partial deposits and new allocations quickly. Smaller amounts, such as weekly claims, wait for the next rebalance.</p>`],
-    "set-resize_tolerance_pct": ["Resize tolerance", `<p>A rebalance changes only what has to change. A position whose range is still in the new target is kept: it is trimmed with a partial withdrawal when it holds too much, or topped up by depositing into the same range when it holds too little. Only ranges that leave the target are withdrawn in full.</p><p>Differences smaller than this % of the pool's allocation (and never less than the pool's minimum swap value) are left alone, so small drifts don't cost transactions. Default 1%.</p>`],
+    "set-idle_redeploy_pct": ["Redeploy idle above", `<p>When a pool's idle tokens exceed this % of its capital, the next cycle deposits them into the current ranges (a top-up) without waiting for the next rebalance. It recovers failed or partial deposits and money added quickly. Smaller amounts, such as weekly claims, wait for the next rebalance.</p>`],
+    "set-resize_tolerance_pct": ["Resize tolerance", `<p>A rebalance changes only what has to change. A position whose range is still in the new target is kept: it is trimmed with a partial withdrawal when it holds too much, or topped up by depositing into the same range when it holds too little. Only ranges that leave the target are withdrawn in full.</p><p>Differences smaller than this % of the pool's capital (and never less than the pool's minimum swap value) are left alone, so small drifts don't cost transactions. Default 1%.</p>`],
     "set-claim.enabled": ["Auto-claim rewards", `<p>Claims rewards automatically every <i>Claim every</i> days, following Solidly's Merkle flow:</p>
       <ol><li>Read the snapshot.</li><li>Wait for the L3 sync and the security buffer if needed.</li><li>Check the earners are this wallet.</li><li>Simulate.</li><li>Submit <code>claimAll</code>.</li></ol>
       <p>A broadcast claim is never re-sent in the same cycle.</p>`],
@@ -307,8 +310,8 @@
     "set-retries.backoff_s": ["Retry backoff", `<p>Seconds to wait before a retry, multiplied by the attempt number (10 s, 20 s, …). It gives a congested RPC or a moving price time to settle.</p>`],
     "set-ui_port": ["Dashboard port", `<p>The port this dashboard listens on, on 127.0.0.1 only (default 8080). Saving a new one moves the dashboard there at once and this page follows; the old port keeps answering for 20 seconds. A port another program holds is refused and not saved. At startup, if the port is taken, the app uses the next free one (up to 20 higher, else any free port) and the tray's <b>Open dashboard</b> goes there.</p>`],
     "set-wallet": ["Managed wallet", `<p>The address whose positions and balances are managed. It must equal the private key's address for live trading. Saving a key switches it automatically.</p>`],
-    funding: ["Funding tokens", `<p>The tokens used to buy what a pool needs when its allocation requires tokens the wallet does not hold. Example: you hold USDC and USDT and give cbETH/WETH 30%, so the worker buys cbETH/WETH with them.</p>
-      <p>Each chain has its own row and list; a pool is only ever funded with tokens on its own chain. Every chain starts with its USDC and USDT (tagged <b>default</b>). Click a row's tokens to add or remove, then <b>Save</b> that row; <b>Reset</b> puts the chain back to USDC and USDT.</p>
+    funding: ["Funding tokens", `<p>The tokens a pool may swap into its own when it holds them: USDC added to it, say. Example: you add $3,000 of USDC to cbETH/WETH, and it buys cbETH and WETH with it when it deploys.</p>
+      <p>Each chain has its own row and list; a pool is only ever funded with tokens on its own chain. Every chain starts with its USDC and USDT. Click a row's tokens to add or remove, then <b>Save</b> that row; <b>Reset</b> puts the chain back to USDC and USDT.</p>
       <p>You can tick several. A shortfall is bought from the selected token with the largest USD balance first; if that runs out, the next one covers the rest. Shortfalls under $10 are ignored.</p>
       <p>The picker shows every token of that chain's Solidly pools with your wallet balance (or paste an address); ticked tokens are listed first, and the closed picker shows them as chips (× removes one). A selected token that is one of the pool's own tokens is not swapped by funding; the normal rebalancing swap handles it. <b>None</b> empties that chain's list and turns cross-pool funding off there: its pools then only use their own tokens.</p>`],
     privkey: ["Private key", `<p>Paste the wallet's private key to allow live trading. It is encrypted for your user account (Windows DPAPI or the macOS Keychain), so the worker resumes after restarts without asking.</p>
@@ -316,8 +319,6 @@
     helpvis: ["Show explanations panel", `<p>Shows or hides this panel. It is on by default. The choice is remembered in this browser only (not a worker setting), and takes effect immediately without saving.</p>
       <p>With the panel hidden, hovering still works as normal tooltips where values have breakdowns.</p>`],
     savesettings: ["Save settings", `<p>Writes the options to <code>config/settings.json</code> (funding tokens and RPCs have their own Save per chain). They take effect on the next cycle.</p>`],
-    safety: ["Safety", `<p>Checks before any action:</p><ul><li>kill switch,</li><li>depeg guard,</li><li>spot vs 1 h median,</li><li>enough gas on the chain,</li><li>daily action cap.</li></ul>
-      <p>Every transaction is simulated with <code>eth_call</code> and <code>estimateGas</code> before it is sent. Swaps only go through the Solidly UI meta-aggregator, capped against the pool price, with exact-amount approvals. Stuck transactions are re-broadcast with higher fees.</p>`],
 
     // ---- activity ----
     events: ["Activity", `<p>Every decision and transaction, newest first (<code>logs/executor.jsonl</code>). Hover an event type for its meaning. Transaction hashes link to the chain's explorer. "(dry)" marks dry-run rows.</p>`],
@@ -334,10 +335,10 @@
   };
 
   const TH = {"APR 1h": "apr", "APR 6h": "apr", "APR 24h": "apr", "Pool APR 24h": "poolapr", "TVL": "tvl", "In-range TVL": "activetvl", "24h volume": "vol24", "Fee / arb 7d": "flvr",
-    "Fee": "fee", "Pair": "pair", "Chain": "chain", "Pool": "p-pool", "Enabled": "p-enabled", "Allocation": "p-alloc", "Target": "p-target", "Deployed": "p-deployed",
+    "Fee": "fee", "Pair": "pair", "Chain": "chain", "Pool": "p-pool", "Enabled": "p-enabled", "Allocation": "p-alloc", "Capital": "p-alloc", "Target": "p-target", "Deployed": "p-deployed",
     "Strategy & limits": "p-strategy", "Token": "wallet", "Claimable": "rewards", "Reward": "rewards", "Pending": "rewards", "When": "events", "Event": "events", "Details": "events"};
   const BTN = {"Run now": "run_now", "Claim now": "claim_now", "Pause": "pause", "Resume": "pause", "Go live": "live", "Switch to dry run": "live",
-    "Re-solve": "resolve", "Remove": "remove", "Add": "addpair", "Save pools & allocation": "savepools", "Discard changes": "discard", "Save settings": "savesettings",
+    "Re-solve": "resolve", "Remove": "remove", "Add": "addpair", "Save pools & allocation": "savepools", "Save pools": "savepools", "Discard changes": "discard", "Save settings": "savesettings",
     "Save key": "privkey", "Refresh": "refresh", "Add (disabled, 0%)": "addaddr"};
 
   function tag(root) {
@@ -369,7 +370,6 @@
     const os = document.getElementById("onlySupported"); if (os) set(os.closest("label"), "onlysupported");
     const om = document.getElementById("onlyMine"); if (om) set(om.closest("label"), "onlymine");
     set(document.getElementById("allocSum"), "allocation");
-    document.querySelectorAll("section[data-tab=settings] .card h2").forEach(h => { if (h.textContent.trim() === "Safety") set(h.closest(".card"), "safety"); });
   }
 
   // ---- panel ----
@@ -405,7 +405,8 @@
   window.almHelp = {setVisible, visible: () => !document.body.classList.contains("nohelp")};
 
   function render(key, el) {
-    const h = H[key] || H._default;
+    let h = H[key] || H._default;
+    if (typeof h === "string") h = H[h] || H._default; // an alias
     current = key;
     let live = "";
     if (el) {

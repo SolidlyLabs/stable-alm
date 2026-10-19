@@ -1,5 +1,5 @@
-//! The live strategy: Ladder (water-filling across single ticks) with the depeg guard, as in
-//! alm/strategies.py. Only what the executor uses: one decision at the latest bar.
+//! The live strategy: Ladder (water-filling across single ticks) with the depeg guard. One
+//! decision at the latest bar (checked against the original Python version in parity.rs).
 
 use crate::data::{median, rolling_median_trailing, week_bars, Market};
 

@@ -1,5 +1,5 @@
 //! Exact Uniswap V3 TickMath / LiquidityAmounts (Solidly V3 uses the same math), in big integers,
-//! matching alm/executor/tickmath.py bit for bit.
+//! matching the original Python version bit for bit (parity.rs).
 
 use num_bigint::BigUint;
 use num_traits::{One, Zero};

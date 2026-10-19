@@ -278,7 +278,7 @@ pub fn load_apr(cid: u64, pool: &str) -> HashMap<i64, (f64, f64)> {
     out
 }
 
-// -- the replay market (live parts of alm/data.py Market) -------------------------------------------
+// -- the replay market -------------------------------------------------------------------------------
 pub struct Market {
     pub ts: Vec<i64>,
     pub tick: Vec<i64>,
@@ -396,7 +396,7 @@ pub fn build_market_bars(events: Vec<Ev>, wallet: &str, apr: &HashMap<i64, (f64,
         return Err("no swaps in the replay window yet".into());
     }
     let raw_tick: Vec<i64> = sw.iter().map(|(_, e)| e.tick).collect();
-    // trailing, like alm/data.py: a swap's cleaned price never depends on later swaps
+    // trailing: a swap's cleaned price never depends on later swaps
     let med = rolling_median_trailing(&raw_tick, 51, 1);
     let mut tick = Vec::with_capacity(sw.len());
     let mut sp = Vec::with_capacity(sw.len());
@@ -502,7 +502,7 @@ pub fn history_ranges(cid: u64, pool: &str, wallet: &str) -> HashSet<(i64, i64)>
     read_jsonl(&wallet_path(cid, pool, wallet)).into_iter().map(|e| (e.tick_lower, e.tick_upper)).collect()
 }
 
-// -- fee vs loss to arbitrage (research/volatile/fee_vs_lvr.py, reports/VOLATILE.md) -----------------
+// -- fee vs loss to arbitrage (reports/VOLATILE.md) ---------------------------------------------------------
 /// Per unit of at-the-money liquidity over a window: F = Σ fee_i / L_i over swaps (fee_i = amount in,
 /// in the numeraire, × the hour's processor fee rate; L_i = the Swap event's active liquidity), and
 /// LVR = Σ r² · √P / 4 over 1-hour bars (1/√P when token0 is the numeraire). F/LVR well above 1 means

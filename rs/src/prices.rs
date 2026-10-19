@@ -1,5 +1,5 @@
-//! Swaps through the Solidly UI meta-aggregator (alm/executor/aggregator.py) and USD prices from its
-//! quotes (alm/executor/prices.py, cached 10 min; USDC = 1). Token metadata cache.
+//! Swaps through the Solidly UI meta-aggregator and USD prices from its quotes (cached 10 min;
+//! USDC = 1). Token metadata cache.
 
 use serde_json::{json, Value};
 use std::collections::HashMap;

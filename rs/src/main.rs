@@ -4,10 +4,10 @@
 //!   StableALM --quit          stop the running instance after its current cycle
 //!   StableALM --headless      worker + dashboard without a tray (servers, testing)
 //!   StableALM --once          one cycle in the foreground, then print the status JSON
-//!   StableALM --parity DIR    parity check against fixtures exported by scripts/export_parity.py
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod backtest;
+mod capital;
 mod chain;
 mod chains;
 mod claim;
@@ -30,6 +30,7 @@ mod ladder;
 mod log;
 mod market_data;
 mod market_flvr;
+#[cfg(test)]
 mod parity;
 mod paths;
 mod prices;
@@ -73,7 +74,6 @@ fn main() {
             println!("{}", serde_json::to_string_pretty(&*w.status.lock().unwrap()).unwrap());
             0
         }
-        "--parity" => parity::run(args.get(2).map(String::as_str).unwrap_or("parity")),
         "--version" => {
             println!("StableALM {}", env!("CARGO_PKG_VERSION"));
             0

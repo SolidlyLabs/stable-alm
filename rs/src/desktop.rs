@@ -4,7 +4,7 @@
 use crate::worker::Worker;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, ContextMenu, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
 static QUIT: AtomicBool = AtomicBool::new(false);
@@ -70,6 +70,25 @@ mod plat {
             }
         }
     }
+
+    /// A hidden window that owns the tray menu when the app shows it for a single click (the tray's
+    /// own menu-on-click would open on the first click and swallow the second of a double-click).
+    pub fn menu_owner() -> isize {
+        unsafe {
+            CreateWindowExW(0, w("STATIC").as_ptr(), w("").as_ptr(), WS_POPUP, 0, 0, 0, 0, std::ptr::null_mut(), std::ptr::null_mut(),
+                            std::ptr::null_mut(), std::ptr::null()) as isize
+        }
+    }
+    /// How long Windows waits for the second click of a double-click.
+    pub fn double_click() -> std::time::Duration {
+        std::time::Duration::from_millis(unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() } as u64)
+    }
+    /// After a popup menu closes: lets it close properly the next time it is clicked away from.
+    pub fn after_menu(owner: isize) {
+        unsafe { PostMessageW(owner as _, WM_NULL, 0, 0) };
+    }
+    /// The tray's own left-click menu: off, the app shows it itself (above).
+    pub const MENU_ON_LEFT: bool = false;
 
     /// Keep the tray's window messages flowing for `d`.
     pub fn pump(d: std::time::Duration) {
@@ -140,6 +159,15 @@ mod plat {
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
         unsafe { app.finishLaunching() };
     }
+    // a click opens the tray's own menu (the menu bar has no double-click)
+    pub fn menu_owner() -> isize {
+        0
+    }
+    pub fn double_click() -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
+    pub fn after_menu(_owner: isize) {}
+    pub const MENU_ON_LEFT: bool = true;
     pub fn pump(d: std::time::Duration) {
         let mtm = MainThreadMarker::new().expect("main thread");
         let app = NSApplication::sharedApplication(mtm);
@@ -168,6 +196,14 @@ mod plat {
         false
     }
     pub fn set_autostart(_on: bool) {}
+    pub fn menu_owner() -> isize {
+        0
+    }
+    pub fn double_click() -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
+    pub fn after_menu(_owner: isize) {}
+    pub const MENU_ON_LEFT: bool = true;
     pub fn pump(d: std::time::Duration) {
         std::thread::sleep(d)
     }
@@ -248,8 +284,13 @@ pub fn run() -> Result<(), String> {
     let sep = || PredefinedMenuItem::separator();
     menu.append_items(&[&open_i, &status_i, &sep(), &run_i, &pause_i, &live_i, &sep(), &login_i, &logs_i, &data_i, &sep(), &quit_i])
         .map_err(|e| e.to_string())?;
-    let tray = TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip("Stable ALM").with_icon(icon("grey"))
-        .with_menu_on_left_click(false).build().map_err(|e| e.to_string())?;
+    let tray = TrayIconBuilder::new().with_menu(Box::new(menu.clone())).with_tooltip("Stable ALM").with_icon(icon("grey"))
+        .with_menu_on_left_click(plat::MENU_ON_LEFT).build().map_err(|e| e.to_string())?;
+    // a single click opens the menu, a double-click the dashboard: a click waits out the system's
+    // double-click time before its menu shows (Windows; elsewhere the tray shows it on the click)
+    let owner = plat::menu_owner();
+    let mut single: Option<Instant> = None;
+    let mut after_double = false;
 
     let mut colour = "grey";
     let mut quitting = false;
@@ -257,9 +298,25 @@ pub fn run() -> Result<(), String> {
     loop {
         plat::pump(Duration::from_millis(100));
         while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
-            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = ev {
-                open(&dashboard_url());
+            match ev {
+                TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } if owner != 0 => {
+                    // the release that ends a double-click is not a click of its own
+                    if !std::mem::take(&mut after_double) {
+                        single = Some(Instant::now());
+                    }
+                }
+                TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } => {
+                    single = None;
+                    after_double = true;
+                    open(&dashboard_url());
+                }
+                _ => {}
             }
+        }
+        if single.map(|t| t.elapsed() >= plat::double_click()).unwrap_or(false) {
+            single = None;
+            unsafe { menu.show_context_menu_for_hwnd(owner, None) };
+            plat::after_menu(owner);
         }
         while let Ok(ev) = MenuEvent::receiver().try_recv() {
             let id = ev.id();

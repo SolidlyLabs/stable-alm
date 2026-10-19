@@ -1,5 +1,5 @@
-//! Strategy decision -> exact Solidly V3 transactions (alm/executor/engine.py, ladder only).
-//! Same modes (exit / rebalance / topup / keep), checks, partial resize, swaps through the
+//! Strategy decision -> exact Solidly V3 transactions.
+//! Modes (exit / rebalance / topup / keep), checks, partial resize, swaps through the
 //! aggregator, mints with shrink-on-failure, reward sales and cross-pool funding.
 
 use crate::chain::{self, TxError};
@@ -161,7 +161,8 @@ pub fn snap_ranges(ranges: Vec<(i64, i64, f64)>, spacing: i64) -> Vec<(i64, i64,
     merged.into_iter().map(|((a, b), w)| (a, b, w)).collect()
 }
 
-/// Turn current positions into the target with the fewest movements (see engine.py resize_plan).
+/// Turn current positions into the target with the fewest movements (checked against the original
+/// Python version in parity.rs).
 pub fn resize_plan(
     current: &[(i64, i64, i128, f64)],
     target: &[(i64, i64, f64)],
@@ -253,6 +254,9 @@ pub struct Executor {
     unit: f64,
     unit1: f64,
     budget_usd: Option<f64>,
+    /// What this run may not touch (capital.rs): per token, the wallet's balance beyond the pool's own
+    /// tokens. None: the whole wallet (the backtester's and parking's own executors).
+    reserve: Option<crate::capital::Tokens>,
     attempts: usize,
     backoff: f64,
     virt: HashMap<String, i128>,
@@ -299,6 +303,7 @@ impl Executor {
             unit: 10f64.powi(dec0),
             unit1: 10f64.powi(dec1),
             budget_usd,
+            reserve: None,
             attempts: settings["retries"]["attempts"].as_f64().unwrap_or(3.0).max(1.0) as usize,
             backoff: settings["retries"]["backoff_s"].as_f64().unwrap_or(10.0),
             virt: HashMap::new(),
@@ -331,8 +336,35 @@ impl Executor {
         self.report.push(m);
     }
 
+    /// The pool's own balance of `token`: the wallet's, less what is reserved for other pools and
+    /// Unallocated (capital.rs).
     pub fn bal(&self, token: &str) -> Res<i128> {
-        Ok(small(&chain::erc20_balance(self.cid, token, &self.wallet)?) + self.virt.get(&token.to_lowercase()).copied().unwrap_or(0))
+        let t = token.to_lowercase();
+        let raw = small(&chain::erc20_balance(self.cid, token, &self.wallet)?) + self.virt.get(&t).copied().unwrap_or(0);
+        Ok(match self.reserve.as_ref().and_then(|r| r.get(&t)) {
+            Some(r) => (raw - r).max(0),
+            None => raw,
+        })
+    }
+
+    /// USD value of the funding tokens (other than the pool's own two) that the pool holds.
+    fn funding_idle_usd(&self) -> f64 {
+        crate::settings::funding_tokens(&self.settings, self.cid).into_iter()
+            .filter(|t| *t != self.t0 && *t != self.t1)
+            .filter_map(|t| {
+                let b = self.bal(&t).ok()?.max(0);
+                if b == 0 || self.reserve.is_none() {
+                    return None; // without a capital book the whole wallet would count
+                }
+                Some(b as f64 / 10f64.powi(prices::meta(self.cid, &t).ok()?.decimals as i32) * prices::usd(self.cid, &t).ok()?)
+            })
+            .sum()
+    }
+
+    /// The pool's capital for this run: its budget (USD) and what it may not touch.
+    pub fn set_capital(&mut self, budget_usd: f64, reserve: crate::capital::Tokens) {
+        self.budget_usd = Some(budget_usd);
+        self.reserve = Some(reserve);
     }
 
     fn mv(&mut self, token: &str, delta: i128) {
@@ -526,14 +558,15 @@ impl Executor {
         }
         let pos_val = self.pos_val0;
         let usd0 = prices::usd(self.cid, &self.t0)?;
-        let idle0 = self.value0(b0 as f64, b1 as f64, p);
+        // funding tokens the pool holds (USDC moved in, say) count as idle: deploying swaps them in
+        let idle0 = self.value0(b0 as f64, b1 as f64, p) + self.funding_idle_usd() / usd0;
         let budget0 = self.budget_usd.map(|b| b / usd0).unwrap_or(pos_val + idle0);
-        self.say(format!("  deployed {}  idle {}  budget {} (token0 units, {}% of the account)", commas(pos_val), commas(idle0), commas(budget0), self.cfg.allocation_pct));
+        self.say(format!("  deployed {}  idle {}  budget {} (token0 units: the pool's capital)", commas(pos_val), commas(idle0), commas(budget0)));
         let pos_json: Vec<Value> = positions.iter().map(|(a, b, l)| json!([a, b, l.to_string()])).collect();
         let mut summary = json!({"chain_id": self.cid, "pool": self.cfg.pool, "name": self.cfg.name, "tick": tick, "fee_pips": fee,
                                  "deployed0": pos_val, "idle0": idle0, "budget0": budget0, "usd0": usd0, "positions": pos_json, "mode": "keep"});
         if (budget0 <= 0.0 || !self.cfg.enabled) && !positions.is_empty() {
-            self.say("  allocation is 0 / pool disabled: withdrawing all positions");
+            self.say("  pool switched off: withdrawing all positions");
             summary["mode"] = json!("exit");
             if !self.blocked(m, tick, true)? {
                 self.begin("exit", None);
@@ -663,8 +696,12 @@ impl Executor {
                 };
                 let t = Target { ranges, swap: true };
                 self.begin("rebalance", Some(&t));
-                // what waited in a parking pool comes back first (parking.rs)
+                // what waited in a parking pool comes back first (parking.rs); a claim's dollars were
+                // out of this pool's budget while another pool held them (worker): they count again
+                let owed = crate::parking::claims_usd(self.execute, self.cid, &self.cfg.pool).1;
                 self.unpark_all()?;
+                let back = owed - crate::parking::claims_usd(self.execute, self.cid, &self.cfg.pool).1;
+                let budget0 = if back > 0.0 { budget0 + back / prices::usd(self.cid, &self.t0)? } else { budget0 };
                 self.resize(&positions, &t, budget0, sp, p)?;
                 st.moved(now);
                 save(self, &st);
@@ -681,10 +718,15 @@ impl Executor {
                 self.unpark_all()?;
                 let all: Vec<(i64, i64, i128)> = positions.iter().map(|(a, b, l)| (*a, *b, small(l))).collect();
                 self.burn_all(&all)?;
+                if exit_to == crate::custom::ExitTo::Stable {
+                    // both tokens sold for the chain's dollar stable, which waits as a funding token
+                    // (parked below) and buys the pair back on re-entry
+                    self.exit_to_stable(budget0)?;
+                }
                 let into = match exit_to {
                     crate::custom::ExitTo::Token0 => Some((self.t1.clone(), self.t0.clone(), true)),
                     crate::custom::ExitTo::Token1 => Some((self.t0.clone(), self.t1.clone(), false)),
-                    crate::custom::ExitTo::Keep => None,
+                    crate::custom::ExitTo::Keep | crate::custom::ExitTo::Stable => None,
                 };
                 if let Some((tin, tout, to0)) = into {
                     let (_, _, _, p) = self.price()?;
@@ -703,7 +745,7 @@ impl Executor {
                 let side = match exit_to {
                     crate::custom::ExitTo::Token0 => crate::parking::Side::Token0,
                     crate::custom::ExitTo::Token1 => crate::parking::Side::Token1,
-                    crate::custom::ExitTo::Keep => crate::parking::Side::Both,
+                    crate::custom::ExitTo::Keep | crate::custom::ExitTo::Stable => crate::parking::Side::Both,
                 };
                 if let Err(e) = self.park_pass(side, budget0, 0.0) {
                     self.say_warn(format!("  parking failed: {e}; the tokens wait in the wallet (retried next cycle)"));
@@ -742,7 +784,7 @@ impl Executor {
                     self.say(format!("  {label}: {reason}"));
                     log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "keep", "tick": tick}));
                     // what it holds and does not use waits parked until a move needs it
-                    let side = if !st.exited || st.exit_side == 0 {
+                    let side = if !st.exited || st.exit_side == 0 || st.exit_side == 2 {
                         crate::parking::Side::Both
                     } else if st.exit_side > 0 {
                         crate::parking::Side::Token0
@@ -1228,6 +1270,113 @@ impl Executor {
         Err(StepErr::Fail(format!("mint [{tl},{tu}) still fails after shrinking liquidity by ~3%")))
     }
 
+    /// An exit to the dollar stable: this pool's tokens (up to its budget) sold for the chain's USD
+    /// stable through the aggregator. The stable must be a funding token on the chain, or re-entry
+    /// could not buy the pair back: then the tokens stay as they are.
+    fn exit_to_stable(&mut self, budget0: f64) -> Res<()> {
+        let usd_tok = crate::chains::get(self.cid).usd.to_lowercase();
+        if usd_tok.is_empty() || !crate::settings::funding_tokens(&self.settings, self.cid).iter().any(|t| t.eq_ignore_ascii_case(&usd_tok)) {
+            self.say_warn("  exit to stable: the chain's USD stable is not a funding token here (Settings, Funding tokens), so re-entry could not buy the pair back: the tokens stay as they are");
+            return Ok(());
+        }
+        if usd_tok == self.t0 || usd_tok == self.t1 {
+            self.say_warn("  exit to stable: the pool holds the stable itself (use all token0 or all token1): the tokens stay as they are");
+            return Ok(());
+        }
+        let (_, _, _, p) = self.price()?;
+        let um = prices::meta(self.cid, &usd_tok)?;
+        let uu = prices::usd(self.cid, &usd_tok)?;
+        let mut left0 = budget0;
+        for tok in [self.t0.clone(), self.t1.clone()] {
+            let is0 = tok == self.t0;
+            let cap = self.budget_raw(&tok, left0.max(0.0), p);
+            let amt = self.bal(&tok)?.max(0).min(cap);
+            if amt <= 0 {
+                continue;
+            }
+            left0 -= if is0 { amt as f64 / self.unit } else { amt as f64 / p / self.unit };
+            let m = prices::meta(self.cid, &tok)?;
+            let usd = amt as f64 / 10f64.powi(m.decimals as i32) * prices::usd(self.cid, &tok)?;
+            if usd < 1.0 {
+                continue;
+            }
+            let fair = usd / uu * 10f64.powi(um.decimals as i32);
+            let mc = self.cfg.max_swap_cost_bps;
+            let (a, b) = (tok.clone(), usd_tok.clone());
+            if let Err(e) = self.retry("exit swap", |s| s.swap(&a, &b, amt, fair, mc, "exit swap to stable")) {
+                self.say_warn(format!("  exit swap {} -> {} skipped: {e}; kept as it is", m.symbol, um.symbol));
+            }
+        }
+        Ok(())
+    }
+
+    /// A withdrawal (capital.rs): about `usd` of the pool's capital made USDC (`usdc`), from its idle
+    /// tokens first and then from its positions, burned in proportion. The pool's USDC after it (raw).
+    pub fn release(&mut self, usd: f64, usdc: &str, others: &[String]) -> Res<i128> {
+        let usdc = usdc.to_lowercase();
+        let (um, uu) = (prices::meta(self.cid, &usdc)?, prices::usd(self.cid, &usdc)?);
+        let val = |s: &Self, t: &str| -> Res<f64> {
+            let b = s.bal(t)?.max(0);
+            if b == 0 {
+                return Ok(0.0);
+            }
+            Ok(b as f64 / 10f64.powi(prices::meta(s.cid, t)?.decimals as i32) * prices::usd(s.cid, t)?)
+        };
+        let mut toks: Vec<String> = vec![self.t0.clone(), self.t1.clone()];
+        toks.extend(others.iter().map(|t| t.to_lowercase()));
+        toks.retain(|t| *t != usdc);
+        toks.dedup();
+        let have_usdc = val(self, &usdc)?;
+        let mut idle = 0.0;
+        for t in &toks {
+            idle += val(self, t)?;
+        }
+        self.say(format!("  withdrawal: ${} wanted; ${} in USDC and ${} in other idle tokens", commas(usd), commas(have_usdc), commas(idle)));
+        let short = usd - have_usdc - idle;
+        if short > 1.0 {
+            let positions = wallet_positions(self.cid, &self.cfg.pool, &self.wallet)?;
+            let (sp, _, _, p) = self.price()?;
+            let u0 = prices::usd(self.cid, &self.t0)?;
+            let pos_usd: f64 = positions.iter().map(|(tl, tu, l)| {
+                let (a0, a1) = amounts_at(&sp, *tl, *tu, l);
+                self.value0(to_f64(&a0), to_f64(&a1), p) * u0
+            }).sum();
+            if pos_usd > 0.0 {
+                // a little more than the shortfall: the swaps to USDC cost something
+                let f = (short * 1.01 / pos_usd).min(1.0);
+                self.say(format!("  withdrawal: burning {:.1}% of each position (${} of ${})", f * 100.0, commas(short), commas(pos_usd)));
+                self.begin("withdraw", None);
+                let part: Vec<(i64, i64, i128)> = positions.iter()
+                    .map(|(a, b, l)| (*a, *b, if f >= 0.999 { small(l) } else { (to_f64(l) * f) as i128 }))
+                    .filter(|x| x.2 > 0)
+                    .collect();
+                self.burn_all(&part)?;
+            }
+        }
+        let mut left = usd - val(self, &usdc)?;
+        for t in toks {
+            if left < 1.0 {
+                break;
+            }
+            let (m, px) = (prices::meta(self.cid, &t)?, prices::usd(self.cid, &t)?);
+            let b = self.bal(&t)?.max(0);
+            let want = ((left * 1.003 / px) * 10f64.powi(m.decimals as i32)) as i128;
+            let amt = b.min(want);
+            let usd_in = amt as f64 / 10f64.powi(m.decimals as i32) * px;
+            if usd_in < 1.0 {
+                continue;
+            }
+            let fair = usd_in / uu * 10f64.powi(um.decimals as i32);
+            let mc = self.cfg.max_swap_cost_bps.max(10.0);
+            let (a, c) = (t.clone(), usdc.clone());
+            match self.retry("withdrawal swap", |s| s.swap(&a, &c, amt, fair, mc, "withdrawal swap to USDC")) {
+                Ok(_) => left -= usd_in,
+                Err(e) => self.say_warn(format!("  withdrawal swap {} -> {} skipped: {e}", m.symbol, um.symbol)),
+            }
+        }
+        self.bal(&usdc)
+    }
+
     /// `budget0` (token0 units) in raw units of `token` (one of the pool's) at raw price p.
     fn budget_raw(&self, token: &str, budget0: f64, p: f64) -> i128 {
         let raw0 = budget0 * self.unit;
@@ -1363,6 +1512,7 @@ impl Executor {
         let mut pk = Executor::new(cfg, self.cid, &self.wallet, &self.settings, self.execute, None).map_err(StepErr::Fail)?;
         pk.virt = self.virt.clone();
         pk.virt_allow = self.virt_allow.clone();
+        pk.reserve = self.reserve.clone();
         Ok(pk)
     }
 
@@ -1587,6 +1737,7 @@ impl Executor {
             return Ok(amount);
         }
         let mut pk = self.parking_executor(&host)?;
+        let mut keep = false;
         let r = (|| -> Res<()> {
             let have = pk.bal(&token)?.max(0);
             if have >= amount {
@@ -1621,6 +1772,10 @@ impl Executor {
                     let (a, b) = (other.clone(), token.clone());
                     pk.retry("claim swap", |s| s.swap(&a, &b, got, fair, mc, "unpark: swap back"))?;
                 }
+            } else {
+                // the host holds the claim's tokens idle (its capital, capital.rs): paid back once it
+                // has deployed them again, so the claim stays
+                keep = true;
             }
             Ok(())
         })();
@@ -1629,6 +1784,10 @@ impl Executor {
         }
         self.broadcasts += pk.broadcasts;
         r?;
+        if keep {
+            self.say_warn(format!("    {name} has no positions to pay it back from: the claim stays until it has"));
+            return Ok(0);
+        }
         let back = pk.bal(&token)?.max(0).min(amount);
         log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "unpark", "live": true, "lot": lot, "back": back.to_string()}));
         crate::parking::remove(true, &id);
@@ -1749,8 +1908,7 @@ impl Executor {
                 continue; // not a token on this chain
             }
             let r: Result<(f64, i128), String> = (|| {
-                let b = small(&chain::erc20_balance(self.cid, &ft, &self.wallet)?) + self.virt.get(&ft).copied().unwrap_or(0);
-                let b = b.max(0);
+                let b = self.bal(&ft).map_err(|e| e.to_string())?.max(0);
                 Ok((b as f64 / 10f64.powi(prices::meta(self.cid, &ft)?.decimals as i32) * prices::usd(self.cid, &ft)?, b))
             })();
             match r {
