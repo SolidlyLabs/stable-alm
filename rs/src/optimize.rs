@@ -148,7 +148,7 @@ pub fn apply(s: &Map<String, Value>, dims: &[Dim], x: &[f64]) -> Map<String, Val
     s
 }
 
-fn current(s: &Map<String, Value>, dims: &[Dim]) -> Vec<f64> {
+pub fn current(s: &Map<String, Value>, dims: &[Dim]) -> Vec<f64> {
     let cat = crate::graph::catalog();
     dims.iter()
         .map(|d| {
@@ -443,7 +443,7 @@ pub fn candidates_by(s: &Map<String, Value>, only: &[String], f: f64) -> Vec<Val
             }
             out.push(json!({"node": id, "param": name, "min": round_sig(a), "max": round_sig(b)}));
         }
-        let candles = entry["stateful"] != true && !["range", "rebalance", "exit", "hold", "const"].contains(&kind);
+        let candles = entry["stateful"] != true && !["range", "rebalance", "exit", "hold", "hedge", "const"].contains(&kind);
         if candles {
             let cur = n["tf"].as_f64().unwrap_or(5.0);
             let mut c = vec![5.0, 15.0, 60.0, 240.0, cur];
@@ -982,7 +982,7 @@ mod tests {
     #[test]
     fn refuses_ranges_outside_the_block_and_unknown_settings() {
         let s = strat();
-        assert!(dims(&s, &json!([{"node": "s", "param": "hours", "min": 500, "max": 900}])).unwrap_err().contains("range is empty"));
+        assert!(dims(&s, &json!([{"node": "s", "param": "hours", "min": 9000, "max": 10000}])).unwrap_err().contains("range is empty"));
         assert!(dims(&s, &json!([{"node": "s", "param": "nope", "min": 1, "max": 2}])).unwrap_err().contains("no setting"));
         assert!(dims(&s, &json!([{"node": "x", "param": "hours", "min": 1, "max": 2}])).unwrap_err().contains("no block"));
         assert!(dims(&s, &json!([])).is_err());

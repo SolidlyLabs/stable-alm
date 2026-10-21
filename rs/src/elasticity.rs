@@ -239,7 +239,7 @@ mod tests {
             }
         }
         let n = ts.len();
-        Market { ts, tick, sp: vec![1.0; n], fee, l_others: lo, l_active: la, bar_end: vec![], bar_idx: vec![], bar_tick: vec![], bar_hi: vec![], bar_lo: vec![], bar_fee: vec![],
+        Market { ts, tick, sp: vec![1.0; n], fee, fee_sig: vec![], l_others: lo, l_active: la, bar_end: vec![], bar_idx: vec![], bar_tick: vec![], bar_hi: vec![], bar_lo: vec![], bar_fee: vec![],
                  decimals: 6, px_scale: 1.0, liq_scale: 1.0, num1: true , bar_s: 300 }
     }
 

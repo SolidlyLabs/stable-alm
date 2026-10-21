@@ -44,6 +44,7 @@ rows.
 | R14 | A USD price for the chain's quote token (USDC on Base), or a USD-denominated variant | The quote token is never listed; every price is in it | P2 | 4 |
 | R15 | Tolerate client clock skew on `x-compute-deadline` (a relative budget, or the skew allowed stated) | Absolute epoch in ms vs the server's clock | P3 | 6a |
 | R16 | Mark the oracle as live in `SYSTEM-CAPABILITIES.md` (section 25 still says planned) | Code is live | P3 | — |
+| R17 | Swap-cost history for backtests: daily average cost of a swap per token or pair, by size, in batch | Per-token executable bid/ask per minute, 14 days (`/ext/oracle/history`, public `/public/oracle/history`) | P1 | 6, backtests |
 
 ## Details
 
@@ -172,7 +173,68 @@ rows.
 - `SYSTEM-CAPABILITIES.md` section 25 still calls the execution-aware oracle "planned", while the
   keyed and public endpoints are in the code.
 
+### R17. Swap-cost history for backtests (P1)
+- **Use**: the backtester charges every swap a cost (`rs/src/backtest.rs`, `Costs` and
+  `Ctx::swap_days`). The flat default was 0.3 bp, so strategies that trade often looked far better
+  than they are. On 20 Oct 2026 a trend strategy showed +272% a year at 0.3 bp and lost most of it at
+  measured costs.
+- **Today**:
+  - `ModOracleHistory` keeps, per token against the chain's canonical stable, per minute, for
+    $1k-$10M and both sides: bid, ask, mid, `impactPercent`, spread and depth. It is kept 14 days.
+  - `/ext/oracle/history` (keyed) takes one token, one side, one size and from/to; it returns minute
+    rows, at most 500 buckets a call, with no granularity parameter.
+  - `/public/oracle/history` (no key, 1 request/s) takes one token and one size, with a range of up to
+    14 days, and returns at most 500 points.
+  - There is no pair form: a token-to-token swap has to be estimated as two legs through USDC, which
+    overstates it. On Sonic, WETH (`0x309c…7bc7`) is not listed, so wS/WETH could not be costed.
+- **How Stable ALM uses it**:
+  - It asks once for the days available (14).
+  - It applies each day's measured cost to that day of a backtest, and the average of the 14 days
+    to every other day of a 1-2 year backtest.
+  - It caches closed days locally and asks only for new days after that, so in time it builds its
+    own longer history.
+- **Needed**: one batch call, with this input:
+  - `chainId`;
+  - `items`: each item is either a token (cost against the canonical stable) or a pair
+    `{tokenIn, tokenOut}` (cost of that swap through the best route, not two legs);
+  - `sizesUsd`: e.g. `[1000, 10000, 100000]`;
+  - `sides`: `buy`, `sell` or both (for a pair, its direction is the side);
+  - `from` and `to`, within the retention;
+  - `bucket`: `hour`, `day`, or `week`.
+- **And this output**, per item × size × side × bucket:
+  - `costBp`: the average one-way cost against the mid, all in: pool fees plus impact. Half the
+    spread at that size, or the executable price against the reference mid; state which.
+  - `p50CostBp` and `p90CostBp` across the bucket's samples;
+  - `samples`: how many minutes the average is over;
+  - the pools that served the route, with their share of the routed amount and their fee tier,
+    averaged over the bucket. That lets the cost be split into fee and impact, and shows when the
+    route moved between pools;
+  - `depth1PctUsd`: the bucket's average 1% depth on that side.
+- **Limits**: up to ~20 items × 3 sizes × 2 sides × 14 daily buckets in one call, metered as one
+  request (or as one per item). A day is UTC.
+- **Retention**: this needs no longer history than today's 14 days. A daily rollup kept longer (like
+  the 400-day DEX-hour rollups) would let backtests use real costs further back, but Stable ALM
+  builds that itself from the daily answers.
+- **Done when**:
+  - one call returns 14 daily buckets for Base WETH, AERO and cbBTC and Sonic wS at $1k, $10k and
+    $100k, both sides, plus the pairs AERO→WETH and wS→WETH;
+  - a pair's cost is at most the sum of its two legs.
+- **Measured from the public endpoint on 20 Oct 2026** (half the spread, the average of the days
+  available, one way):
+
+  | Pair | $1k | $10k | $100k |
+  |---|---|---|---|
+  | Base WETH/USDC | 3.9 bp | 4.3 bp | 6.0 bp |
+  | Base cbBTC/WETH (two legs) | 5.5 bp | 6.4 bp | 11 bp |
+  | Base AERO/USDC | 9.3 bp | 21.9 bp | 34.1 bp |
+  | Base AERO/WETH (two legs) | 13.2 bp | 26.3 bp | 40.1 bp |
+  | Sonic wS/USDC.e | 29.8 bp | 116 bp | 2,415 bp |
+
+  Sonic's deepest wS/USDC.e pool holds about $200k (Shadow, 0.15%), so the wS figures are plausible.
+
 ## Open questions for the Liquidity Lens owner
 - Is key issuance to wallet users (R1) still planned with M4, or should Stable ALM's need be
   built separately?
 - Are quota costs per quote or per request for batches (R3)?
+- Can the swap-cost history (R17) price a pair through its best route directly, rather than as two
+  legs against the canonical stable? Is Sonic's WETH (`0x309c…7bc7`) meant to be listed?

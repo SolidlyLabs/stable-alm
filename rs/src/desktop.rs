@@ -264,12 +264,14 @@ pub fn run() -> Result<(), String> {
         return Ok(());
     }
     crate::paths::seed();
+    crate::wallets::ensure_registry();
     #[cfg(target_os = "macos")]
     plat::init();
     let worker = Worker::new();
     let _port = crate::webui::serve(worker.clone(), crate::webui::wanted_port(), true)?;
     crate::agent::start(worker.clone());
     crate::update::start();
+    crate::positions::start();
     let w2 = worker.clone();
     let thread = std::thread::Builder::new().name("worker".into()).spawn(move || w2.loop_forever()).map_err(|e| e.to_string())?;
 
@@ -350,7 +352,7 @@ pub fn run() -> Result<(), String> {
             } else if id == login_i.id() {
                 plat::set_autostart(!plat::autostart_enabled());
             } else if id == logs_i.id() {
-                open(&crate::paths::logs().display().to_string());
+                open(&crate::paths::app_logs().display().to_string());
             } else if id == data_i.id() {
                 open(&crate::paths::home().display().to_string());
             } else if id == quit_i.id() {
@@ -411,10 +413,12 @@ pub fn quit_running(timeout: Duration) -> i32 {
 
 pub fn headless() -> Result<(), String> {
     crate::paths::seed();
+    crate::wallets::ensure_registry();
     let worker = Worker::new();
     let _port = crate::webui::serve(worker.clone(), crate::webui::wanted_port(), true)?;
     crate::agent::start(worker.clone());
     crate::update::start();
+    crate::positions::start();
     let w2 = worker.clone();
     let th = std::thread::spawn(move || w2.loop_forever());
     while !QUIT.load(Ordering::SeqCst) {

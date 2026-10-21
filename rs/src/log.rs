@@ -88,7 +88,7 @@ pub fn log(level: Level, name: &str, msg: &str) {
         #[cfg(test)]
         return;
         #[allow(unreachable_code)]
-        let dir = crate::paths::logs();
+        let dir = crate::paths::app_logs();
         let _ = std::fs::create_dir_all(&dir);
         let mut files = vec![dir.join("alm.log")];
         if level >= Level::Warning {

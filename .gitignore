@@ -21,3 +21,6 @@ research/
 docker-data/
 build/
 dist/
+
+# Hedging plan and research: kept local (its later sections are private strategy research)
+docs/HEDGE_PLAN.md

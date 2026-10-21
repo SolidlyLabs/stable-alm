@@ -20,6 +20,10 @@ use crate::settings::{load_settings, save_settings};
 
 /// Store a key as the signer and make its address the managed wallet.
 pub fn save_key(k: &str) -> Result<Value, String> {
+    // one wallet per address (wallets.rs): refused before anything is stored
+    let k = k.trim();
+    let probe = crate::eth::Account::from_key(&if k.starts_with("0x") { k.to_string() } else { format!("0x{k}") })?;
+    crate::wallets::check_address(&crate::paths::wallet(), &probe.address)?;
     let address = crate::signer::save_key(k)?;
     let mut s = load_settings();
     let changed = !s["wallet"].as_str().unwrap_or("").eq_ignore_ascii_case(&address);

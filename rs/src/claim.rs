@@ -67,7 +67,7 @@ pub fn claimable_cached(cid: u64, wallet: &str) -> Value {
         if !busy.contains(&key) {
             busy.push(key.clone());
             let k = key.clone();
-            std::thread::spawn(move || {
+            crate::paths::spawn(move || {
                 claimable(k.0, &k.1);
                 REFRESHING.lock().unwrap().retain(|x| x != &k);
             });

@@ -94,6 +94,10 @@ pub fn generate() -> Result<(String, String), String> {
     for _ in 0..8 {
         let mut b = [0u8; 32];
         getrandom::getrandom(&mut b).map_err(|e| format!("no randomness from the OS: {e}"))?;
+        // 32 bytes from the OS CSPRNG hold about 30 different values; far fewer means it is broken
+        if !looks_random(&b) {
+            return Err("the OS gave randomness that looks broken: no key was made".into());
+        }
         let k = format!("0x{}", crate::eth::hex(&b));
         if let Ok(a) = crate::eth::Account::from_key(&k) {
             return Ok((k, a.address));
@@ -102,9 +106,30 @@ pub fn generate() -> Result<(String, String), String> {
     Err("could not make a key".into())
 }
 
+/// A sanity check of 32 random bytes: at least 16 different values (a uniform draw has fewer with a
+/// probability below 1e-9). It catches a stuck or zeroed source, not a subtly weak one.
+fn looks_random(b: &[u8; 32]) -> bool {
+    let mut seen = [false; 256];
+    b.iter().for_each(|&x| seen[x as usize] = true);
+    seen.iter().filter(|&&s| s).count() >= 16
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_keys_are_distinct_and_random_looking() {
+        assert!(!looks_random(&[0u8; 32]));
+        assert!(!looks_random(&[7u8; 32]));
+        let keys: std::collections::BTreeSet<String> = (0..64).map(|_| generate().unwrap().0).collect();
+        assert_eq!(keys.len(), 64);
+        for k in &keys {
+            let mut b = [0u8; 32];
+            b.copy_from_slice(&crate::eth::unhex(k).unwrap());
+            assert!(looks_random(&b));
+        }
+    }
 
     #[test]
     fn the_standard_test_phrase() {

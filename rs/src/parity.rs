@@ -130,7 +130,13 @@ pub fn run(dir: &str) -> i32 {
         let apr = apr_raw.as_object().unwrap().iter().map(|(k, v)| (k.parse::<i64>().unwrap(), (v[0].as_f64().unwrap(), v[1].as_f64().unwrap()))).collect();
         let (d0, d1) = (meta["d0"].as_i64().unwrap() as i32, meta["d1"].as_i64().unwrap() as i32);
         let m = match data::build_market(ev, meta["wallet"].as_str().unwrap(), &apr, d0, d1, meta["numeraire"].as_i64().unwrap()) {
-            Ok(m) => m,
+            // the reference weighs the ladder by each hour's final fee rate; the runtime's signals use
+            // the last completed hour's (data.rs `fee_sig`, Oct 2026 review): the algorithm is what
+            // this checks, so it gets the reference's input
+            Ok(mut m) => {
+                m.fee_sig.clear();
+                m
+            }
             Err(e) => {
                 c.ok("build market", false, e);
                 continue;

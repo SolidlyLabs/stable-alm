@@ -21,6 +21,9 @@ pub struct Chain {
     /// Requests per minute allowed to this chain's endpoints (None: 40 on dRPC's public endpoints,
     /// unlimited elsewhere; Some(0): unlimited).
     pub rate_per_min: Option<u32>,
+    /// How transactions on this chain are priced: "low", "normal" (default) or "instant"
+    /// (chain::GasSpeed).
+    pub gas_speed: String,
     pub explorer: String,
     pub genesis_ts: Option<i64>,
     pub block_time_s: Option<f64>,
@@ -72,7 +75,7 @@ fn defaults() -> Value {
 static CACHE: Mutex<Option<HashMap<u64, Chain>>> = Mutex::new(None);
 
 fn load_all() -> HashMap<u64, Chain> {
-    let user: Value = std::fs::read_to_string(crate::paths::config().join("chains.json"))
+    let user: Value = std::fs::read_to_string(crate::paths::app_config().join("chains.json"))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(json!({}));
@@ -99,6 +102,7 @@ fn load_all() -> HashMap<u64, Chain> {
                     .unwrap_or_else(|_| v["send_rpc"].as_str().unwrap_or("").to_string()),
                 batch_size: v["batch_size"].as_u64().unwrap_or(3).clamp(1, 100) as usize,
                 rate_per_min: v["rate_per_min"].as_u64().map(|x| x.min(100_000) as u32),
+                gas_speed: crate::chain::GasSpeed::parse(v["gas_speed"].as_str().unwrap_or("")).unwrap_or_default().name().into(),
                 explorer: v["explorer"].as_str().unwrap_or("").to_string(),
                 genesis_ts: v["genesis_ts"].as_i64(),
                 block_time_s: v["block_time_s"].as_f64(),
@@ -125,6 +129,7 @@ pub fn get(id: u64) -> Chain {
         send_rpc: String::new(),
         batch_size: 3,
         rate_per_min: None,
+        gas_speed: "normal".into(),
         explorer: String::new(),
         genesis_ts: None,
         block_time_s: None,
@@ -151,7 +156,7 @@ pub fn set_enabled(id: u64, on: bool) -> Result<(), String> {
     if RETIRED.contains(&id) || !defaults().as_object().unwrap().contains_key(&id.to_string()) {
         return Err(format!("chain {id} is not supported"));
     }
-    let p = crate::paths::config().join("chains.json");
+    let p = crate::paths::app_config().join("chains.json");
     let mut user: Value = std::fs::read_to_string(&p).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!({}));
     if !user.is_object() {
         user = json!({});
@@ -172,7 +177,7 @@ pub fn set_rpc(id: u64, rpc: Option<&str>, send_rpc: Option<&str>, batch_size: O
     if RETIRED.contains(&id) || !d.as_object().unwrap().contains_key(&id.to_string()) {
         return Err(format!("chain {id} is not supported"));
     }
-    let p = crate::paths::config().join("chains.json");
+    let p = crate::paths::app_config().join("chains.json");
     let mut user: Value = std::fs::read_to_string(&p).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!({}));
     if !user.is_object() {
         user = json!({});
@@ -205,6 +210,32 @@ pub fn set_rpc(id: u64, rpc: Option<&str>, send_rpc: Option<&str>, batch_size: O
             e.as_object_mut().unwrap().remove("rate_per_min");
         }
         None => {}
+    }
+    crate::settings::write_atomic(&p, &user).map_err(|e| e.to_string())?;
+    *CACHE.lock().unwrap() = None;
+    Ok(())
+}
+
+/// Set how a chain's transactions are priced (config/chains.json, `gas_speed`): "low", "normal"
+/// or "instant". Normal is the default and is stored as no entry.
+pub fn set_gas_speed(id: u64, speed: &str) -> Result<(), String> {
+    if RETIRED.contains(&id) || !defaults().as_object().unwrap().contains_key(&id.to_string()) {
+        return Err(format!("chain {id} is not supported"));
+    }
+    let sp = crate::chain::GasSpeed::parse(speed).ok_or("gas_speed: expected low, normal or instant")?;
+    let p = crate::paths::config().join("chains.json");
+    let mut user: Value = std::fs::read_to_string(&p).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!({}));
+    if !user.is_object() {
+        user = json!({});
+    }
+    if !user[id.to_string()].is_object() {
+        user[id.to_string()] = json!({});
+    }
+    let e = user[id.to_string()].as_object_mut().unwrap();
+    if sp == crate::chain::GasSpeed::Normal {
+        e.remove("gas_speed");
+    } else {
+        e.insert("gas_speed".into(), json!(sp.name()));
     }
     crate::settings::write_atomic(&p, &user).map_err(|e| e.to_string())?;
     *CACHE.lock().unwrap() = None;
@@ -256,7 +287,7 @@ pub fn as_json() -> Value {
             .map(|c| json!({"id": c.id, "name": c.name, "enabled": c.enabled, "explorer": c.explorer,
                             "gas_symbol": c.gas_symbol, "min_gas": c.min_gas_wei / 1e18, "usd": c.usd, "solid": c.solid,
                             "rpc": c.rpc, "send_rpc": c.send_rpc, "batch_size": c.batch_size,
-                            "rate_per_min": c.rate_per_min, "funding_default": default_funding(c.id), "rate_effective": crate::rpc::rate_for(&c, &c.rpc),
+                            "rate_per_min": c.rate_per_min, "gas_speed": c.gas_speed, "funding_default": default_funding(c.id), "rate_effective": crate::rpc::rate_for(&c, &c.rpc),
                             "rpc_default": defaults()[c.id.to_string()]["rpc"], "send_rpc_default": defaults()[c.id.to_string()]["send_rpc"]}))
             .collect(),
     )

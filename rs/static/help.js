@@ -15,8 +15,10 @@
     // ---- header ----
     mode: ["Mode", `
       <p><b>DRY RUN</b>: the worker plans and simulates everything but signs nothing. This is the default and is safe to leave running to watch what it would do.</p>
-      <p><b>LIVE</b>: a private key is set, <b>Go live</b> was pressed, the key's address matches the managed wallet and the pause switch is off. Transactions are really sent.</p>
-      <p><b>PAUSED</b>: the kill switch is on (<code>config/STOP</code>). No action is taken in either mode. Data and statistics keep updating.</p>`],
+      <p><b>LIVE</b>: the wallet has a private key, <b>Go live</b> was pressed for it, and neither it nor the app is paused. Transactions are really sent.</p>
+      <p><b>PAUSED</b>: the wallet was paused (Settings → Wallets), or the kill switch <b>Pause all</b> is on. Nothing is signed. Data and statistics keep updating.</p>
+      <p><b>WATCH</b>: the wallet has no key; it is only valued.</p>
+      <p>Each wallet has its own state; the header shows each one's.</p>`],
     cycle: ["Worker cycle", `
       <p>The worker runs one cycle every <i>Cycle interval</i> seconds (Settings), or immediately after <b>Run now</b> or after saving pools.</p>
       <p><b>last cycle</b>: when the previous cycle finished, and how long it took. The first cycle on a fresh install is slower because it downloads 14 days of pool events.</p>
@@ -32,7 +34,7 @@
     pause: ["Pause / Resume", `<p>The kill switch. While paused, no withdraw, swap, deposit or claim is sent, in live or dry mode. Pools are still valued and statistics keep updating.</p>
       <p>It is stored as the file <code>config/STOP</code>, so it survives restarts. Resume removes it and starts a cycle.</p>`],
     live: ["Go live / Switch to dry run", `
-      <p><b>Go live</b> lets the worker sign and send real transactions with the stored private key from the next cycle on. It needs a key (Settings), and the key's address must equal the managed wallet.</p>
+      <p><b>Go live</b> lets the worker sign and send real transactions with the stored private key from the next cycle on. It is per wallet, and needs that wallet's key (Settings → Wallets).</p>
       <p><b>Switch to dry run</b> turns signing off again. Positions stay exactly as they are; nothing is withdrawn.</p>
       <p>Before going live: check that the wallet has ETH for gas (Overview), each pool's capital is what you want (Pools), and the last dry runs look right (Activity, pool cycle logs).</p>`],
     "tab-overview": ["Overview tab", `<p>Live state of everything the worker manages: total value, profit and its parts across all chains, one card per chain with its balance, gas and profit, the value history, and one card per active pool with its positions and last decision.</p>`],
@@ -339,7 +341,8 @@
       <p>Requests wait in the list under the bar until they are done, and can be cancelled there. Rewards claimed go to the pools that earned them (the rewards API reports them per pool). Tokens sent out of the wallet shrink every pool's holding of that token in proportion. A pool switched off withdraws its positions and gives its idle tokens back to Unallocated.</p>
       <p>The first time this version runs, each pool keeps what it holds and is filled up from the free tokens to its allocation %, as before.</p>`],
     allocation: "capital",
-    blend: ["Blended APR", `<p>The estimated APR of everything on the chain: each pool's estimated APR at its capital, weighted by it. Unallocated counts as 0%.</p>
+    blend: ["Blended APR", `<p><b>Blended APR</b> is what the positions in range right now would earn at each pool's income of the last 24 hours (fees, emissions and bribes), over everything on the chain. Our share of a pool's income is our in-range liquidity over the pool's active liquidity. Idle tokens, Unallocated and positions out of range count as 0%.</p>
+      <p><b>Realised APR</b> is what the positions actually earned (claimed + claimable + pending rewards) since the first position on the chain, over the average money in positions in that time (from the cycle snapshots), per year. It shows after a day.</p>
       <p>Shown for the last 1 h, 6 h and 24 h, with the yearly dollars at the 24 h rate. These are raw processor figures: the backtests assume 82% of fees are actually paid and SOLID is worth half, so real results tend to be lower. Short windows are noisy, because volume is lumpy.</p>`],
     "p-color": ["Colour", `<p>The pool's colour in the capital bar.</p>`],
     "p-pool": ["Pool", `<p>The pool's name in this app, its token pair and its contract on the chain's explorer.</p>`],
@@ -408,7 +411,13 @@
       <ul><li>a wider ladder (span 60 tick spacings);</li><li>no depeg guard, which would freeze on every normal move;</li>
       <li>a looser 1 h spot check (100 ticks);</li><li>10 bp slippage and a 15 bp swap-cost cap.</li></ul>
       <p>None of this has been backtested. Expect divergence loss when the price trends, and keep allocations small until it proves itself.</p>`],
-    addaddr: ["Add by address", `<p>Pick the chain and paste any Solidly V3 pool address to add it (disabled, 0%). It works for pools not shown in the list.</p>`],
+    "lab-r-hedge": ["Hedge", `<p>What the strategy's perp short on Hyperliquid added: its price P&L (it gains when the token falls), the funding it earned (shorts are paid while funding is positive) less what it paid, and its trading and transfer fees. The short is the pool's own price, so the perp's basis is not modelled. Its margin comes out of the capital at the start and is counted in the hold baseline.</p><p>The live app does not hedge yet: a strategy with a Hedge block runs in backtests only.</p>`],
+    "pos-chart": ["APR per position", `<p>The APR each position earned, measured by the Solidly UI: the fees credited to the position between two samples, over its value, per year. The app samples every 15 minutes, so the solid lines start when this version first ran.</p>
+      <p>Before that, the dashed steps come from the Solidly UI's trailing fee sums for each live position (the last hour, 1–2 hours ago, 2–4 hours ago, up to 7–30 days ago), each over today's value. Dotted lines are the SOLID rewards per pool, over the money in the pool.</p>
+      <p>Every figure is the LP's share of the fees (80%; the rest is the protocol's). Click a position in the legend or the table to pick it out.</p>`],
+    "pos-table": ["Positions", `<p>Each range the wallet holds, and the ranges it closed in this period that earned something (tick for "closed positions"). A range that is withdrawn and minted again counts as a new position.</p>
+      <p><b>APR 24 h</b> and <b>7 d</b>: the fees of that window over the position's value now. <b>APR life</b>: the fees over the position's time-weighted capital since it opened, as the Solidly UI shows it.</p>`],
+    "refresh-pools": ["Refresh", `<p>Re-reads every chain's pool list and APRs from the Solidly UI now. The list also follows the Solidly UI on its own: the app's copy is at most 5 minutes old, and the table re-reads it every 5 minutes while this tab is open.</p>`],
     refresh: ["Refresh", `<p>Reloads the pool list and the APR windows. Data is cached for a few minutes: pools 5 min, APR windows 10 min.</p>`],
 
     // ---- settings ----
@@ -440,13 +449,13 @@
     "set-retries.attempts": ["Retries per step", `<p>How often each step (withdraw, swap, approval, deposit) is retried after a failure, with fresh chain state and a fresh quote each time. Withdraw failures stop the pass before anything else happens. Swap and deposit failures leave tokens idle for the next cycle's top-up.</p>`],
     "set-retries.backoff_s": ["Retry backoff", `<p>Seconds to wait before a retry, multiplied by the attempt number (10 s, 20 s, …). It gives a congested RPC or a moving price time to settle.</p>`],
     "set-ui_port": ["Dashboard port", `<p>The port this dashboard listens on, on 127.0.0.1 only (default 8080). Saving a new one moves the dashboard there at once and this page follows; the old port keeps answering for 20 seconds. A port another program holds is refused and not saved. At startup, if the port is taken, the app uses the next free one (up to 20 higher, else any free port) and the tray's <b>Open dashboard</b> goes there.</p>`],
-    "set-wallet": ["Managed wallet", `<p>The address whose positions and balances are managed. It must equal the private key's address for live trading. Saving a key switches it automatically.</p>`],
     funding: ["Funding tokens", `<p>The tokens a pool may swap into its own when it holds them: USDC added to it, say. Example: you add $3,000 of USDC to cbETH/WETH, and it buys cbETH and WETH with it when it deploys.</p>
       <p>Each chain has its own row and list; a pool is only ever funded with tokens on its own chain. Every chain starts with its USDC and USDT. Click a row's tokens to add or remove, then <b>Save</b> that row; <b>Reset</b> puts the chain back to USDC and USDT.</p>
       <p>You can tick several. A shortfall is bought from the selected token with the largest USD balance first; if that runs out, the next one covers the rest. Shortfalls under $10 are ignored.</p>
       <p>The picker shows every token of that chain's Solidly pools with your wallet balance (or paste an address); ticked tokens are listed first, and the closed picker shows them as chips (× removes one). A selected token that is one of the pool's own tokens is not swapped by funding; the normal rebalancing swap handles it. <b>None</b> empties that chain's list and turns cross-pool funding off there: its pools then only use their own tokens.</p>`],
-    privkey: ["Private key", `<p>Paste the wallet's private key to allow live trading. It is encrypted for your user account (Windows DPAPI or the macOS Keychain), so the worker resumes after restarts without asking.</p>
-      <p>The API never returns it and logs never contain it; only its address is shown. Saving it switches the managed wallet to its address. <b>Remove</b> deletes the file and turns live trading off.</p>`],
+    privkey: ["Wallets", `<p>Every wallet the app runs, each with its own pools, split of funds and statistics. A wallet's address is its key's; a wallet without a key watches the address you give it (<b>Change address</b>) and signs nothing.</p>
+      <p><b>Set key</b> stores a private key encrypted for your user account (Windows DPAPI or the macOS Keychain), so the worker resumes after restarts without asking. The API never returns it and logs never contain it. <b>Remove key</b> deletes it; the wallet becomes watched only and live trading turns off.</p>
+      <p><b>Go live</b> / <b>Switch to dry run</b> and <b>Pause</b> / <b>Start</b> act on that wallet only.</p>`],
     helpvis: ["Show explanations panel", `<p>Shows or hides this panel. It is on by default. The choice is remembered in this browser only (not a worker setting), and takes effect immediately without saving.</p>
       <p>With the panel hidden, hovering still works as normal tooltips where values have breakdowns.</p>`],
     savesettings: ["Save settings", `<p>Writes the options to <code>config/settings.json</code> (funding tokens and RPCs have their own Save per chain). They take effect on the next cycle.</p>`],
@@ -470,7 +479,7 @@
     "Strategy & limits": "p-strategy", "Token": "wallet", "Claimable": "rewards", "Reward": "rewards", "Pending": "rewards", "When": "events", "Event": "events", "Details": "events"};
   const BTN = {"Run now": "run_now", "Claim now": "claim_now", "Pause": "pause", "Resume": "pause", "Go live": "live", "Switch to dry run": "live",
     "Re-solve": "resolve", "Remove": "remove", "Add": "addpair", "Save pools & allocation": "savepools", "Save pools": "savepools", "Discard changes": "discard", "Save settings": "savesettings",
-    "Save key": "privkey", "Refresh": "refresh", "Add (disabled, 0%)": "addaddr"};
+    "Save key": "privkey", "Refresh": "refresh"};
 
   function tag(root) {
     const set = (el, k) => { if (el && !el.dataset.help) el.dataset.help = k; };
@@ -498,15 +507,15 @@
     });
     root.querySelectorAll("#settings [data-k]").forEach(el => set(el.closest("div"), el.dataset.k === "solid_mode" ? "solidmode" : "set-" + el.dataset.k));
     root.querySelectorAll("#pools .fields > div").forEach(d => { const l = d.querySelector("label"); if (l) set(d, "param-" + l.textContent.trim()); });
-    root.querySelectorAll("#poolCards .card").forEach(c => set(c, "poolcard"));
-    root.querySelectorAll("#poolCards .pos-list > div").forEach(d => set(d, "position"));
-    root.querySelectorAll("#poolCards .card > .small").forEach(d => set(d, "decision"));
-    root.querySelectorAll("#events tr").forEach(tr => { const c = tr.children[3]; if (c && c.tagName === "TD") set(c, "ev-" + c.textContent.replace(/\(dry\)/, "").trim()); });
+    root.querySelectorAll(".pdetail .card").forEach(c => set(c, "poolcard"));
+    root.querySelectorAll(".pdetail .pos-list > div").forEach(d => set(d, "position"));
+    root.querySelectorAll(".pdetail .card > .small").forEach(d => set(d, "decision"));
+    root.querySelectorAll("#events tr").forEach(tr => { const c = tr.children[tr.children.length - 2]; if (c && c.tagName === "TD") set(c, "ev-" + c.textContent.replace(/\(dry\)/, "").trim()); });
     root.querySelectorAll(".chip.volatile").forEach(c => set(c, "volatile"));
     root.querySelectorAll("#pools .chip.mine").forEach(c => set(c, "configured"));
     root.querySelectorAll("#allocs .card").forEach(c => set(c, "allocation"));
     root.querySelectorAll("#chainBar .chipbtn").forEach(c => set(c, "chainfilter"));
-    const ids = {mode: "mode", cycle: "cycle", chart: "chart", tokens: "wallet", rewards: "rewards", chainBar: "chainfilter", q: "search", newChain: "newchain", depSize: "depsize", minTvl: "mintvl", fundCard: "funding", pk: "privkey", keyStatus: "privkey", errors: "errors", newPool: "addaddr", newName: "addaddr"};
+    const ids = {mode: "mode", cycle: "cycle", chart: "chart", tokens: "wallet", rewards: "rewards", chainBar: "chainfilter", q: "search", depSize: "depsize", minTvl: "mintvl", fundCard: "funding", wList: "privkey", errors: "errors"};
     for (const [id, k] of Object.entries(ids)) set(document.getElementById(id), k);
     const kp = {kTotal: "k-total", kProfit: "k-profit", kEarned: "k-earned", kDeployed: "k-deployed", kIdle: "k-idle"};
     for (const [id, k] of Object.entries(kp)) { const e = document.getElementById(id); if (e) set(e.closest(".card"), k); }

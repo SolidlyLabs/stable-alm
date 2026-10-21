@@ -9,6 +9,7 @@
 mod agent;
 mod backtest;
 mod cache;
+mod candles;
 mod capital;
 mod chain;
 mod chains;
@@ -30,6 +31,7 @@ mod overfit;
 mod parking;
 mod ta;
 mod history;
+mod hyperliquid;
 mod ladder;
 mod log;
 mod market_data;
@@ -37,6 +39,7 @@ mod market_flvr;
 #[cfg(test)]
 mod parity;
 mod paths;
+mod positions;
 mod prices;
 mod rpc;
 mod settings;
@@ -47,6 +50,7 @@ mod tickmath;
 mod update;
 mod onboard;
 mod wallet;
+mod wallets;
 mod webui;
 mod worker;
 

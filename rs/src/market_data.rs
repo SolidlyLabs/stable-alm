@@ -96,11 +96,7 @@ fn init_data(cid: u64, wallet: &str) -> Result<Value, String> {
             None => (None, u64::MAX),
         },
     };
-    let store = move |v: &Value| {
-        CACHE.lock().unwrap().get_or_insert_with(HashMap::new).insert(format!("init:{cid}:{w}"), (Instant::now(), v.clone()));
-        crate::store::save_snapshot(&format!("pools_{cid}_{w}"), v);
-        remember_tokens(cid, v);
-    };
+    let store = move |v: &Value| keep_init(cid, &w, v);
     match value {
         Some(v) => {
             if age >= INIT_TTL_S && REFRESHING.lock().unwrap().get_or_insert_with(Default::default).insert(mkey.clone()) {
@@ -121,6 +117,37 @@ fn init_data(cid: u64, wallet: &str) -> Result<Value, String> {
             Ok(v)
         }
     }
+}
+
+fn keep_init(cid: u64, w: &str, v: &Value) {
+    CACHE.lock().unwrap().get_or_insert_with(HashMap::new).insert(format!("init:{cid}:{w}"), (Instant::now(), v.clone()));
+    crate::store::save_snapshot(&format!("pools_{cid}_{w}"), v);
+    remember_tokens(cid, v);
+}
+
+/// The pools table's Refresh: read every chain's pool list from the Solidly UI now, and drop the
+/// cached APR windows. A chain whose fetch fails keeps its old copy; the errors are returned.
+pub fn reload(wallet: &str, configured: &[(u64, String)]) -> Vec<String> {
+    let w = wallet.to_lowercase();
+    CACHE.lock().unwrap().get_or_insert_with(HashMap::new).retain(|k, _| !k.starts_with("apr:"));
+    let mut errors = vec![];
+    for cid in chain_ids(configured) {
+        match fetch_init_data(cid, wallet) {
+            Ok(v) => keep_init(cid, &w, &v),
+            Err(e) => errors.push(format!("{}: {e}", crate::chains::get(cid).name)),
+        }
+    }
+    errors
+}
+
+fn chain_ids(configured: &[(u64, String)]) -> Vec<u64> {
+    let mut chains: Vec<u64> = crate::chains::all().into_iter().filter(|c| c.enabled).map(|c| c.id).collect();
+    for (c, _) in configured {
+        if !chains.contains(c) {
+            chains.push(*c);
+        }
+    }
+    chains
 }
 
 /// Keep the facts about every listed token that never change (symbol, name, decimals, logo).
@@ -217,12 +244,7 @@ pub fn apr_windows(cid: u64, pool: &str) -> Result<Value, String> {
 
 /// Pools with TVL >= $50 on every enabled chain (plus the configured ones), with APR windows.
 pub fn shortlist(wallet: &str, configured: &[(u64, String)]) -> Result<Vec<Value>, String> {
-    let mut chains: Vec<u64> = crate::chains::all().into_iter().filter(|c| c.enabled).map(|c| c.id).collect();
-    for (c, _) in configured {
-        if !chains.contains(c) {
-            chains.push(*c);
-        }
-    }
+    let chains = chain_ids(configured);
     let mut rows = vec![];
     let mut errors = vec![];
     for cid in chains {
@@ -282,55 +304,188 @@ pub fn shortlist(wallet: &str, configured: &[(u64, String)]) -> Result<Vec<Value
     Ok(rows.into_inner().unwrap())
 }
 
-/// Every token of every chain's Solidly pools (+ extra addresses) with the wallet's balance. Every
-/// supported chain, whatever the pools table shows; a chain whose RPC fails is left out, not the list.
-pub fn tokens(wallet: &str, extra: &[(u64, String)]) -> Result<Vec<Value>, String> {
-    let mut out = vec![];
-    for c in crate::chains::all() {
-        let cid = c.id;
-        let mut known: Vec<Value> = vec![];
-        if let Ok(ps) = pools(cid, wallet) {
-            for p in ps {
-                for t in [&p["token0"], &p["token1"]] {
-                    if !known.iter().any(|k| k["address"] == t["address"]) {
-                        known.push(t.clone());
-                    }
+const TOKENS_TTL_S: u64 = 60;
+
+fn tokens_key(wallet: &str) -> String {
+    format!("tokens_{}", wallet.to_lowercase())
+}
+
+/// Every token of every chain's Solidly pools (+ extra addresses) with the wallet's balance, and
+/// whether a refresh is running. Every supported chain, whatever the pools table shows.
+///
+/// The list is kept on disk (`data/cache/tokens_<wallet>.json`) and answered from there at once; a
+/// refresh runs in the background once a minute, or straight away when an extra token is not on the
+/// list yet. A refresh reads the chains side by side, reuses what the last list knew about each token
+/// (only new tokens are looked up), and reads the balances in one quick multicall per chain; a chain
+/// that cannot be read keeps its last rows. With no list at all the caller waits up to 5 s.
+pub fn tokens(wallet: &str, extra: &[(u64, String)]) -> (Vec<Value>, bool) {
+    let key = tokens_key(wallet);
+    let saved = |k: &str| crate::store::background_peek(k).or_else(|| crate::store::load_snapshot(k).map(|x| x.0));
+    let missing = saved(&key).map(|v| extra.iter().any(|(c, a)| !on_list(&v, *c, a))).unwrap_or(false);
+    let (w, ex, k) = (wallet.to_string(), extra.to_vec(), key.clone());
+    let fetch = move || {
+        let prev = saved(&k).and_then(|v| v.as_array().cloned()).unwrap_or_default();
+        let rows = json!(refresh_tokens(&w, &ex, &prev));
+        crate::store::save_snapshot(&k, &rows);
+        Ok(rows)
+    };
+    let v = crate::store::background(&key, if missing { 0 } else { TOKENS_TTL_S }, Duration::from_secs(5), || crate::store::load_snapshot(&key), fetch);
+    (v.and_then(|v| v.as_array().cloned()).unwrap_or_default(), crate::store::refreshing(&key))
+}
+
+fn on_list(rows: &Value, cid: u64, addr: &str) -> bool {
+    let a = addr.to_lowercase();
+    rows.as_array().into_iter().flatten().any(|t| t["chain_id"].as_u64() == Some(cid) && t["address"] == a.as_str())
+}
+
+fn refresh_tokens(wallet: &str, extra: &[(u64, String)], prev: &[Value]) -> Vec<Value> {
+    let chains = crate::chains::all();
+    let mut out: Vec<Value> = std::thread::scope(|sc| {
+        let hs: Vec<_> = chains.iter().map(|c| sc.spawn(move || chain_tokens(c.id, &c.name, wallet, extra, prev))).collect();
+        hs.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+    });
+    out.sort_by(|a, b| b["balance_usd"].as_f64().partial_cmp(&a["balance_usd"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
+    out
+}
+
+fn chain_tokens(cid: u64, name: &str, wallet: &str, extra: &[(u64, String)], prev: &[Value]) -> Vec<Value> {
+    let old: Vec<&Value> = prev.iter().filter(|t| t["chain_id"].as_u64() == Some(cid)).collect();
+    let listed = pools(cid, wallet).ok().map(|ps| {
+        let mut ts: Vec<Value> = vec![];
+        for p in ps {
+            for t in [&p["token0"], &p["token1"]] {
+                if !ts.iter().any(|k| k["address"] == t["address"]) {
+                    ts.push(t.clone());
                 }
             }
         }
-        for (_, a) in extra.iter().filter(|(c, _)| *c == cid) {
-            if !known.iter().any(|k| k["address"] == a.to_lowercase().as_str()) {
-                // not in any pool: what the store knows (from earlier pool lists or the chain); no price lookup,
-                // so the list never waits on a price feed
-                let m = crate::prices::meta(cid, a).ok();
-                let k = crate::store::get(&crate::store::token_key(cid, a)).unwrap_or(Value::Null);
-                known.push(json!({"address": a.to_lowercase(),
-                                  "symbol": m.as_ref().map(|m| m.symbol.clone()).unwrap_or_else(|| a[..8.min(a.len())].to_string()),
-                                  "name": k["name"], "logo": logo_path(cid, a, &k["logo_src"]),
-                                  "decimals": m.as_ref().map(|m| m.decimals), "price_usd": if *a == crate::chains::get(cid).usd.to_lowercase() { 1.0 } else { 0.0 }}));
-            }
-        }
-        let data = format!("0x70a08231{}{}", "0".repeat(24), wallet.trim_start_matches("0x").to_lowercase());
-        for chunk in known.chunks(50) {
-            let calls: Vec<(&str, Value)> = chunk.iter().map(|t| ("eth_call", json!([{"to": t["address"], "data": data}, "latest"]))).collect();
-            let res = match crate::rpc::batch(cid, &calls) {
-                Ok(r) => r,
-                Err(e) => {
-                    crate::warn!("market", "{}: wallet balances not read: {e}", c.name);
-                    break;
-                }
-            };
-            for (t, r) in chunk.iter().zip(res) {
-                let mut t = t.clone();
-                let raw = r.ok().and_then(|v| v.as_str().map(crate::eth::parse_uint)).map(|b| crate::tickmath::to_f64(&b)).unwrap_or(0.0);
-                let bal = t["decimals"].as_i64().map(|d| raw / 10f64.powi(d as i32));
-                t["balance"] = json!(bal);
-                t["balance_usd"] = json!(bal.unwrap_or(0.0) * t["price_usd"].as_f64().unwrap_or(0.0));
-                t["chain_id"] = json!(cid);
-                out.push(t);
-            }
-        }
+        ts
+    });
+    let extras: Vec<String> = extra.iter().filter(|(c, _)| *c == cid).map(|(_, a)| a.to_lowercase()).collect();
+    let mut rows = chain_list(cid, listed, &old, &extras, |a| {
+        // not in any pool: what the store knows (from earlier pool lists or the chain); no price lookup,
+        // so the list never waits on a price feed
+        let m = crate::prices::meta(cid, a).ok();
+        let k = crate::store::get(&crate::store::token_key(cid, a)).unwrap_or(Value::Null);
+        json!({"address": a, "symbol": m.as_ref().map(|m| m.symbol.clone()).unwrap_or_else(|| a[..8.min(a.len())].to_string()),
+               "name": k["name"], "logo": logo_path(cid, a, &k["logo_src"]),
+               "decimals": m.as_ref().map(|m| m.decimals), "price_usd": if *a == crate::chains::get(cid).usd.to_lowercase() { 1.0 } else { 0.0 }})
+    });
+    let data = format!("0x70a08231{}{}", "0".repeat(24), wallet.trim_start_matches("0x").to_lowercase());
+    let calls: Vec<(&str, Value)> = rows.iter().map(|t| ("eth_call", json!([{"to": t["address"], "data": data}, "latest"]))).collect();
+    let res = if calls.is_empty() { Ok(vec![]) } else { crate::rpc::batch_quick(cid, &calls) };
+    if let Err(e) = &res {
+        crate::warn!("market", "{name}: wallet balances not read, showing the last ones: {e}");
     }
-    out.sort_by(|a, b| b["balance_usd"].as_f64().partial_cmp(&a["balance_usd"].as_f64()).unwrap());
-    Ok(out)
+    apply_balances(&mut rows, res.ok(), &old);
+    rows
+}
+
+/// The chain's token rows: the pool list's tokens (None when the pool list is unavailable: the last
+/// rows instead), then the extra addresses. An extra the last list had is taken from it; only one
+/// never seen before goes through `new_extra` (which may ask the chain).
+fn chain_list(cid: u64, listed: Option<Vec<Value>>, old: &[&Value], extras: &[String], mut new_extra: impl FnMut(&str) -> Value) -> Vec<Value> {
+    let mut rows: Vec<Value> = listed.unwrap_or_else(|| old.iter().map(|t| (*t).clone()).collect());
+    for a in extras {
+        if rows.iter().any(|k| k["address"] == a.as_str()) {
+            continue;
+        }
+        let row = match old.iter().find(|t| t["address"] == a.as_str()) {
+            Some(t) => (*t).clone(),
+            None => new_extra(a),
+        };
+        rows.push(row);
+    }
+    for t in rows.iter_mut() {
+        t["chain_id"] = json!(cid);
+    }
+    rows
+}
+
+/// Balances from the balanceOf results; without results (the node did not answer) each row keeps the
+/// balance the last list had, valued at the current price.
+fn apply_balances(rows: &mut [Value], res: Option<Vec<crate::rpc::R>>, old: &[&Value]) {
+    for (i, t) in rows.iter_mut().enumerate() {
+        let bal = match &res {
+            Some(res) => {
+                let raw = res.get(i).and_then(|r| r.as_ref().ok()).and_then(|v| v.as_str().map(crate::eth::parse_uint)).map(|b| crate::tickmath::to_f64(&b)).unwrap_or(0.0);
+                t["decimals"].as_i64().map(|d| raw / 10f64.powi(d as i32))
+            }
+            None => old.iter().find(|o| o["address"] == t["address"]).and_then(|o| o["balance"].as_f64()),
+        };
+        t["balance"] = json!(bal);
+        t["balance_usd"] = json!(bal.unwrap_or(0.0) * t["price_usd"].as_f64().unwrap_or(0.0));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(a: &str, sym: &str, price: f64, bal: Option<f64>) -> Value {
+        json!({"address": a, "symbol": sym, "decimals": 6, "price_usd": price, "balance": bal, "chain_id": 8453})
+    }
+
+    #[test]
+    fn a_refresh_looks_up_only_tokens_the_last_list_did_not_have() {
+        let old = [row("0xaa", "AA", 1.0, Some(5.0)), row("0xee", "EE", 2.0, Some(1.0))];
+        let old: Vec<&Value> = old.iter().collect();
+        let listed = vec![row("0xaa", "AA", 1.1, None), row("0xbb", "BB", 3.0, None)];
+        let mut asked = vec![];
+        let rows = chain_list(8453, Some(listed), &old, &["0xee".into(), "0xff".into(), "0xbb".into()], |a| {
+            asked.push(a.to_string());
+            row(a, "FF", 0.0, None)
+        });
+        // 0xee comes from the last list, 0xbb is in a pool; only 0xff is new
+        assert_eq!(asked, vec!["0xff".to_string()]);
+        let addrs: Vec<&str> = rows.iter().map(|r| r["address"].as_str().unwrap()).collect();
+        assert_eq!(addrs, vec!["0xaa", "0xbb", "0xee", "0xff"]);
+        assert_eq!(rows[2]["symbol"], "EE");
+        // no pool list (the source is down): the last rows stand
+        let rows = chain_list(8453, None, &old, &["0xee".into()], |_| panic!("nothing new"));
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn balances_from_the_chain_or_else_the_last_ones_at_todays_price() {
+        let old = [row("0xaa", "AA", 1.0, Some(5.0))];
+        let old: Vec<&Value> = old.iter().collect();
+        let mut rows = vec![row("0xaa", "AA", 2.0, None), row("0xbb", "BB", 3.0, None)];
+        apply_balances(&mut rows, None, &old);
+        assert_eq!(rows[0]["balance"], 5.0);
+        assert_eq!(rows[0]["balance_usd"], 10.0);
+        assert_eq!(rows[1]["balance"], Value::Null);
+        // 2.5 and 0 tokens with 6 decimals
+        let res = vec![Ok(json!("0x2625a0")), Err(json!("reverted"))];
+        apply_balances(&mut rows, Some(res), &old);
+        assert_eq!(rows[0]["balance"], 2.5);
+        assert_eq!(rows[0]["balance_usd"], 5.0);
+        assert_eq!(rows[1]["balance"], 0.0);
+    }
+
+    /// On a copy of the app folder (never the live one), with the network:
+    /// ALM_HOME=<copy> cargo test -- --ignored tokens_timing_on_a_copy --nocapture
+    #[test]
+    #[ignore]
+    fn tokens_timing_on_a_copy() {
+        let home = std::env::var("ALM_HOME").expect("set ALM_HOME to a copy of the app folder");
+        assert!(!home.to_lowercase().replace('\\', "/").trim_end_matches('/').ends_with("appdata/local/stablealm"), "not on the live folder");
+        let s = crate::settings::load_settings();
+        let wallet = s["wallet"].as_str().unwrap().to_string();
+        let mut extra = vec![];
+        for c in crate::chains::all() {
+            extra.extend(crate::settings::funding_tokens(&s, c.id).into_iter().map(|a| (c.id, a)));
+        }
+        for i in 0..3 {
+            let t = Instant::now();
+            let (r, busy) = tokens(&wallet, &extra);
+            println!("tokens call {i}: {:.2} s, {} rows, refreshing {busy}", t.elapsed().as_secs_f64(), r.len());
+        }
+        while crate::store::refreshing(&tokens_key(&wallet)) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let t = Instant::now();
+        let (r, _) = tokens(&wallet, &extra);
+        println!("tokens after the background refresh: {:.2} s, {} rows", t.elapsed().as_secs_f64(), r.len());
+    }
 }

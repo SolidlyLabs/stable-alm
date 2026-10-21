@@ -2030,7 +2030,7 @@ dependencies = [
 
 [[package]]
 name = "stable-alm"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "getrandom 0.2.17",
  "hmac",

@@ -133,6 +133,8 @@
   .sbw .gh{font:650 10px var(--sans);letter-spacing:1px;text-transform:uppercase;color:var(--mute);padding:12px 10px 4px}
   .sr{display:grid;grid-template-columns:minmax(0,1fr) 92px 120px auto;gap:12px;align-items:center;padding:9px 10px;border-radius:10px;cursor:pointer;border:1px solid transparent}
   .sr:hover{background:var(--card2)}.sr.on{border-color:color-mix(in srgb,var(--acc) 45%,var(--line2));background:var(--acc-soft)}
+  .hlb{display:inline-flex;align-items:center;justify-content:center;height:15px;padding:0 5px;margin-left:5px;border-radius:99px;background:#0b2724;vertical-align:-2px;flex:none}.hlb svg{width:13px;height:10px;display:block}
+  .nd .hd .hlb{margin-left:0;height:16px}
   .sr .nm2{font-weight:650;font-size:13px}.sr .nm2 .tag{font:600 9.5px var(--sans);letter-spacing:.5px;text-transform:uppercase;padding:1px 6px;border-radius:99px;margin-left:6px;background:var(--card2);color:var(--mute);vertical-align:1px}
   .sr .ds{font-size:11.5px;color:var(--mute);line-height:1.35;margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
   .sr .apr{font:650 15px var(--mono);text-align:right}.sr .apr small{display:block;font:400 10.5px var(--sans);color:var(--mute)}
@@ -161,7 +163,8 @@
   .optm tr:last-child td{border-bottom:0}
   .optm td input[type=number]{width:96px}
   .optm .tfs{display:flex;gap:4px;flex-wrap:wrap}.optm .tfs label{display:flex;gap:3px;align-items:center;border:1px solid var(--line2);border-radius:7px;padding:2px 6px;font-size:11.5px}
-  .optm .bar{height:6px;border-radius:4px;background:var(--line);overflow:hidden;margin:8px 0}.optm .bar i{display:block;height:100%;background:var(--acc);transition:width .3s}
+  .optm .pbar{height:6px;border-radius:4px;background:var(--line);overflow:hidden;margin:8px 0;padding:0}.optm .pbar i{display:block;height:100%;background:var(--acc);transition:width .6s ease-out}
+  .optm .stall{color:var(--warn)}
   .optm .awin{position:relative;display:inline-block;width:120px;height:10px;border-radius:3px;background:var(--line);vertical-align:middle;overflow:hidden}.optm .awin i{position:absolute;top:0;bottom:0}.optm .awin i.f{background:color-mix(in srgb,var(--mute) 35%,transparent)}.optm .awin i.v{background:var(--info)}.optm .awin i.e{background:color-mix(in srgb,var(--warn) 55%,transparent)}.optm .awin i.e.ok{background:var(--ok)}.optm .awin i.e.no{background:var(--bad)}
   .optm .res td.num{font-family:var(--mono);text-align:right}.optm .res th.num{text-align:right}
   .optm .res tr.cur td{color:var(--fg2);background:var(--card2)}
@@ -324,12 +327,17 @@
     rebalance: ["Rebalance when", "out", "Moves to the wanted range when its condition is true (default: the price left the range), after the delay and not within the cooldown."],
     exit: ["Exit when", "out", "Withdraws everything while its condition is true (after the delay). Deposits again when 're-enter' is true (default: when the exit condition is false). 'to' picks the token to wait in: above 0.5 all token0, below −0.5 all token1, else the strategy's 'Withdraw into'; when it changes sides while out, the wait switches token."],
     hold: ["Hold when", "out", "While true, nothing is done at all: a freeze, like the depeg guard."],
+    latch: ["Latch", "cond", "True from the first bar where 'set' is true until a bar where 'reset' is true (when both are, it stays true). Use it for hysteresis: switch on at one level and off at another, so a signal near its threshold does not flip every bar."],
+    vol_price: ["Volatile token price", "src", "The pool's volatile token (the one that is not the numeraire) priced in the numeraire, in ticks (1 tick = 0.01%). It rises when that token rises, whichever way round the pool is, so a trend signal on it means the same on every pool: below its average, the token a hedge shorts is falling. Not drawn on the chart (on some pools it is the pool's price upside down). 'token' is +1 when the volatile token is token0 and -1 when it is token1: into an Exit's 'to', the exit waits in the volatile token (through a scale of -1, in the other one)."],
+    funding: ["Funding", "src", "What a short of the pool's volatile token earns in funding on Hyperliquid, in % a year (negative: the short pays). Hourly, from Hyperliquid's history; for a pair of two volatile tokens, the token's funding less the numeraire's. Backtests only. Use it to hedge only while the short is paid, for example into Hedge 'when' through a > block."],
+    hedge: ["Hedge", "out", "A perp short on Hyperliquid against the pool's volatile token (backtests only for now). It holds 'ratio' of what the pool holds of the token, traded back when it drifts 'band' % from that and by at least 'min $'. Its margin, at 'leverage', comes out of the pool's capital. 'when' (optional) hedges only while true; 'ratio' (optional) sets the ratio bar by bar. Results add the short's price P&L, the funding it earned or paid, and its fees."],
   };
   const TFS = [[1, "1 min"], [5, "5 min"], [15, "15 min"], [30, "30 min"], [60, "1 hour"], [240, "4 hours"], [1440, "1 day"]];
   const BOOL = new Set(["gt", "lt", "cross_above", "cross_below", "between", "distance_gt", "and", "or", "not", "out_of_range", "range_shift"]);
   const PNAME = {hours: "hours", k: "k", value: "value", below: "below", above: "above", delay_min: "delay (min)", cooldown_min: "cooldown (min)",
     fast: "fast (h)", slow: "slow (h)", signal: "signal (h)", d_hours: "%D (h)", stoch_hours: "stoch (h)", af: "start step", step: "step", max_af: "max step",
-    hot_hours: "hot (h)", span: "span", every_hours: "every (h)", turnover: "turnover", guard: "guard", tenkan: "conversion (h)", kijun: "base (h)", span_b: "span B (h)", shift: "shift (h)", unit_hours: "unit (h)", window: "window (h)", smooth: "smooth (h)", q: "q"};
+    hot_hours: "hot (h)", span: "span", every_hours: "every (h)", turnover: "turnover", guard: "guard", tenkan: "conversion (h)", kijun: "base (h)", span_b: "span B (h)", shift: "shift (h)", unit_hours: "unit (h)", window: "window (h)", smooth: "smooth (h)", q: "q",
+    ratio: "ratio", band_pct: "band (%)", min_usd: "min $", leverage: "leverage", smooth_h: "smooth (h)"};
   const kcat = k => (L.lib && L.lib.catalog || []).find(x => x.kind === k);
   const gcol = k => (GROUPS.find(g => g[0] === (K[k] || [])[1]) || [, , "var(--mute)"])[2];
 
@@ -483,7 +491,7 @@
       box.querySelector(".pp-list").innerHTML =
         (mine.length ? `<div class="pp-gl"><span>Your pools</span><span>${usd(tot, 0)} deployed</span></div>` + mine.map(o => poolRow(o, cur)).join("") : "") +
         (rest.length ? `<div class="pp-gl"><span>All pools</span><span>by TVL</span></div>` + rest.map(o => poolRow(o, cur)).join("") : "") +
-        (!mine.length && !rest.length ? `<div class="pp-empty">${MARKET ? "No pool matches." : "Loading pools…"}</div>` : "");
+        (!mine.length && !rest.length ? (MARKET ? `<div class="pp-empty">No pool matches.</div>` : skList(5)) : "");
       kb = -1;
       if (q) mark(0);
     }
@@ -546,6 +554,10 @@
     L.capital = defaultCapital(cfg, m);
     // the live spot check as the pool has it (Pools › ⚙), so the backtest blocks where the worker would
     L.costs.max_spot_dev_ticks = cfg && cfg.max_spot_dev_ticks > 0 ? cfg.max_spot_dev_ticks : (L.pegged ? 10 : Math.max(10 * sp(), 100));
+    // and its other live limits: the dearest swap it makes and its rebalances a day (the backtest
+    // counts swaps past the first and blocks moves past the second, as the worker does)
+    L.costs.max_swap_cost_bps = cfg && cfg.max_swap_cost_bps >= 0 ? cfg.max_swap_cost_bps : 3;
+    L.costs.max_actions_per_day = cfg && cfg.max_actions_per_day >= 0 ? cfg.max_actions_per_day : 5;
     if (cfg) {
       // the pool's own strategy opens first
       if (!L.cur || L.cur.fromPool !== L.pool) setCur({id: null, fromPool: L.pool, name: `${cfg.name}: current strategy`, description: "What this pool runs now.",
@@ -624,10 +636,13 @@
   }
   const aprOf = id => L.apr && L.apr.key === aprKey() ? L.apr.rows[id] : null;
   const aprTxt = a => a == null ? "" : (a >= 0 ? "+" : "−") + fmt(Math.abs(a), Math.abs(a) < 10 ? 2 : 1) + "%";
+  // Hyperliquid's mark (from its app), in its mint on a dark pill: strategies and blocks that short there
+  const HL = `<span class="hlb" title="hedges on Hyperliquid"><svg viewBox="0 0 21 16" aria-label="Hyperliquid" role="img"><path fill="#97FCE4" d="M20.4523 7.53888C20.471 9.21764 20.1196 10.8218 19.4292 12.3544C18.4434 14.5368 16.0799 16.3213 13.9218 14.4218C12.1616 12.8736 11.8351 9.73059 9.19798 9.27049C5.7088 8.84769 5.62483 12.8923 3.34536 13.3492C0.804661 13.8653 -0.0380915 9.59381 -0.000774032 7.65391C0.0365434 5.71401 0.552769 2.98759 2.76072 2.98759C5.30142 2.98759 5.47245 6.83318 8.69731 6.62489C11.8911 6.40728 11.947 2.40624 14.0337 0.693288C15.8343 -0.786505 17.952 0.298469 19.0125 2.07982C19.9952 3.72749 20.4274 5.66116 20.4492 7.53888H20.4523Z"/></svg></span>`;
+  const hedges = st => !!st && st.type === "graph" && (st.nodes || []).some(n => n.kind === "hedge");
   function renderLib() {
     const box = $("sbList");
     if (!box || $("labSb").classList.contains("hide")) return;
-    if (!L.lib) { box.innerHTML = `<div class="empty">Loading the library…</div>`; return; }
+    if (!L.lib) { box.innerHTML = skList(7); return; }
     const q = $("sbQ").value.trim().toLowerCase(), f = L.sbf || "all", sort = $("sbSort").value;
     let xs = allItems().filter(x => (f === "all" || (f === "mine") === x.id.startsWith("u:")) && (!q || (x.name + " " + (x.description || "")).toLowerCase().includes(q)));
     const apr = x => { const r = aprOf(x.id); return r && r.apr != null ? r.apr : -1e9; };
@@ -636,7 +651,7 @@
     const row = x => {
       const r = aprOf(x.id), mine = x.id.startsWith("u:"), inCmp = L.compare.includes(x.id);
       return `<div class="sr ${L.cur && L.cur.id === x.id ? "on" : ""}" data-lib="${esc(x.id)}" title="open this strategy in the editor">
-        <div><div class="nm2">${esc(x.name)}<span class="tag">${mine ? "mine" : x.category}</span></div><div class="ds">${esc(x.description || typeLabel(x.strategy))}</div></div>
+        <div><div class="nm2">${esc(x.name)}<span class="tag">${mine ? "mine" : x.category}</span>${hedges(x.strategy) ? HL : ""}</div><div class="ds">${esc(x.description || typeLabel(x.strategy))}</div></div>
         <div class="apr">${x.draft ? `<span class="small" style="color:var(--warn)" title="${esc(x.draft)}">unfinished</span>` : r ? r.error ? `<span class="bad small" title="${esc(r.error)}">error</span>` : `<span class="${r.apr >= 0 ? "pos" : "neg"}">${aprTxt(r.apr)}</span><small>a year</small>`
           : L.pool ? `<span class="skl"></span><span class="skl"></span>` : ""}</div>
         <div class="ex">${r && !r.error ? `vs hold <b>${(r.vs_hodl >= 0 ? "+" : "−") + fmt(Math.abs(r.vs_hodl), 2)}</b><br>moves <b>${r.actions}</b> · in range <b>${fmt(r.time_in_range * 100, 0)}%</b>` : !r && !x.draft && L.pool ? `<span class="skl"></span><span class="skl"></span>` : ""}</div>
@@ -727,14 +742,15 @@
     openMenu(r.left, r.bottom + 6, `<div class="ttl">Save as a new strategy</div><input data-rename id="saName" value="${esc(nm)}" maxlength="60" placeholder="name" spellcheck="false">
       <input data-rename id="saDesc" value="${esc(L.cur.description || "")}" maxlength="400" placeholder="description (optional)" spellcheck="false">
       <div class="row" style="padding:4px 2px 2px"><span class="sp"></span><button class="sm" id="saGo">Save</button></div>`, m => {
-      const go = () => { const n = $("saName").value.trim(); if (!n) return toast("Give the strategy a name", true); L.cur.name = n; L.cur.description = $("saDesc").value.trim(); closeMenu(); save(true); };
+      const go = () => { const n = $("saName").value.trim(); if (!n) return toast("Give the strategy a name", true); L.cur.name = n; if ($("labName")) $("labName").value = n; L.cur.description = $("saDesc").value.trim(); closeMenu(); save(true); };
       $("saName").focus(); $("saName").select();
       m.querySelectorAll("input").forEach(i => i.onkeydown = e => { if (e.key === "Enter") { e.preventDefault(); go(); } });
       $("saGo").onclick = go;
     });
   }
   async function save(asNew) {
-    const name = ($("labName") && $("labName").value.trim()) || L.cur.name;
+    // L.cur.name: the title field keeps it current, and Save as sets it from its own box
+    const name = (L.cur.name || "").trim();
     if (!name) return toast("Give the strategy a name", true);
     const id = !asNew && L.cur.id && L.cur.id.startsWith("u:") ? L.cur.id : undefined;
     try {
@@ -933,10 +949,10 @@
       el.style.left = (n.x || 0) + "px"; el.style.top = (n.y || 0) + "px";
       const ticks = c.params.some(p => p.ticks);
       // every block but position conditions and outputs may run on longer candles
-      const tfOk = !c.stateful && !["range", "ladder", "rebalance", "exit", "hold"].includes(n.kind);
+      const tfOk = !c.stateful && !["range", "ladder", "rebalance", "exit", "hold", "hedge"].includes(n.kind);
       const tfSel = tfOk ? `<span data-help="lab-tf">candles</span><select data-tf="1" data-help="lab-tf">${TFS.map(([v, l]) => `<option value="${v}" ${(n.tf || 5) === v ? "selected" : ""}>${l}</option>`).join("")}</select>` : "";
       const tok = n.kind === "token_price" ? `<span>token</span><button class="sec sm" data-tokpick="${esc(n.id)}" data-help="lab-token" title="pick the token to watch">${esc(n.tsym || (n.token ? n.token.slice(0, 8) + "…" : "pick…"))}</button>` : "";
-      el.innerHTML = `<div class="hd" title="${esc(errs[n.id] || K[n.kind][2])}"><i style="background:${gcol(n.kind)}"></i><b>${esc(n.label || K[n.kind][0])}</b><span class="x" data-del="${esc(n.id)}" title="remove">×</span></div>
+      el.innerHTML = `<div class="hd" title="${esc(errs[n.id] || K[n.kind][2])}"><i style="background:${gcol(n.kind)}"></i><b>${esc(n.label || K[n.kind][0])}</b>${n.kind === "hedge" ? HL : ""}<span class="x" data-del="${esc(n.id)}" title="remove">×</span></div>
         <div class="bd">${c.inputs.map(p => `<div class="pr ${c.optional.includes(p) ? "opt" : ""}"><span>${p}${c.optional.includes(p) ? " (optional)" : ""}</span><span class="dot in" data-in="${p}" style="background:${n.in && n.in[p] ? "var(--fg2)" : "var(--line2)"}"></span></div>`).join("")}
         ${c.outputs.map(p => `<div class="pr" style="justify-content:flex-end"><span>${p}</span><span class="dot out" data-out="${p}" style="background:${BOOL.has(n.kind) || ["stale", "hot"].includes(p) ? "var(--warn)" : c.price ? "var(--acc)" : "var(--info)"}"></span></div>`).join("")}
         ${c.params.length || ticks || tfSel || tok ? `<div class="pm">${tok}${c.params.map(p => `<span>${PNAME[p.name] || p.name}</span><input type="number" step="any" data-p="${p.name}" value="${(n.p || {})[p.name] ?? p.default}" min="${p.min}" max="${p.max}">`).join("")}
@@ -1160,7 +1176,7 @@
   // and every column is centred on the tallest one.
   function tidy() {
     const s = L.cur.strategy, nodes = s.nodes, by = Object.fromEntries(nodes.map(n => [n.id, n]));
-    const SINKS = ["range", "ladder", "rebalance", "exit", "hold"];
+    const SINKS = ["range", "ladder", "rebalance", "exit", "hold", "hedge"];
     const ins = n => Object.values(n.in || {}).map(src => by[src[0]]).filter(Boolean);
     const outs = {};
     nodes.forEach(n => ins(n).forEach(m => (outs[m.id] = outs[m.id] || []).push(n)));
@@ -1241,7 +1257,7 @@
   const SRC = {};
   async function tokenMenu(x, y, id) {
     const cid = L.chain || 8453;
-    openMenu(x, y, `<div class="mute small" style="padding:8px 10px">Loading the tokens that can be watched…</div>`, () => {});
+    openMenu(x, y, skList(4), () => {});
     try { SRC[cid] = SRC[cid] || await api("/api/price_sources/" + cid); }
     catch (e) { closeMenu(); toast(e.message, true); return; }
     const r = SRC[cid], k = d => d == null ? "" : "$" + (d >= 1e6 ? fmt(d / 1e6, 1) + "M" : d >= 1e3 ? fmt(d / 1e3, 1) + "k" : fmt(d, 0));
@@ -1343,14 +1359,14 @@
   }
   function dupNode(id) {
     const n = node(id);
-    if (["range", "ladder", "rebalance", "exit", "hold"].includes(n.kind)) return toast(`There can be only one ${K[n.kind][0]} block.`, true);
+    if (["range", "ladder", "rebalance", "exit", "hold", "hedge"].includes(n.kind)) return toast(`There can be only one ${K[n.kind][0]} block.`, true);
     const c = JSON.parse(JSON.stringify(n));
     c.id = freeId(n.kind); c.x = (n.x || 0) + 24; c.y = (n.y || 0) + 24;
     L.cur.strategy.nodes.push(c); L.sel = c.id; changed(); drawNodes();
   }
   function pasteNode(at) {
     const c = JSON.parse(JSON.stringify(L.clip));
-    if (["range", "ladder", "rebalance", "exit", "hold"].includes(c.kind) && L.cur.strategy.nodes.some(n => n.kind === c.kind)) return toast(`There can be only one ${K[c.kind][0]} block.`, true);
+    if (["range", "ladder", "rebalance", "exit", "hold", "hedge"].includes(c.kind) && L.cur.strategy.nodes.some(n => n.kind === c.kind)) return toast(`There can be only one ${K[c.kind][0]} block.`, true);
     c.id = freeId(c.kind); c.x = Math.round(at[0]); c.y = Math.round(at[1]);
     // keep inputs that still exist
     for (const [p, src] of Object.entries(c.in || {})) if (!node(src[0])) delete c.in[p];
@@ -1460,7 +1476,7 @@
   // The settings of the selected blocks to tune (each with a range, or candle lengths), then a run
   // on the server (optimize.rs) that searches them on the pool's swaps, in parallel; the best
   // settings can be applied to the strategy.
-  const TF_OK = n => { const c = kcat(n.kind); return c && !c.stateful && !["range", "ladder", "rebalance", "exit", "hold"].includes(n.kind); };
+  const TF_OK = n => { const c = kcat(n.kind); return c && !c.stateful && !["range", "ladder", "rebalance", "exit", "hold", "hedge"].includes(n.kind); };
   function optRange(p, v) {
     const lo = p.min, hi = p.max;
     let a, b;
@@ -1564,7 +1580,7 @@
     const spec = autoSpec || {params, objective: $("optObj").value, runs: Math.max(10, Math.min(2000, +$("optRuns").value || 150)), holdout: $("optHold").checked,
                   folds: Math.max(1, Math.min(24, Math.round(+$("optFolds").value || 4)))};
     const req = {chain_id: L.chain, pool: L.pool, days: L.days, capital_usd: L.capital, costs: L.costs, strategy: body(L.cur.strategy), optimize: spec};
-    OPT = {state: "starting", spec, base: JSON.parse(JSON.stringify(L.cur.strategy)), key: L.cur.id || L.cur.name, t0: Date.now()};
+    OPT = {state: "starting", spec, base: JSON.parse(JSON.stringify(L.cur.strategy)), key: L.cur.id || L.cur.name, t0: Date.now(), fails: 0};
     $("optFoot").innerHTML = `<span class="mute small" id="optStep">starting…</span><span class="sp" style="flex:1"></span><button class="sec" id="optStop">Stop</button>`;
     $("optStop").onclick = () => { if (OPT && OPT.id) api(`/api/backtest/${OPT.id}/stop`, {}).then(() => { $("optStep").textContent = "stopping: finishing the runs in flight…"; }).catch(e => toast(e.message, true)); };
     optRender(el, null);
@@ -1576,11 +1592,21 @@
       }
     }
     OPT.state = "running";
+    // the clock and the time left move every second, also while the app is slow to answer
+    const ticker = setInterval(() => { if (!OPT || OPT.state !== "running") return clearInterval(ticker); if (OPT.lastPartial) optRender(el, OPT.lastPartial, true); }, 1000);
     while (OPT && OPT.id) {
       await new Promise(r => setTimeout(r, 700));
       if (!OPT) return;
       let j;
-      try { j = await api("/api/backtest/" + OPT.id); } catch (e) { toast(e.message, true); break; }
+      // a slow or failed answer while the machine is busy is not the end of the search: ask again
+      try { j = await api("/api/backtest/" + OPT.id); OPT.fails = 0; }
+      catch (e) {
+        if (!OPT) return;
+        if (/not found|no such/i.test(e.message) || ++OPT.fails > 20) { toast(e.message, true); OPT.state = "error"; break; }
+        await new Promise(r => setTimeout(r, 1500)); continue;
+      }
+      if (!OPT) return;
+      OPT.lastPoll = Date.now();
       if (!OPT) return;
       if (j.state === "running") { if ($("optStep")) $("optStep").textContent = j.step || "running"; if (j.partial) OPT.lastPartial = j.partial; optRender(el, OPT.lastPartial || null, !!OPT.lastPartial); continue; }
       if (j.state === "error") { OPT.state = "error"; $("optBody").innerHTML = `<p class="bad">${esc(j.error)}</p>`; $("optFoot").innerHTML = `<span class="sp" style="flex:1"></span><button class="sec" data-x="close">Close</button>`; return; }
@@ -1621,6 +1647,29 @@
   }
   // walk-forward: the verdict, every tested period for re-tuning, the current settings and the
   // references, and how the tuned settings moved from period to period
+  // each change the final tuning made, tried on its own against the current settings on the tested
+  // periods: what it does there decides whether it is applied
+  function effectsHtml(W) {
+    const E = W.effects || [];
+    if (!E.length) return "";
+    const name = k => { const [nid, p] = k.split("."); const n = node(nid); return `${n ? (n.label || K[n.kind][0]) : nid} ${p === "tf" ? "candles" : PNAME[p] || p}`; };
+    const val = (k, v) => v == null ? "–" : k.endsWith(".tf") ? (TFS.find(t => t[0] === v) || [0, v + " min"])[1] : fmt(v, Math.abs(v) < 10 ? 3 : 1);
+    const cur = (W.rows || []).find(x => x.name === "current settings");
+    const d = t => new Date(t * 1000).toLocaleDateString(undefined, {month: "short", day: "numeric"});
+    const tag = {none: ["no effect", "mute", "left at the current value: it changes nothing here"], helps: ["helps", "pos", "kept: better on average and in most periods"],
+                 hurts: ["hurts", "neg", "left at the current value: worse in most periods"], mixed: ["mixed", "warn", "left at the current value: better in some periods, worse in others"]};
+    const diff = (v, c) => v == null || c == null ? `<td class="num">–</td>` : `<td class="num"><span class="${v - c > 1e-9 ? "pos" : v - c < -1e-9 ? "neg" : "mute"}">${Math.abs(v - c) < 0.05 ? "=" : (v > c ? "+" : "−") + fmt(Math.abs(v - c), 0)}</span></td>`;
+    return `<details open style="margin:0 0 10px"><summary class="small"><b>Each tuned change on its own</b> against the current settings, %/yr points per period</summary>
+      <p class="mute small" style="margin:4px 0">Every number is a slice of one continuous run, as the backtest runs the strategy. Only a change that helps on its own (better on average, in most periods and over the whole span) is kept; one that changes nothing, hurts or is mixed stays at its current value. The last ${W.train || "few"} periods are where the values were tuned.</p>
+      <div style="overflow-x:auto"><table class="res small"><tr><th>setting</th><th class="num">now</th><th class="num">tuned</th><th>on its own</th>${(W.cols || []).map(c => `<th class="num">${d(c.from)}</th>`).join("")}<th class="num">mean</th><th class="num" title="the whole span, one continuous run: this change alone less the current settings">whole span</th></tr>
+      ${E.map(e => { const t = tag[e.effect] || [e.effect, "", ""]; return `<tr><td>${esc(name(e.key))}</td><td class="num mono">${esc(val(e.key, e.current))}</td><td class="num mono">${esc(val(e.key, e.tuned))}</td>
+        <td><span class="${t[1]}" title="${esc(t[2])}"><b>${t[0]}</b></span> <span class="mute">${e.better}↑ ${e.worse}↓</span></td>
+        ${(e.values || []).map((v, j) => diff(v, cur && cur.values[j])).join("")}<td class="num">${e.mean_diff == null ? "–" : `<span class="${e.mean_diff > 0 ? "pos" : e.mean_diff < 0 ? "neg" : "mute"}">${e.mean_diff > 0 ? "+" : ""}${fmt(e.mean_diff, 1)}</span>`}</td>${diff(e.whole, W.whole_current)}</tr>`; }).join("")}</table></div></details>`;
+  }
+  const wholeTxt = t => {
+    const w = t && t.whole, f = x => x == null || !isFinite(x) ? "–" : (x > 0 ? "+" : "") + fmt(x, 0) + "%/yr";
+    return w ? `<div class="mute" style="margin-top:4px">Over the whole span, one continuous run as the backtest shows it: <b>${f(w.tuned)}</b> with these, <b>${f(w.current)}</b> now.</div>` : "";
+  };
   function walkRender(b, r) {
     const W = r.walk || {}, sg = r.suggestion || {};
     const name = k => { const [nid, p] = k.split("."); const n = node(nid); return `${n ? (n.label || K[n.kind][0]) : nid} ${p === "tf" ? "candles" : PNAME[p] || p}`; };
@@ -1630,9 +1679,11 @@
     const d = t => new Date(t * 1000).toLocaleDateString(undefined, {month: "short", day: "numeric"});
     b.innerHTML = `<div class="${sg.apply != null ? "pos" : "warn"}" style="margin:0 0 10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px">
         <b>${sg.apply != null ? "✓ Re-tuning holds up." : "Suggestion: no new settings."}</b> <span>${esc(sg.why || "")}</span>
-        ${sg.apply != null ? `<div style="margin-top:6px" class="small">Tuned on the last ${W.train || "all"} periods: ${Object.entries(now.values || {}).map(([k, v]) => `${esc(name(k))} <b>${esc(val(k, v))}</b>`).join(" · ")} <button class="sm" data-apply="0" style="margin-left:6px">Apply these settings</button></div>` : ""}</div>
+        ${sg.apply != null ? `<div style="margin-top:6px" class="small">Tuned on the last ${W.train || "all"} periods: ${Object.entries(now.values || {}).map(([k, v]) => `${esc(name(k))} <b>${esc(val(k, v))}</b>`).join(" · ")} <button class="sm" data-apply="0" style="margin-left:6px">Apply these settings</button>${wholeTxt(now)}</div>`
+          : now && now.lead ? `<div style="margin-top:6px" class="small">Helped on its own: ${Object.entries(now.values || {}).map(([k, v]) => `${esc(name(k))} <b>${esc(val(k, v))}</b>`).join(" · ")} <button class="sec sm" data-apply="0" style="margin-left:6px" title="a lead to test, not a proven improvement">Apply only this</button>${wholeTxt(now)}</div>` : ""}</div>
       <p class="mute small" style="margin:0 0 8px">${W.periods} periods of ${fmt(W.period_days, 1)} days; ${W.tested} tested, each tuned on ${W.train ? `the ${W.train} before it` : "all before it"} (${W.runs_per_period} runs per period), on ${(r.picked || []).length ? (r.picked || []).map(k => esc(name(k))).join(", ") : "no setting (none moved the score)"}. %/yr of the capital.${r.stopped ? " Stopped early." : ""}</p>
       ${periodsHtml({cols: W.cols, rows}, "Out of sample, period by period", "Re-tuned every period: each period traded with settings tuned only on the periods before it. The current settings, the strategy without its exits and holding on the same periods; nothing was tuned for the last two.")}
+      ${effectsHtml(W)}
       ${(W.stability || []).length ? `<details style="margin:0 0 10px"><summary class="small"><b>How the tuned settings moved</b> from period to period (a large spread is tuning that chases noise)</summary>
         <div style="overflow-x:auto"><table class="res small"><tr><th>setting</th><th class="num" title="standard deviation over the range, 0 to 1">spread</th>${(W.steps || []).map(s => `<th class="num">${d(s.test.from)}</th>`).join("")}</tr>
         ${W.stability.map(x => `<tr><td>${esc(name(x.key))}</td><td class="num ${x.spread > 0.3 ? "warn" : ""}">${fmt(x.spread, 2)}</td>${x.values.map(v => `<td class="num mono">${esc(val(x.key, v))}</td>`).join("")}</tr>`).join("")}</table></div></details>` : ""}`;
@@ -1647,6 +1698,25 @@
       drawNodes(); changed();
       toast("Settings applied: rerunning the backtest.");
     };
+  }
+  // walk-forward pace: runs done in total and the seconds each takes, measured after screening
+  function walkPace(r) {
+    const st = r.step || 0, n = r.steps || 1, done = r.done || 0, total = r.total || 1, now = Date.now();
+    const P = OPT.pace || (OPT.pace = {});
+    if (st === 0) return {frac: 0.08 * done / total, left: null};
+    // the last phase, each tuned change alone: a few runs per change, timed at the rate so far
+    if (r.phase === "effects") {
+      const per = P.s && P.s.length > 1 && P.s[P.s.length - 1][1] > P.s[0][1] ? (P.s[P.s.length - 1][0] - P.s[0][0]) / 1000 / (P.s[P.s.length - 1][1] - P.s[0][1]) : null;
+      return {frac: 0.97 + 0.03 * done / total, left: per != null ? per * (total - done) + 1 : null};
+    }
+    const all = (n + 1) * total, got = (st - 1) * total + done;
+    if (P.t1 == null) { P.t1 = now; P.g1 = got; }
+    // the rate over the last minute or so of samples: steps tuned on more data run slower
+    (P.s || (P.s = [])).push([now, got]);
+    while (P.s.length > 2 && now - P.s[0][0] > 60000) P.s.shift();
+    const [ta, ga] = P.s[0], per = got > ga ? (now - ta) / 1000 / (got - ga) : got > P.g1 ? (now - P.t1) / 1000 / (got - P.g1) : null;
+    const left = per != null && now - P.t1 > 4000 ? per * (all - got) + 2 : null;
+    return {frac: 0.08 + 0.92 * got / all, left};
   }
   function optRender(el, r, live) {
     const b = $("optBody");
@@ -1672,19 +1742,26 @@
     const att = live && r.attempt ? `<p style="margin:0 0 6px"><b>Attempt ${r.attempt} of ${r.of}</b>: ${esc(r.label || "")}</p>` : "";
     // how far the whole run is (0 to 1), and the time it has taken and likely still takes
     const part = (r.done || 0) / (r.total || 1);
-    const frac = !live ? 1 : r.mode === "walk" ? Math.min(1, ((r.step || 0) + part) / ((r.steps || 1) + 2))
+    // walk-forward: after screening (step 0) every step, each period and the final tuning, has the
+    // same number of runs, so the work left is runs, timed at the rate measured since screening
+    const W = live && r.mode === "walk" ? walkPace(r) : null;
+    const frac = !live ? 1 : W ? W.frac
       : r.attempt ? Math.min(1, ((r.attempt - 1) + (r.phase === "screening" ? 0.35 * part : r.phase === "trying" ? part : r.attempt === 1 || r.attempt === 2 || r.attempt === 5 ? 0.35 + 0.65 * part : part)) / (r.of || 5))
       : part;
     const clock = sec => sec >= 3600 ? `${Math.floor(sec / 3600)} h ${Math.round(sec % 3600 / 60)} min` : sec >= 60 ? `${Math.floor(sec / 60)}:${String(Math.round(sec % 60)).padStart(2, "0")} min` : `${Math.round(sec)} s`;
     const eta = () => {
       const el = OPT && OPT.t0 ? (Date.now() - OPT.t0) / 1000 : 0;
-      const left = frac >= 0.02 && el >= 5 ? el * (1 - frac) / frac : null;
+      const left = W ? W.left : frac >= 0.02 && el >= 5 ? el * (1 - frac) / frac : null;
+      const quiet = OPT && OPT.lastPoll ? (Date.now() - OPT.lastPoll) / 1000 : 0;
+      if (quiet >= 6) return `<div class="small stall" style="margin:4px 0 8px"><b>${clock(el)}</b> elapsed · no word from the app for ${Math.round(quiet)} s: it is busy, the search goes on</div>`;
+      if (left != null && left < 1.5) return `<div class="small" style="margin:4px 0 8px"><b>${clock(el)}</b> <span class="mute">elapsed</span> · <b>finishing</b> <span class="mute">the last runs and the summary</span></div>`;
       return `<div class="small" style="margin:4px 0 8px"><b>${clock(el)}</b> <span class="mute">elapsed</span>${left != null ? ` · <b>${r.attempt ? "up to " : ""}about ${clock(left)}</b> <span class="mute">left${r.attempt ? " (it stops at the first attempt that holds up)" : ""}</span>` : ` · <span class="mute">estimating…</span>`}</div>`;
     };
-    const bar = `<div class="bar"><i style="width:${Math.round(frac * 100)}%"></i></div>${live ? eta() : ""}`;
+    const bar = `<div class="pbar"><i style="width:${Math.round(frac * 1000) / 10}%"></i></div>${live ? eta() : ""}`;
     if (live && r.mode === "walk") {
       const done = r.done || 0, total = r.total || 1, st = r.step || 0, n = r.steps || 1;
-      const what = st === 0 ? "Screening which settings matter, on the first periods only" : st > n ? "Tuning on the most recent periods: the settings to use now" : `Period ${st} of ${n}: tuning on the periods before it, then trading it`;
+      const what = st === 0 ? "Screening which settings matter, on the first periods only" : r.phase === "effects" ? "Trying each tuned change on its own, on every tested period"
+        : st > n ? "Tuning on the most recent periods: the settings to use now" : `Period ${st} of ${n}: tuning on the periods before it, then trading it`;
       b.innerHTML = `${bar}<div class="mute small">${what}: ${done} of ${total} runs.</div>`;
       return;
     }
@@ -1824,7 +1901,7 @@
   }
   function addNode(kind, x, y) {
     const s = L.cur.strategy, c = kcat(kind);
-    if (["range", "ladder", "rebalance", "exit", "hold"].includes(kind) && s.nodes.some(n => n.kind === kind)) return toast(`There is already a ${K[kind][0]} block.`, true);
+    if (["range", "ladder", "rebalance", "exit", "hold", "hedge"].includes(kind) && s.nodes.some(n => n.kind === kind)) return toast(`There is already a ${K[kind][0]} block.`, true);
     const n = {id: freeId(kind), kind, x: Math.round(x / 6) * 6, y: Math.round(y / 6) * 6, p: {}, in: {}};
     for (const p of c.params) n.p[p.name] = p.default;
     s.nodes.push(n);
@@ -2333,7 +2410,7 @@
           ${c.main ? "" : `<span class="cx" ${c.hold ? "data-unhold" : `data-unpick="${esc(c.r.id)}"`} title="remove from the comparison">×</span>`}
           <span data-help="lab-r-pnl"><div class="big ${c.r.pnl === B.pnl ? "best" : ""}">${sg(c.r.pnl)}</div><div class="apr">${fmt(c.r.pnl / res.capital * 100 * 365 / (res.span_days || res.days), 2)}% a year</div></span></div>
         <div class="g">${cell("vs hold", c.hold ? null : c.r.vs_hodl, "hodl", "lab-r-hodl")}${cell("fees", c.r.fees, "fees", "lab-r-fees", c.r.park_yield > 0 ? `${sg(c.r.fees)} <span class="mute small" data-help="lab-r-park">+ ${sg(c.r.park_yield)} parked</span>` : undefined)}${cell("emissions", c.r.emissions, "emis", "lab-r-emis")}${cell("costs", -(c.r.swap_costs + c.r.gas), "costs", "lab-r-costs")}
-          ${cell("IL", c.hold ? null : c.r.il, "il", "lab-r-il")}${cell("moves", null, null, "lab-r-moves", String(c.r.actions))}${cell("in range", null, null, "lab-r-tir", c.hold ? "–" : fmt(c.r.time_in_range * 100, 1) + "%")}${cell("end value", null, null, "lab-r-value", "$" + fmt(c.r.value * U, dec))}</div>
+          ${cell("IL", c.hold ? null : c.r.il, "il", "lab-r-il")}${c.r.hedge ? cell("hedge", c.r.hedge_net, null, "lab-r-hedge", `${sg(c.r.hedge_net)} <span class="mute small">price ${sg(c.r.hedge_pnl)} · funding ${sg(c.r.funding)} · fees ${sg(-c.r.hedge_fees)}</span>`) : ""}${cell("moves", null, null, "lab-r-moves", String(c.r.actions))}${cell("in range", null, null, "lab-r-tir", c.hold ? "–" : fmt(c.r.time_in_range * 100, 1) + "%")}${cell("end value", null, null, "lab-r-value", "$" + fmt(c.r.value * U, dec))}</div>
         ${c.main ? `<div class="of" id="labOf">${overfitHtml()}</div>` : ""}</div>`).join("") +
       `<div class="mute small" style="margin:-2px 0 8px">Amounts in USD${sym && !/^(USDC|USDT|USDC\.E|USDBC|DAI)$/i.test(sym) ? ` (counted in ${esc(sym)} at $${fmt(U, U > 100 ? 0 : 4)})` : ""}. Green is the best of the runs.</div>`;
     $("labMeta").innerHTML = `${new Date(res.from * 1000).toLocaleDateString()} – ${new Date(res.to * 1000).toLocaleDateString()}${res.span_days != null && res.span_days < res.days - 1 ? ` <span class="warn" title="the pool has no swaps before this: the period starts at its history">(all the pool's history: ${fmt(res.span_days, 0)} of ${res.days} days)</span>` : ""} · ${res.swaps.toLocaleString()} swaps · capital $${fmt(res.capital_usd ?? res.capital * U, 0)}${res.entry_cost > 0 ? ` (buying ${esc(sym)} with it cost $${fmt(res.entry_cost * U, 2)})` : ""}`;

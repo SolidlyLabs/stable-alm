@@ -1,6 +1,8 @@
 // The first-start welcome wizard (server side: rs/src/onboard.rs). Opens by itself until setup was
 // finished or skipped once (installs updated from before it too); Settings → "Run the setup wizard" opens it again.
-// Steps: welcome → wallet (create, recovery phrase, private key) → chains → parking → ready → done.
+// Steps: welcome → wallets (one or several: create, recovery phrase, private key, or watch an address) → chains →
+// parking → ready → done. While the app has one wallet with neither address nor key, that one is filled; else a
+// wallet is added (wallets.rs).
 (() => {
   const css = `
 #wz{position:fixed;inset:0;z-index:200;display:grid;place-items:center;padding:24px;overflow:auto;overflow-x:hidden;
@@ -10,6 +12,8 @@
 /* the same look, cheap to animate: each orb is blurred once in its own layer and moved by the compositor (one blur
    over the whole aurora was redone every frame), and the grain is a noise tile drawn once on a canvas (grainTile)
    instead of an SVG turbulence filter; together they held the first second of animation */
+#wz .wzlist{display:grid;gap:8px}#wz .wzw{display:flex;align-items:center;gap:12px;animation:wzUp .4s both}
+#wz .wzw .wd{width:10px;height:10px;border-radius:50%;background:var(--wc);flex:none}
 #wz .aur{position:fixed;inset:0;overflow:hidden;pointer-events:none;z-index:-1;opacity:.55}
 #wz .aur i{position:absolute;width:46vmax;height:46vmax;border-radius:50%;mix-blend-mode:screen;filter:blur(60px);will-change:transform;backface-visibility:hidden}
 #wz .grain{position:fixed;inset:0;pointer-events:none;z-index:-1;opacity:.06;background-size:160px 160px}
@@ -44,7 +48,7 @@
 #wz .feat{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:8px 0 28px}
 #wz .feat div{padding:16px;border:1px solid var(--line);border-radius:14px;background:var(--card2)}#wz .feat b{display:block;margin:8px 0 4px}#wz .feat span{color:var(--mute);font-size:12.5px}
 #wz .feat svg{color:var(--acc)}
-#wz .opts{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+#wz .opts{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
 #wz .opt{white-space:normal;min-width:0;display:flex;flex-direction:column;align-items:flex-start;justify-content:flex-start;text-align:left;padding:20px 18px;border:1px solid var(--line2);border-radius:16px;background:var(--card2);color:var(--fg);cursor:pointer;
   transition:transform .25s cubic-bezier(.2,.8,.2,1),border-color .25s,box-shadow .25s;font:inherit}
 #wz .opt:hover{transform:translateY(-3px);border-color:var(--acc);box-shadow:0 18px 40px -20px color-mix(in srgb,var(--acc) 60%,transparent)}
@@ -133,10 +137,11 @@
     auto: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12a9 9 0 0 1 15.5-6.3L21 8M21 3v5h-5M21 12a9 9 0 0 1-15.5 6.3L3 16M3 21v-5h5"/></svg>',
     shield: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/><path d="m9 12 2 2 4-4"/></svg>',
     park: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 17l5-5 4 4 8-8M15 8h5v5"/></svg>',
+    redo: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>',
     copy: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>',
   };
-  const STEPS = ["Welcome", "Wallet", "Chains", "Parking", "Ready"];
-  const W = {step: 0, dir: "r", mode: null, gen: null, shown: false, saved: null, accts: null, pick: 0, phrase: "", pass: "", sugg: null, park: new Set(), parkOn: true, interval: null, info: null};
+  const STEPS = ["Welcome", "Wallets", "Chains", "Parking", "Ready"];
+  const W = {step: 0, dir: "r", mode: null, gen: null, shown: false, saved: null, accts: null, pick: 0, phrase: "", pass: "", sugg: null, park: new Set(), parkOn: true, interval: null, info: null, ws: [], target: null, label: ""};
   const e = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
   const chainColor = id => (typeof cc === "function" ? cc(id) : "var(--acc)");
   const $w = id => document.getElementById(id);
@@ -161,12 +166,14 @@
   }
   async function open(force) {
     try { W.info = await call("/api/onboard"); } catch (x) { return; }
+    W.saved = null;
     if (!force && !W.info.needed) return;
     if ($w("wz")) return;
     // an install updated from before the wizard keeps its parking as it is: switched as before, its own pools ticked
     const had = ((W.info.parking || {}).pools || []).length > 0;
     Object.assign(W, {step: 0, dir: "r", mode: null, gen: null, shown: false, saved: W.info.signer.stored ? W.info.signer.address : null, accts: null, pick: 0, phrase: "", pass: "",
-                      interval: W.info.interval_s, sugg: null, parkOn: had ? !!W.info.parking.enabled : true, hadPark: had});
+                      interval: W.info.interval_s, sugg: null, parkOn: had ? !!W.info.parking.enabled : true, hadPark: had, target: null, label: ""});
+    await loadWallets();
     // the Solidly wordmark: the dashboard header's own copy, so the logo lives in one place
     const solidlyMark = () => { const m = document.querySelector(".brand .sl-logo"); return m ? m.outerHTML : "<b>Solidly</b>"; };
     const d = document.createElement("div"); d.id = "wz"; d.setAttribute("role", "dialog"); d.setAttribute("aria-modal", "true"); d.setAttribute("aria-label", "Setup");
@@ -211,33 +218,83 @@
     $w("wzLater").onclick = () => finish(false);
   }
 
-  // ---- 1 wallet
+  // ---- 1 wallets
+  // every wallet the app manages; a lone wallet with neither address nor key (a fresh install) is filled here
+  async function loadWallets() { try { W.ws = (await call("/api/wallets")).wallets || []; } catch (x) { W.ws = []; } }
+  const emptyOne = () => !W.ws.length ? "main" : W.ws.length === 1 && !W.ws[0].address && !(W.ws[0].key || {}).stored ? W.ws[0].id : null;
   function wallet() {
-    if (W.saved && !W.mode) return walletKept();
-    if (!W.mode) {
-      view(`<p class="kick">Step 1 · Wallet</p><h2>Which wallet should it manage?</h2>
-        <p class="lead">The app signs its own transactions, so it needs a key. It is stored encrypted for your Windows account and never leaves this computer.</p>
-        <div class="opts">
-          <button class="opt" data-m="create"><div class="ic">${I.plus}</div><b>Create a new wallet</b><span>A fresh wallet just for the ALM. Recommended: keep it apart from your main funds.</span></button>
-          <button class="opt" data-m="phrase"><div class="ic">${I.words}</div><b>Recovery phrase</b><span>Import from the 12 or 24 words of MetaMask, Rabby or a hardware wallet.</span></button>
-          <button class="opt" data-m="key"><div class="ic">${I.key}</div><b>Private key</b><span>Paste a 64-character hex key exported from another wallet.</span></button></div>
-        ${nav(0, null)}`);
-      document.querySelectorAll("#wz .opt").forEach(b => b.onclick = () => { W.mode = b.dataset.m; W.dir = "r"; render(); });
-      return;
-    }
-    ({create: walletCreate, phrase: walletPhrase, key: walletKey})[W.mode]();
+    if (W.mode) return ({create: walletCreate, phrase: walletPhrase, key: walletKey, watch: walletWatch})[W.mode]();
+    if (W.target) return walletChoice();
+    const e1 = emptyOne();
+    if (e1) { W.target = e1; return walletChoice(); }
+    walletList();
+  }
+  function walletList() {
+    view(`<p class="kick">Step 1 · Wallets</p><h2>${W.ws.length > 1 ? "Your wallets" : "Your wallet is ready"}</h2>
+      <p class="lead">Each wallet has its own pools, split of funds, strategies and statistics. Send each the tokens you want managed, plus a little ETH for gas on each chain it uses.</p>
+      <div class="wzlist">${W.ws.map((w, i) => `<div class="box wzw" style="--wc:${e(w.color)};animation-delay:${i * .05}s"><span class="wd"></span>
+        <div style="min-width:0"><b>${e(w.label)}</b><div class="muted">${w.address ? (window.privAddr ? window.privAddr(w.address) : e(w.address)) : "no address yet"} ·
+          ${(w.key || {}).stored ? "key stored" : "watched only"}</div></div><span class="sp" style="flex:1"></span>
+        ${w.address ? `<button class="btn sec" data-copy="${e(w.address)}" style="padding:7px 12px">${I.copy} Copy</button>`
+          : `<button class="btn" data-setup="${e(w.id)}" style="padding:7px 14px">Set up</button>`}</div>`).join("")}</div>
+      <button class="btn sec" id="wzAddW" style="margin-top:12px">${I.plus} Add another wallet</button>
+      ${nav(0, true, "Continue")}`);
+    document.querySelectorAll("#wz [data-copy]").forEach(b => b.onclick = ev => copy(b.dataset.copy, ev.currentTarget));
+    // a wallet with neither address nor key: give it one (key, phrase, new key or an address to watch)
+    document.querySelectorAll("#wz [data-setup]").forEach(b => b.onclick = () => { W.target = b.dataset.setup; W.dir = "r"; render(); });
+    $w("wzAddW").onclick = () => { W.target = "new"; W.label = ""; W.dir = "r"; render(); };
+    $w("wzNext").onclick = () => go(2);
+  }
+  function walletChoice() {
+    const first = W.target !== "new", tw = W.ws.find(w => w.id === W.target), named = first && tw && W.ws.length > 1;
+    view(`<p class="kick">Step 1 · ${first ? "Wallet" : "Another wallet"}</p><h2>${named ? `Set up ${e(tw.label)}` : first ? "Which wallet should it manage?" : "Add a wallet"}</h2>
+      <p class="lead">${first ? "The app signs its own transactions, so it needs a key. It is stored encrypted for your Windows account and never leaves this computer. You can add more wallets next."
+        : "It gets its own pools and split of funds, and starts in dry run. Its key is stored encrypted for your Windows account."}</p>
+      ${first ? "" : `<div style="max-width:360px;margin-bottom:14px"><label class="muted">Name</label><input type="text" id="wzName" maxlength="40" placeholder="e.g. Cold stables" value="${e(W.label)}" style="margin-top:6px"></div>`}
+      <div class="opts">
+        <button class="opt" data-m="create"><div class="ic">${I.plus}</div><b>Create a new wallet</b><span>A fresh wallet just for the ALM. Recommended: keep it apart from your main funds.</span></button>
+        <button class="opt" data-m="phrase"><div class="ic">${I.words}</div><b>Recovery phrase</b><span>Import from the 12 or 24 words of MetaMask, Rabby or a hardware wallet.</span></button>
+        <button class="opt" data-m="key"><div class="ic">${I.key}</div><b>Private key</b><span>Paste a 64-character hex key exported from another wallet.</span></button>
+        <button class="opt" data-m="watch"><div class="ic">${I.shield}</div><b>Watch an address</b><span>Balances, positions and statistics only; nothing is signed.</span></button></div>
+      <div class="err" id="wzErr"></div>
+      ${first && !named ? nav(0, null) : nav(null, null, "", `<button class="btn ghost" id="wzBackList">← Back to the wallets</button>`)}`);
+    if ($w("wzBackList")) $w("wzBackList").onclick = () => { W.target = null; W.dir = "l"; render(); };
+    if ($w("wzName")) { $w("wzName").oninput = ev => { W.label = ev.target.value; }; $w("wzName").focus(); }
+    document.querySelectorAll("#wz .opt").forEach(b => b.onclick = () => {
+      if (W.target === "new" && !W.label.trim()) { $w("wzErr").textContent = "Give the wallet a name first."; $w("wzName").focus(); return; }
+      W.mode = b.dataset.m; W.dir = "r"; render();
+    });
   }
   const backToChoice = `<button class="btn ghost" id="wzChoice">← Other options</button>`;
   function wireChoice() { const b = $w("wzChoice"); if (b) b.onclick = () => { W.mode = null; W.dir = "l"; W.gen = null; W.shown = false; render(); }; }
-  function walletKept() {
-    view(`<p class="kick">Step 1 · Wallet</p><h2>Your wallet is ready</h2>
-      <p class="lead">The app signs with this wallet. Send it the tokens you want managed, plus a little ETH for gas on each chain you use.</p>
-      <div class="box"><div class="muted">Managed wallet</div><div class="row2" style="margin-top:6px"><span class="addr" id="wzAddr">${(window.privAddr ? window.privAddr(W.saved) : e(W.saved))}</span>
-        <button class="btn sec" id="wzCopyA" style="padding:7px 12px">${I.copy} Copy</button></div></div>
-      ${nav(0, true, "Continue", `<button class="btn ghost" id="wzOther">Use another wallet</button>`)}`);
-    $w("wzCopyA").onclick = ev => copy(W.saved, ev.currentTarget);
-    $w("wzOther").onclick = () => { W.saved = null; W.mode = null; render(); };
-    $w("wzNext").onclick = () => go(2);
+  // a wallet is stored: an empty one filled through its own routes, a new one added with its key in one step
+  async function storeWallet(what) {
+    if (W.target === "new") {
+      await call("/api/wallets", {action: "add", label: W.label.trim(), ...what});
+    } else if (what.private_key) {
+      await call(`/api/key?wallet=${encodeURIComponent(W.target)}`, {private_key: what.private_key});
+    } else if (what.phrase) {
+      await call(`/api/onboard/phrase_save?wallet=${encodeURIComponent(W.target)}`, what);
+    } else {
+      await call(`/api/settings?wallet=${encodeURIComponent(W.target)}`, {wallet: what.address.toLowerCase()});
+    }
+    W.mode = null; W.target = null; W.label = ""; W.gen = null; W.dir = "r";
+    await loadWallets();
+    render();
+  }
+  function walletWatch() {
+    view(`<p class="kick">Step 1 · Watch an address</p><h2>Which address?</h2>
+      <p class="lead">The app shows its balances, positions and statistics. It cannot trade for it until you set its key in Settings.</p>
+      <input type="text" id="wzWa" autocomplete="off" spellcheck="false" placeholder="0x…">
+      <div class="err" id="wzErr"></div>${nav(null, "disabled", "Watch it", backToChoice)}`);
+    wireChoice();
+    const a = $w("wzWa");
+    a.oninput = () => { $w("wzNext").disabled = !/^0x[0-9a-fA-F]{40}$/.test(a.value.trim()); };
+    $w("wzNext").onclick = async () => {
+      const b = $w("wzNext"); b.disabled = true; b.innerHTML = `<span class="spin"></span> Saving`;
+      try { await storeWallet({address: a.value.trim()}); } catch (x) { $w("wzErr").textContent = x.message; b.disabled = false; b.textContent = "Watch it"; }
+    };
+    a.focus();
   }
   async function walletCreate() {
     if (!W.gen) {
@@ -247,7 +304,9 @@
     const g = W.gen;
     view(`<p class="kick">Step 1 · New wallet</p><h2>Save your private key</h2>
       <p class="lead">This key <b>is</b> the wallet. Whoever has it controls the funds; if you lose it and this computer, they are gone. Store it in a password manager before you continue.</p>
-      <div class="box" style="margin-bottom:12px"><div class="muted">Address</div><div class="addr" style="margin:4px 0 14px">${e(g.address)}</div>
+      <div class="box" style="margin-bottom:12px"><div class="row2" style="justify-content:space-between"><span class="muted">Address</span>
+          <button class="btn sec" id="wzRedo" style="padding:7px 12px" title="make another key: repeat until you like the address">${I.redo} New address</button></div>
+        <div class="addr" style="margin:4px 0 14px">${e(g.address)}</div>
         <div class="row2" style="justify-content:space-between"><span class="muted">Private key</span>
           <span class="row2"><button class="btn sec" id="wzShow" style="padding:7px 12px">${W.shown ? "Hide" : "Reveal"}</button>
           <button class="btn sec" id="wzCopyK" style="padding:7px 12px">${I.copy} Copy key</button></span></div>
@@ -256,18 +315,20 @@
       <label class="chk" style="margin-top:14px"><input type="checkbox" id="wzAck"> I have stored the private key somewhere safe.</label>
       <div style="margin-top:12px;max-width:340px"><label class="muted">To check, type the last 4 characters of the key</label><input type="text" id="wzLast" maxlength="4" autocomplete="off" spellcheck="false" style="margin-top:6px"></div>
       <div class="err" id="wzErr"></div>
-      ${nav(null, "disabled", "Use this wallet", backToChoice)}`);
+      ${nav(null, "disabled", W.target === "new" ? "Add this wallet" : "Use this wallet", backToChoice)}`);
     wireChoice();
     const toggle = () => { W.shown = !W.shown; $w("wzSecret").classList.toggle("shown", W.shown); $w("wzShow").textContent = W.shown ? "Hide" : "Reveal"; };
     $w("wzShow").onclick = toggle; $w("wzSecret").onclick = () => { if (!W.shown) toggle(); };
     $w("wzCopyK").onclick = ev => copy(g.private_key, ev.currentTarget);
+    // another key and address; the one shown is dropped (it was never stored)
+    $w("wzRedo").onclick = () => { W.gen = null; W.shown = false; walletCreate(); };
     const check = () => { $w("wzNext").disabled = !($w("wzAck").checked && $w("wzLast").value.toLowerCase() === g.private_key.slice(-4).toLowerCase()); };
     $w("wzAck").onchange = check; $w("wzLast").oninput = check;
     $w("wzNext").onclick = () => saveKey(g.private_key);
   }
   async function saveKey(k) {
     const b = $w("wzNext"); b.disabled = true; b.innerHTML = `<span class="spin"></span> Saving`;
-    try { const r = await call("/api/key", {private_key: k}); W.saved = r.address; W.gen = null; W.mode = null; go(2); }
+    try { await storeWallet({private_key: k}); }
     catch (x) { $w("wzErr").textContent = x.message; b.disabled = false; b.textContent = "Try again"; }
   }
   function walletKey() {
@@ -305,8 +366,8 @@
     draw();
     $w("wzNext").onclick = async () => {
       if (W.accts) { const b = $w("wzNext"); b.disabled = true; b.innerHTML = `<span class="spin"></span> Saving`;
-        try { const r = await call("/api/onboard/phrase_save", {phrase: ta.value, passphrase: $w("wzPass").value, index: W.pick});
-          W.saved = r.address; W.accts = null; W.mode = null; W.phrase = ""; W.pass = ""; ta.value = ""; go(2); }
+        try { await storeWallet({phrase: ta.value, passphrase: $w("wzPass").value, index: W.pick});
+          W.accts = null; W.phrase = ""; W.pass = ""; ta.value = ""; }
         catch (x) { $w("wzErr").textContent = x.message; b.disabled = false; b.textContent = "Use this account"; } return; }
       const b = $w("wzNext"); b.disabled = true; b.innerHTML = `<span class="spin"></span> Deriving`;
       try { const r = await call("/api/onboard/phrase", {phrase: ta.value, passphrase: $w("wzPass").value, count: 5});
@@ -368,7 +429,10 @@
     const pools = [];
     (W.sugg || []).forEach(c => c.pools.forEach(p => { if (W.park.has(p.chain_id + ":" + p.token)) pools.push({chain_id: p.chain_id, token: p.token, pool: p.pool}); }));
     old.forEach(p => { if (W.park.has(p.chain_id + ":" + p.token) && !pools.some(q => q.chain_id === p.chain_id && q.token === p.token)) pools.push(p); });
-    try { await call("/api/settings", {parking: {enabled: W.parkOn && pools.length > 0, pools}}); go(4); }
+    try {
+      for (const w of W.ws.length ? W.ws : [{id: "main"}]) await call(`/api/settings?wallet=${encodeURIComponent(w.id)}`, {parking: {enabled: W.parkOn && pools.length > 0, pools}});
+      go(4);
+    }
     catch (x) { $w("wzErr").textContent = x.message; b.disabled = false; b.textContent = "Continue"; }
   }
 
@@ -380,7 +444,8 @@
       <div class="row2" style="margin-bottom:18px"><span class="muted">Check the pools every</span><div class="seg" id="wzIv">${[[120, "2 min"], [300, "5 min"], [900, "15 min"]].map(([s, l]) =>
         `<button data-s="${s}" class="${s === iv ? "on" : ""}">${l}</button>`).join("")}</div></div>
       <div class="todo">
-        <div><span class="k">1</span><span><b>Fund the wallet</b><span>${W.saved ? `Send tokens and a little gas to <span class="mono">${(window.privAddr ? window.privAddr(W.saved) : e(W.saved))}</span>.` : "Add a key in Settings, then send it tokens and a little gas."}</span></span></div>
+        <div><span class="k">1</span><span><b>Fund the wallet${W.ws.length > 1 ? "s" : ""}</b><span>${W.ws.some(w => w.address) ? `Send tokens and a little gas to ${W.ws.filter(w => w.address).map(w =>
+          `<b>${e(w.label)}</b> <span class="mono">${(window.privAddr ? window.privAddr(w.address) : e(w.address))}</span>`).join(", ")}.` : "Add a key in Settings, then send it tokens and a little gas."}</span></span></div>
         <div><span class="k">2</span><span><b>Add a pool</b><span>Pools tab: pick a pegged pair, give it capital, test its strategy in the Strategy lab.</span></span></div>
         <div><span class="k">3</span><span><b>Watch a few dry-run cycles, then go live</b><span>The Activity tab shows what it would have done.</span></span></div></div>
       <div class="err" id="wzErr"></div>${nav(3, true, "Finish setup")}`);

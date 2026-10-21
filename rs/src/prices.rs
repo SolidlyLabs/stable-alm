@@ -58,7 +58,7 @@ pub fn router_allowed(cid: u64, addr: &str) -> bool {
     if default_routers(cid).contains(&a.as_str()) {
         return true;
     }
-    std::fs::read_to_string(crate::paths::config().join("routers.json"))
+    std::fs::read_to_string(crate::paths::app_config().join("routers.json"))
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .and_then(|v| v[cid.to_string()].as_array().cloned())

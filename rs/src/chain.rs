@@ -160,6 +160,12 @@ pub fn slot0(cid: u64, pool: &str) -> Result<(BigUint, i64, u64), String> {
     Ok((eth::word_u(&r, 0), eth::word_i(&r, 1).to_i64().unwrap(), eth::word_u(&r, 2).to_u64().unwrap()))
 }
 
+/// The pool's active (in-range) liquidity now.
+pub fn pool_liquidity(cid: u64, pool: &str) -> Result<BigUint, String> {
+    let r = eth_call(cid, pool, &calldata("liquidity()", &[]), None).map_err(|e| e.message)?;
+    Ok(eth::word_u(&r, 0))
+}
+
 /// Calldata of positions(bytes32) for the owner's range.
 pub fn position_calldata(owner: &str, tl: i64, tu: i64) -> String {
     let mut pre = eth::unhex(owner).unwrap_or_default();
@@ -398,8 +404,103 @@ pub fn reconcile_pending(cid: u64, from: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Sign and broadcast; re-broadcast with fees +25% (same nonce) when not mined within 90 s, up to 3
-/// times. Returns once any copy is mined; Err if it reverted. Refuses while execution is paused, and
+/// How a chain's transactions are priced (Settings, Chains & RPC). Normal is the node's suggested
+/// priority fee (tip); low and instant take the median, over the last 20 blocks, of the 10th and
+/// 90th percentile tip paid, kept at or below and at or above normal. The fee cap and the wait
+/// before a +25% fee bump follow the speed too.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum GasSpeed {
+    Low,
+    #[default]
+    Normal,
+    Instant,
+}
+
+impl GasSpeed {
+    pub const ALL: [GasSpeed; 3] = [GasSpeed::Low, GasSpeed::Normal, GasSpeed::Instant];
+    pub fn parse(s: &str) -> Option<GasSpeed> {
+        match s.trim().to_lowercase().as_str() {
+            "low" => Some(GasSpeed::Low),
+            "normal" | "" => Some(GasSpeed::Normal),
+            "instant" => Some(GasSpeed::Instant),
+            _ => None,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            GasSpeed::Low => "low",
+            GasSpeed::Normal => "normal",
+            GasSpeed::Instant => "instant",
+        }
+    }
+    /// The fee cap: base fee × num / den + tip (headroom for the base fee rising before inclusion).
+    fn base_mult(self) -> (u8, u8) {
+        match self {
+            GasSpeed::Low => (5, 4),
+            GasSpeed::Normal => (2, 1),
+            GasSpeed::Instant => (3, 1),
+        }
+    }
+    /// How long a copy may go unmined before it is re-sent with fees +25%.
+    pub fn bump_after(self) -> Duration {
+        Duration::from_secs(match self {
+            GasSpeed::Low => 180,
+            GasSpeed::Normal => 90,
+            GasSpeed::Instant => 45,
+        })
+    }
+}
+
+/// Tips for low, normal and instant, in wei: normal is the node's suggestion (at least 0.001 gwei,
+/// as before); low and instant come from `eth_feeHistory` rewards at the 10th and 90th percentile
+/// (median over the blocks). Without a history, low is half of normal and instant twice it.
+pub fn tips(node_tip: &BigUint, history: Option<&Value>) -> [BigUint; 3] {
+    let normal = node_tip.max(&BigUint::from(1_000_000u64)).clone();
+    let median = |i: usize| -> Option<BigUint> {
+        let mut v: Vec<BigUint> = history?["reward"].as_array()?.iter().filter_map(|r| r[i].as_str().map(eth::parse_uint)).collect();
+        if v.is_empty() {
+            return None;
+        }
+        v.sort();
+        Some(v[v.len() / 2].clone())
+    };
+    let low = median(0).unwrap_or_else(|| &normal / 2u8).min(normal.clone()).max(BigUint::from(1_000u64));
+    let instant = median(1).unwrap_or_default().max(&normal * 2u8);
+    [low, normal, instant]
+}
+
+/// The current base fee and the three tips (low, normal, instant) of a chain.
+pub fn gas_quote(cid: u64) -> Result<(BigUint, [BigUint; 3]), String> {
+    let blk = rpc::call_ok(cid, "eth_getBlockByNumber", json!(["latest", false]))?;
+    let base = eth::parse_uint(blk["baseFeePerGas"].as_str().unwrap_or("0x0"));
+    let node = eth::parse_uint(rpc::call_ok(cid, "eth_maxPriorityFeePerGas", json!([]))?.as_str().unwrap_or("0x0"));
+    let hist = rpc::call_ok(cid, "eth_feeHistory", json!(["0x14", "latest", [10, 90]])).ok();
+    Ok((base, tips(&node, hist.as_ref())))
+}
+
+/// Tip and fee cap of a speed, given the base fee and the three tips.
+pub fn fees_for(speed: GasSpeed, base: &BigUint, tips: &[BigUint; 3]) -> (BigUint, BigUint) {
+    let tip = tips[speed as usize].clone();
+    let (n, d) = speed.base_mult();
+    let max_fee = base * n / d + &tip;
+    (tip, max_fee)
+}
+
+/// The dashboard's gas preview of a chain: the base fee, and for each speed its tip, fee cap and
+/// bump wait, in gwei.
+pub fn gas_preview(cid: u64) -> Result<Value, String> {
+    let (base, t) = gas_quote(cid)?;
+    let gwei = |x: &BigUint| x.to_f64().unwrap_or(0.0) / 1e9;
+    let mut levels = serde_json::Map::new();
+    for sp in GasSpeed::ALL {
+        let (tip, max_fee) = fees_for(sp, &base, &t);
+        levels.insert(sp.name().into(), json!({"tip_gwei": gwei(&tip), "max_fee_gwei": gwei(&max_fee), "bump_after_s": sp.bump_after().as_secs()}));
+    }
+    Ok(json!({"chain_id": cid, "base_gwei": gwei(&base), "speed": crate::chains::get(cid).gas_speed, "levels": levels}))
+}
+
+/// Sign and broadcast at the chain's gas speed; re-broadcast with fees +25% (same nonce) when not
+/// mined within the speed's wait (low 180 s, normal 90 s, instant 45 s), up to 3 times. Returns once any copy is mined; Err if it reverted. Refuses while execution is paused, and
 /// while an earlier transaction on the chain is unresolved.
 pub fn send(cid: u64, acct: &Account, to: &str, data: &str, gas: u64) -> Result<Sent, TxError> {
     if let Some(why) = crate::paths::execution_blocked() {
@@ -408,11 +509,9 @@ pub fn send(cid: u64, acct: &Account, to: &str, data: &str, gas: u64) -> Result<
     reconcile_pending(cid, &acct.address).map_err(|e| err(e, "pending"))?;
     let nonce = hex_u64(&rpc::send_call(cid, "eth_getTransactionCount", json!([acct.address, "pending"]))?.map_err(|e| err(e.to_string(), ""))?);
     let from = acct.address.to_lowercase();
-    let blk = rpc::call_ok(cid, "eth_getBlockByNumber", json!(["latest", false]))?;
-    let base = eth::parse_uint(blk["baseFeePerGas"].as_str().unwrap_or("0x0"));
-    let tip0 = eth::parse_uint(rpc::call_ok(cid, "eth_maxPriorityFeePerGas", json!([]))?.as_str().unwrap_or("0x0"));
-    let mut tip = tip0.max(BigUint::from(1_000_000u64));
-    let mut max_fee = &base * 2u8 + &tip;
+    let speed = GasSpeed::parse(&crate::chains::get(cid).gas_speed).unwrap_or_default();
+    let (base, t) = gas_quote(cid)?;
+    let (mut tip, mut max_fee) = fees_for(speed, &base, &t);
     let mut hashes: Vec<String> = vec![];
     let body = eth::unhex(data).map_err(TxError::from)?;
     for attempt in 0..4 {
@@ -444,7 +543,7 @@ pub fn send(cid: u64, acct: &Account, to: &str, data: &str, gas: u64) -> Result<
         match res {
             Ok(h) => {
                 let h = h.as_str().unwrap_or("").to_lowercase();
-                crate::info!("chain", "broadcast {h} nonce {nonce} (attempt {})", attempt + 1);
+                crate::info!("chain", "broadcast {h} nonce {nonce} (attempt {}, {} gas)", attempt + 1, speed.name());
                 if !h.is_empty() && !hashes.contains(&h) {
                     hashes.push(h);
                 }
@@ -463,7 +562,7 @@ pub fn send(cid: u64, acct: &Account, to: &str, data: &str, gas: u64) -> Result<
             }
         }
         let t0 = Instant::now();
-        while t0.elapsed() < Duration::from_secs(90) {
+        while t0.elapsed() < speed.bump_after() {
             for h in &hashes {
                 if let Some(rc) = receipt(cid, h) {
                     pending_clear(cid, &from, nonce);
@@ -480,7 +579,7 @@ pub fn send(cid: u64, acct: &Account, to: &str, data: &str, gas: u64) -> Result<
         }
         tip = &tip * 5u8 / 4u8 + 1u8;
         max_fee = &max_fee * 5u8 / 4u8 + 1u8;
-        crate::warn!("chain", "not mined in 90s; re-broadcasting with higher fees");
+        crate::warn!("chain", "not mined in {}s ({} gas); re-broadcasting with higher fees", speed.bump_after().as_secs(), speed.name());
     }
     Err(err(format!("transaction (nonce {nonce}) not mined after 3 fee bumps: {hashes:?}; kept as pending, no new transactions on this chain until it resolves"), "not mined"))
 }
@@ -543,5 +642,28 @@ mod tests {
         // a longer message that merely contains the letters gets no code's hint
         let r = revert_reason(&json!({"message": "execution reverted: INSUFFICIENT_ALLOWANCE"}));
         assert!(!r.contains("slippage") && !r.contains("token transfer failed"), "{r}");
+    }
+
+    #[test]
+    fn gas_speeds_order_their_tips_and_fee_caps() {
+        let w = |x: u64| BigUint::from(x);
+        // node suggests 0.002 gwei; the last blocks paid 0.0005 gwei (10th pct) and 0.03 gwei (90th)
+        let hist = json!({"reward": [["0x7a120", "0x1c9c380"], ["0x7a120", "0x1c9c380"], ["0x0", "0x0"]]});
+        let t = tips(&w(2_000_000), Some(&hist));
+        assert_eq!(t, [w(500_000), w(2_000_000), w(30_000_000)]);
+        // normal keeps today's floor of 0.001 gwei; low never exceeds normal, instant is at least twice it
+        let t = tips(&w(0), Some(&json!({"reward": [["0x77359400", "0x1"]]})));
+        assert_eq!(t, [w(1_000_000), w(1_000_000), w(2_000_000)]);
+        // no fee history: half and twice normal
+        assert_eq!(tips(&w(4_000_000), None), [w(2_000_000), w(4_000_000), w(8_000_000)]);
+        let base = w(10_000_000);
+        let t = [w(1_000), w(2_000), w(3_000)];
+        assert_eq!(fees_for(GasSpeed::Low, &base, &t), (w(1_000), w(12_501_000)));
+        assert_eq!(fees_for(GasSpeed::Normal, &base, &t), (w(2_000), w(20_002_000)));
+        assert_eq!(fees_for(GasSpeed::Instant, &base, &t), (w(3_000), w(30_003_000)));
+        assert!(GasSpeed::Low.bump_after() > GasSpeed::Normal.bump_after() && GasSpeed::Normal.bump_after() > GasSpeed::Instant.bump_after());
+        assert_eq!(GasSpeed::parse(""), Some(GasSpeed::Normal));
+        assert_eq!(GasSpeed::parse("Instant"), Some(GasSpeed::Instant));
+        assert_eq!(GasSpeed::parse("fast"), None);
     }
 }

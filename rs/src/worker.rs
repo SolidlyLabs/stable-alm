@@ -1,6 +1,8 @@
 //! The worker loop, per chain: data refresh, account value, claims, SOLID LP,
 //! one executor pass per pool, and a snapshot for the value history. Each pool runs on its own
 //! capital (capital.rs): what it earns stays with it, and money moves between pools only on request.
+//! Several wallets (wallets.rs): each cycle runs them one after another, each inside its scope (its own
+//! folders, pools, key and status block); one wallet's failure does not stop the others.
 
 use crate::capital;
 use crate::chains;
@@ -35,32 +37,41 @@ fn pool_bar_s(cfg: &PoolConfig) -> i64 {
     crate::data::BAR_S
 }
 
+fn fresh_status() -> Value {
+    json!({"state": "starting", "last_cycle": null, "last_error": null, "pools": {}, "mode": "dry run"})
+}
+
 pub fn pool_chain(p: &Value) -> u64 {
     p["chain_id"].as_u64().unwrap_or(chains::BASE)
 }
 
 pub struct Worker {
+    /// The first wallet's status (the agent and `--once` read this one).
     pub status: Mutex<Value>,
+    /// The other wallets' status blocks, by wallet id.
+    others: Mutex<BTreeMap<String, Value>>,
     wake: (Mutex<bool>, Condvar),
     pub stopping: Mutex<bool>,
-    force_claim: Mutex<bool>,
+    /// wallets whose rewards are claimed in the next cycle whatever their schedule
+    force_claim: Mutex<std::collections::BTreeSet<String>>,
     running: Mutex<()>,
 }
 
 impl Worker {
     pub fn new() -> Arc<Worker> {
         Arc::new(Worker {
-            status: Mutex::new(json!({"state": "starting", "last_cycle": null, "last_error": null, "pools": {}, "mode": "dry run"})),
+            status: Mutex::new(fresh_status()),
+            others: Mutex::new(BTreeMap::new()),
             wake: (Mutex::new(false), Condvar::new()),
             stopping: Mutex::new(false),
-            force_claim: Mutex::new(false),
+            force_claim: Mutex::new(Default::default()),
             running: Mutex::new(()),
         })
     }
 
     pub fn request(&self, claim_now: bool) {
         if claim_now {
-            *self.force_claim.lock().unwrap() = true;
+            self.force_claim.lock().unwrap().insert(crate::paths::wallet());
         }
         *self.wake.0.lock().unwrap() = true;
         self.wake.1.notify_all();
@@ -72,7 +83,25 @@ impl Worker {
     }
 
     fn set(&self, k: &str, v: Value) {
-        self.status.lock().unwrap()[k] = v;
+        self.with_status(|st| st[k] = v);
+    }
+
+    /// Change the status block of the wallet this thread works for.
+    fn with_status<T>(&self, f: impl FnOnce(&mut Value) -> T) -> T {
+        let id = crate::paths::wallet();
+        if id == crate::paths::MAIN {
+            return f(&mut self.status.lock().unwrap());
+        }
+        let mut o = self.others.lock().unwrap();
+        f(o.entry(id).or_insert_with(fresh_status))
+    }
+
+    /// A copy of one wallet's status block.
+    pub fn status_of(&self, id: &str) -> Value {
+        if id == crate::paths::MAIN {
+            return self.status.lock().unwrap().clone();
+        }
+        self.others.lock().unwrap().get(id).cloned().unwrap_or_else(fresh_status)
     }
 
     pub fn loop_forever(&self) {
@@ -90,10 +119,10 @@ impl Worker {
                 if left.is_zero() {
                     break;
                 }
-                let minute = settings::load_pools().iter().any(|p| {
+                let minute = crate::wallets::ids().iter().any(|id| crate::paths::scope(id, || settings::load_pools().iter().any(|p| {
                     let c = PoolConfig::from(p);
                     c.enabled && pool_bar_s(&c) == 60
-                });
+                })));
                 // the next minute boundary (bars end on the minute), or the cycle, whichever is first
                 let to_minute = Duration::from_secs(60 - engine::now() as u64 % 60) + Duration::from_millis(1500);
                 let wait = if minute { left.min(to_minute) } else { left };
@@ -118,6 +147,12 @@ impl Worker {
     /// run on 1-minute bars with the budget of the last cycle's valuation.
     fn minute_pass(&self) {
         let _g = self.running.lock().unwrap();
+        for id in crate::wallets::ids() {
+            crate::paths::scope(&id, || self.minute_pass_one());
+        }
+    }
+
+    fn minute_pass_one(&self) {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), String> {
             let s = settings::load_settings();
             let wallet = s["wallet"].as_str().unwrap_or("").to_lowercase();
@@ -125,7 +160,7 @@ impl Worker {
                 return Ok(());
             }
             let (execute, _) = self.mode(&s, &wallet)?;
-            let acct = self.status.lock().unwrap()["account"].clone();
+            let acct = self.with_status(|st| st["account"].clone());
             for p in settings::load_pools() {
                 let cfg = PoolConfig::from(&p);
                 if !cfg.enabled || pool_bar_s(&cfg) != 60 {
@@ -174,7 +209,8 @@ impl Worker {
                 execute = false;
             }
         }
-        Ok((execute, if execute { "LIVE" } else if stop { "paused (STOP)" } else { "dry run" }))
+        let label = if execute { "LIVE" } else if crate::paths::stop_file().exists() { "paused (STOP)" } else if stop { "paused" } else { "dry run" };
+        Ok((execute, label))
     }
 
     /// One pool's executor pass: its replay (on the bars its strategy decides on), the decision and
@@ -184,10 +220,10 @@ impl Worker {
     /// what was there when the cycle began (the account's totals follow at the end of the cycle).
     fn publish(&self, cid: u64, cfg: &PoolConfig, wallet: &str, entry: Value) {
         let acted = ["rebalance", "topup", "exit"].contains(&entry["mode"].as_str().unwrap_or("")) || entry["mode"] == "error";
-        self.status.lock().unwrap()["pools"][&cfg.name] = entry;
+        self.with_status(|st| st["pools"][&cfg.name] = entry);
         if acted {
             match pool_value(cid, cfg, wallet) {
-                Ok((info, ..)) => self.status.lock().unwrap()["account"]["pools"][&cfg.name] = info,
+                Ok((info, ..)) => self.with_status(|st| st["account"]["pools"][&cfg.name] = info),
                 Err(e) => crate::warn!("worker", "[{}] positions not re-read after acting: {e}", cfg.name),
             }
         }
@@ -306,8 +342,19 @@ impl Worker {
         })
     }
 
+    /// One cycle of every wallet, one after another.
     pub fn cycle(&self) {
         let _g = self.running.lock().unwrap();
+        let ids = crate::wallets::ids();
+        self.others.lock().unwrap().retain(|k, _| ids.contains(k));
+        for id in &ids {
+            crate::paths::scope(id, || self.cycle_one());
+        }
+        let _ = std::fs::create_dir_all(crate::paths::app_logs());
+        let _ = std::fs::write(crate::paths::app_logs().join("heartbeat"), engine::now().to_string());
+    }
+
+    fn cycle_one(&self) {
         let t0 = std::time::Instant::now();
         self.set("state", json!("running"));
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.cycle_inner())) {
@@ -321,14 +368,11 @@ impl Worker {
                 self.set("last_error", json!("internal error (panic)"));
             }
         }
-        {
-            let mut s = self.status.lock().unwrap();
+        self.with_status(|s| {
             s["state"] = json!("idle");
             s["last_cycle"] = json!(engine::now());
             s["cycle_seconds"] = json!((t0.elapsed().as_secs_f64() * 10.0).round() / 10.0);
-        }
-        let _ = std::fs::create_dir_all(crate::paths::logs());
-        let _ = std::fs::write(crate::paths::logs().join("heartbeat"), engine::now().to_string());
+        });
     }
 
     fn cycle_inner(&self) -> Result<(), String> {
@@ -382,7 +426,7 @@ impl Worker {
         capital::save(execute, &book);
         self.publish_capital(&by_chain, &wallet, &acct, execute);
 
-        let force = std::mem::take(&mut *self.force_claim.lock().unwrap());
+        let force = self.force_claim.lock().unwrap().remove(&crate::paths::wallet());
         if s["claim"]["enabled"].as_bool().unwrap_or(true) || force {
             let mut claims = Map::new();
             for (cid, pools) in &by_chain {
@@ -411,8 +455,8 @@ impl Worker {
         if s["solid_lp"]["enabled"].as_bool().unwrap_or(false) {
             let cid = s["solid_lp"]["chain_id"].as_u64().unwrap_or(chains::BASE);
             self.set("solid_lp", crate::solid_lp::run(cid, &wallet, &s, execute));
-        } else if let Some(o) = self.status.lock().unwrap().as_object_mut() {
-            o.remove("solid_lp");
+        } else {
+            self.with_status(|st| st.as_object_mut().map(|o| o.remove("solid_lp")));
         }
 
         for (cid, pools) in &by_chain {
@@ -445,7 +489,7 @@ impl Worker {
                         book.set_pool(*cid, &cfg.pool, capital::Tokens::new());
                     }
                     capital::save(execute, &book);
-                    self.status.lock().unwrap()["pools"][&cfg.name] = json!({"mode": "disabled", "chain_id": cid});
+                    self.with_status(|st| st["pools"][&cfg.name] = json!({"mode": "disabled", "chain_id": cid}));
                     continue;
                 }
                 let explicit_exit = !cfg.enabled;
@@ -453,7 +497,7 @@ impl Worker {
                     let why = format!("valuation incomplete on this chain ({}); holding until everything can be valued", incomplete.join("; "));
                     crate::warn!("worker", "[{}] {why}", cfg.name);
                     engine::log(json!({"chain_id": cid, "pool": cfg.pool, "kind": "blocked", "problems": [why.clone()]}));
-                    self.status.lock().unwrap()["pools"][&cfg.name] = json!({"mode": "hold", "chain_id": cid, "error": why, "flvr": info["flvr"]});
+                    self.with_status(|st| st["pools"][&cfg.name] = json!({"mode": "hold", "chain_id": cid, "error": why, "flvr": info["flvr"]}));
                     continue;
                 }
                 let entry = self.run_pool(*cid, cfg, &acct, &wallet, &s, chain_execute);
@@ -476,7 +520,7 @@ impl Worker {
         self.publish_capital(&by_chain, &wallet, &snap, execute);
         // each pool's capital (address → USD), for per-pool performance (agent::perf)
         let mut pc = Map::new();
-        if let Some(chs) = self.status.lock().unwrap()["capital"].as_object() {
+        if let Some(chs) = self.with_status(|st| st["capital"].as_object().cloned()) {
             for ch in chs.values() {
                 for p in ch["pools"].as_object().into_iter().flat_map(|m| m.values()) {
                     if let (Some(a), Some(u)) = (p["pool"].as_str(), p["capital_usd"].as_f64()) {
@@ -565,6 +609,8 @@ fn pool_value(cid: u64, cfg: &PoolConfig, wallet: &str) -> Result<(Value, f64, S
     let (d0, d1) = (10f64.powi(m0.decimals as i32), 10f64.powi(m1.decimals as i32));
     let mut pos = vec![];
     let mut val = 0.0;
+    // the pool's in-range liquidity: the dashboard's estimate takes our in-range share of it
+    let pool_liq = crate::chain::pool_liquidity(cid, &cfg.pool).ok().map(|l| l.to_string());
     for (tl, tu, liq) in wallet_positions(cid, &cfg.pool, wallet)? {
         let (a0, a1) = amounts_at(&sp, tl, tu, &liq);
         let (a0, a1) = (to_f64(&a0) / d0, to_f64(&a1) / d1);
@@ -574,7 +620,7 @@ fn pool_value(cid: u64, cfg: &PoolConfig, wallet: &str) -> Result<(Value, f64, S
                         "in_range": tl <= tick && tick < tu}));
     }
     let in_range = pos.iter().any(|x| x["in_range"] == true);
-    Ok((json!({"chain_id": cid, "tick": tick, "fee_pips": fee, "price": p, "positions": pos, "deployed_usd": val,
+    Ok((json!({"chain_id": cid, "tick": tick, "fee_pips": fee, "price": p, "positions": pos, "deployed_usd": val, "pool_liquidity": pool_liq,
                "symbols": [m0.symbol, m1.symbol], "in_range": in_range, "allocation_pct": cfg.allocation_pct,
                "enabled": cfg.enabled}), val, t0, t1))
 }

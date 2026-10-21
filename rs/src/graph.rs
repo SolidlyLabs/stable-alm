@@ -56,10 +56,11 @@ const MAX_NODES: usize = 60;
 /// follow the node's "unit": ticks, spacings or percent.
 type Spec = (&'static str, &'static [&'static str], &'static [&'static str], &'static [(&'static str, f64, f64, f64)]);
 
-/// Periods up to a week: the live replay keeps 10 days, backtests warm up for 8.
-const H: (&str, f64, f64, f64) = ("hours", 24.0, 0.1, 168.0);
-/// The long-window nodes (breakout, volatility, fee vs arbitrage) reach back up to 15 days.
-const LONG: f64 = 360.0;
+/// Periods up to a year (slow trends, 6–12 month momentum; best on daily candles): the live replay
+/// and backtests' warm-up hold what the graph needs (Graph::replay_days, backtest.rs warmup_s).
+const H: (&str, f64, f64, f64) = ("hours", 24.0, 0.1, 8760.0);
+/// The long-window nodes (breakout, volatility, fee vs arbitrage) reach back up to a year too.
+const LONG: f64 = 8760.0;
 pub const KINDS: &[Spec] = &[
     ("price", &[], &["tick"], &[]),
     ("high_low", &[], &["high", "low"], &[]),
@@ -74,8 +75,8 @@ pub const KINDS: &[Spec] = &[
     ("keltner", &[], &["upper", "mid", "lower"], &[H, ("k", 2.0, 0.0, 20.0)]),
     ("donchian", &[], &["upper", "lower"], &[H]),
     ("rsi", &["in"], &["out"], &[("hours", 14.0, 0.1, 168.0)]),
-    ("lag", &["in"], &["out"], &[("hours", 1.0, 0.0, 168.0)]),
-    ("change", &["in"], &["out"], &[("hours", 1.0, 0.1, 168.0)]),
+    ("lag", &["in"], &["out"], &[("hours", 1.0, 0.0, 8760.0)]),
+    ("change", &["in"], &["out"], &[("hours", 1.0, 0.1, 8760.0)]),
     ("highest", &["in"], &["out"], &[H]),
     ("lowest", &["in"], &["out"], &[H]),
     ("percentile", &["in"], &["out"], &[H, ("q", 0.9, 0.0, 1.0)]),
@@ -96,14 +97,26 @@ pub const KINDS: &[Spec] = &[
     ("volatility", &[], &["out"], &[("hours", 168.0, 2.0, LONG)]),
     ("fee_vs_arb", &[], &["out"], &[("hours", 168.0, 24.0, LONG)]),
     ("token_price", &[], &["tick", "high", "low", "stale"], &[]),
+    // the pool's volatile token (the one that is not the numeraire) priced in the numeraire, in ticks:
+    // rises when that token does, whichever way round the pool is; 'token' is +1 when it is token0
+    // and -1 when it is token1 (into an exit's 'to': wait in the volatile token)
+    ("vol_price", &[], &["tick", "token"], &[]),
+    // what a short of the hedged token earns on Hyperliquid, % a year (backtests only)
+    ("funding", &[], &["apr"], &[]),
     ("add", &["a", "b"], &["out"], &[]),
     ("sub", &["a", "b"], &["out"], &[]),
     ("mul", &["a", "b"], &["out"], &[]),
+    // a / b (NaN where b is 0): e.g. a target volatility over the measured one
+    ("div", &["a", "b"], &["out"], &[]),
     ("scale", &["in"], &["out"], &[("k", 2.0, -1e6, 1e6)]),
     ("offset", &["in"], &["out"], &[("value", 10.0, -1e6, 1e6)]),
     ("min", &["a", "b"], &["out"], &[]),
     ("max", &["a", "b"], &["out"], &[]),
     ("abs", &["in"], &["out"], &[]),
+    // prices are ticks (log price, base 1.0001): to_price turns one into the price itself (1.0001^in),
+    // for arithmetic-price indicators (a mean or z-score of the price, not of its log); to_tick back
+    ("to_price", &["in"], &["out"], &[]),
+    ("to_tick", &["in"], &["out"], &[]),
     ("around", &["center", "width"], &["lower", "upper"], &[("below", 0.5, 0.0, 1.0)]),
     ("switch", &["cond", "a", "b"], &["out"], &[]),
     ("gt", &["a", "b"], &["out"], &[]),
@@ -113,34 +126,44 @@ pub const KINDS: &[Spec] = &[
     ("between", &["in", "lower", "upper"], &["out"], &[]),
     ("distance_gt", &["a", "b"], &["out"], &[("value", 20.0, 0.0, 1e6)]),
     ("and", &["a", "b"], &["out"], &[]),
+    // true from a bar where 'set' is true until one where 'reset' is (set wins when both are)
+    ("latch", &["set", "reset"], &["out"], &[]),
     ("or", &["a", "b"], &["out"], &[]),
     ("not", &["in"], &["out"], &[]),
     ("out_of_range", &[], &["out"], &[("below", 0.0, -1e6, 1e6), ("above", 0.0, -1e6, 1e6)]),
     ("range_shift", &[], &["out"], &[("value", 10.0, 0.0, 1e6)]),
     ("range", &["lower", "upper"], &[], &[]),
-    ("ladder", &[], &[], &[("hours", 24.0, 1.0, 168.0), ("span", 3.0, 0.0, 1e6), ("every_hours", 6.0, 0.1, 168.0), ("turnover", 0.4, 0.0, 1.0), ("guard", 0.0, 0.0, 1e6)]),
+    ("ladder", &[], &[], &[("hours", 24.0, 1.0, 168.0), ("span", 3.0, 0.0, 1e6), ("every_hours", 6.0, 0.1, 168.0), ("turnover", 0.4, 0.0, 1.0), ("guard", 0.0, 0.0, 1e6), ("width", 1.0, 1.0, 1e6)]),
     ("rebalance", &["when"], &[], &[("delay_min", 0.0, 0.0, 10080.0), ("cooldown_min", 60.0, 0.0, 43200.0)]),
-    ("exit", &["when", "reenter", "to"], &[], &[("delay_min", 0.0, 0.0, 10080.0)]),
+    // min_out_hours: stay out at least this long after the exit; confirm_hours: the re-entry
+    // condition must hold this long without a break before depositing again (0: at once)
+    ("exit", &["when", "reenter", "to"], &[], &[("delay_min", 0.0, 0.0, 10080.0), ("min_out_hours", 0.0, 0.0, 8760.0), ("confirm_hours", 0.0, 0.0, 8760.0)]),
     ("hold", &["when"], &[], &[]),
+    // a perp short on Hyperliquid against the pool's volatile token: `ratio` of
+    // the pool's exposure, traded back when it drifts `band_pct` from the target and by at least
+    // `min_usd`; margin at `leverage` (effective) comes out of the pool's capital. `size` adds a
+    // position of its own in the same perp, as a share of the strategy's whole value: + long the
+    // volatile token, − short it (a direction, not a hedge; 0: none)
+    ("hedge", &["when", "ratio", "size"], &[], &[("ratio", 1.0, 0.0, 1.5), ("band_pct", 10.0, 1.0, 50.0), ("min_usd", 25.0, 0.0, 1e6), ("leverage", 2.0, 1.0, 5.0), ("smooth_h", 0.0, 0.0, 168.0), ("size", 0.0, -2.0, 2.0)]),
 ];
 /// Inputs that may stay unconnected (the sink's default applies).
-const OPTIONAL: &[(&str, &str)] = &[("rebalance", "when"), ("exit", "reenter"), ("exit", "to")];
+const OPTIONAL: &[(&str, &str)] = &[("rebalance", "when"), ("exit", "reenter"), ("exit", "to"), ("hedge", "when"), ("hedge", "ratio"), ("hedge", "size")];
 /// Params measured in ticks (scaled by the node's unit).
 const TICK_PARAMS: &[(&str, &str)] =
-    &[("const", "value"), ("offset", "value"), ("distance_gt", "value"), ("out_of_range", "below"), ("out_of_range", "above"), ("range_shift", "value"), ("ladder", "span"), ("ladder", "guard")];
+    &[("const", "value"), ("offset", "value"), ("distance_gt", "value"), ("out_of_range", "below"), ("out_of_range", "above"), ("range_shift", "value"), ("ladder", "span"), ("ladder", "guard"), ("ladder", "width")];
 /// Outputs that are prices (ticks): drawn on the chart.
 const PRICE_LIKE: &[&str] = &["price", "high_low", "sma", "ema", "median", "bollinger", "keltner", "donchian", "around", "offset", "add", "sub", "min", "max", "switch",
     "lag", "highest", "lowest", "percentile", "psar", "ichimoku", "heikin_ashi", "gaussian"];
 /// Kinds a decision can compute at one bar from other values: the only ones a node fed by a
 /// position condition may be.
-const POINTWISE: &[&str] = &["and", "or", "not", "switch", "gt", "lt", "add", "sub", "mul", "scale", "offset", "min", "max", "abs", "between", "distance_gt",
-    "range", "ladder", "rebalance", "exit", "hold"];
+const POINTWISE: &[&str] = &["and", "or", "not", "switch", "gt", "lt", "add", "sub", "mul", "div", "scale", "offset", "min", "max", "abs", "to_price", "to_tick", "between", "distance_gt",
+    "range", "ladder", "rebalance", "exit", "hold", "hedge"];
 /// History a graph may need before its first decision. Backtests warm up 16 days; the live replay
 /// keeps 10 days, or more for a graph that needs it (`Graph::replay_days`).
-pub const MAX_LOOKBACK_HOURS: f64 = 370.0;
+pub const MAX_LOOKBACK_HOURS: f64 = 8800.0;
 const STATEFUL: &[&str] = &["out_of_range", "range_shift"];
 /// The outputs: no timeframe, at most one of each.
-const SINKS: &[&str] = &["range", "ladder", "rebalance", "exit", "hold"];
+const SINKS: &[&str] = &["range", "ladder", "rebalance", "exit", "hold", "hedge"];
 
 fn spec(kind: &str) -> Option<&'static Spec> {
     KINDS.iter().find(|s| s.0 == kind)
@@ -285,7 +308,7 @@ impl Graph {
         if count("range") + count("ladder") != 1 {
             return Err("node strategy: needs exactly one Range or Ladder node".into());
         }
-        for k in ["rebalance", "exit", "hold"] {
+        for k in ["rebalance", "exit", "hold", "hedge"] {
             if count(k) > 1 {
                 return Err(format!("node strategy: at most one {k} node"));
             }
@@ -359,7 +382,16 @@ impl Graph {
             every: (self.param(i, "every_hours") * BARS_PER_HOUR).round().max(1.0) as i64,
             turnover: self.param(i, "turnover"),
             guard: Some(self.param(i, "guard")).filter(|g| *g > 0.0),
+            width: self.param(i, "width").round().max(1.0) as i64,
         })
+    }
+
+    /// The hedge block's settings, when the graph has one.
+    pub fn hedge(&self) -> Option<HedgeCfg> {
+        let i = self.sink("hedge")?;
+        Some(HedgeCfg { ratio: self.param(i, "ratio"), band: self.param(i, "band_pct") / 100.0, min_usd: self.param(i, "min_usd"), leverage: self.param(i, "leverage"),
+                        smooth_h: self.param(i, "smooth_h"), size: self.param(i, "size"),
+                        sized: self.nodes[i].inputs.contains_key("size") })
     }
 
     fn sink(&self, kind: &str) -> Option<usize> {
@@ -461,7 +493,7 @@ fn fee_vs_arb(m: &Market, n: usize) -> Vec<f64> {
         let from = if j == 0 { m.bar_idx[0] } else { m.bar_idx[j - 1] + 1 };
         for k in from..=m.bar_idx[j] {
             if k < m.fee.len() && m.l_active[k] > 0.0 {
-                f[j] += m.fee[k] / m.l_active[k];
+                f[j] += m.sig_fee(k) / m.l_active[k];
             }
         }
         if m.bar_end[j] % 3600 == 0 {
@@ -557,7 +589,7 @@ fn minute_frame(m: &Market) -> Frame {
             for s in from..=i {
                 h = h.max(m.tick[s]);
                 lw = lw.min(m.tick[s]);
-                f += m.fee[s];
+                f += m.sig_fee(s);
             }
             if prev.is_some() && from > i {
                 f = 0.0; // no swap in this minute: the close carries, no fees
@@ -636,6 +668,17 @@ impl Frame {
 }
 
 /// Node outputs at every 5-minute bar of `m`, without other tokens' prices (token_price is NaN).
+
+/// A tick's price, 1.0001^tick
+fn to_price(t: f64) -> f64 {
+    1.0001f64.powf(t)
+}
+
+/// A price's tick, log base 1.0001 (NaN for a price of zero or less)
+fn to_tick(p: f64) -> f64 {
+    if p > 0.0 { p.ln() / 1.0001f64.ln() } else { f64::NAN }
+}
+
 #[cfg(test)]
 pub fn evaluate(g: &Graph, m: &Market) -> Eval {
     evaluate_ext(g, m, &HashMap::new())
@@ -677,6 +720,10 @@ pub fn evaluate_ext(g: &Graph, m: &Market, ext: &Externals) -> Eval {
         let mut put = |port: &str, v: Vec<f64>| outs.push((port.to_string(), v));
         match node.kind {
             "price" => put("tick", close.clone()),
+            "vol_price" => {
+                put("tick", if m.num1 { close.clone() } else { close.iter().map(|x| -x).collect() });
+                put("token", vec![if m.num1 { 1.0 } else { -1.0 }; n]);
+            }
             "high_low" => {
                 put("high", hi.clone());
                 put("low", lo.clone());
@@ -787,6 +834,11 @@ pub fn evaluate_ext(g: &Graph, m: &Market, ext: &Externals) -> Eval {
             }
             // from the swaps themselves, then taken at the candle closes (its hourly LVR needs bars)
             "fee_vs_arb" => put("out", fr.sample(fee_vs_arb(m, ((hours * 3600.0 / m.bar_s as f64).round() as usize).max(1)))),
+            // the backtester puts the hedge's funding in `ext` (backtest.rs funding_series); empty without it
+            "funding" => match ext.get(&i) {
+                Some(x) if fr.fine.is_none() && x.close.len() == nb => put("apr", fr.sample(x.close.clone())),
+                _ => put("apr", vec![f64::NAN; n]),
+            },
             "token_price" => match ext.get(&i) {
                 // 1-minute candles: loaded on the minutes already
                 Some(x) if fr.fine.is_some() && x.close.len() == n => {
@@ -817,14 +869,36 @@ pub fn evaluate_ext(g: &Graph, m: &Market, ext: &Externals) -> Eval {
                     put("stale", vec![1.0; n]);
                 }
             },
+            "latch" => {
+                // as the live engine sees it: each cycle it rebuilds the graph from the last
+                // replay_days of history, the latch off at its start, so a latch remembers only what
+                // happened in that window. On while the last set or reset in the window was a set
+                // (Oct 2026 review: unbounded, a backtest stayed latched where live had forgotten)
+                let (st, rs) = (inp("set"), inp("reset"));
+                // its inputs are empty for their own look-back at the start of live's window, so
+                // live sees events in the last replay_days × 24 − lookback hours only
+                let wb = bars((g.replay_days() as f64 * 24.0 - g.lookback).max(1.0));
+                let mut last: Option<(usize, bool)> = None;
+                put("out", st.iter().zip(&rs).enumerate().map(|(j, (a, r))| {
+                    if truth(*a) {
+                        last = Some((j, true));
+                    } else if truth(*r) {
+                        last = Some((j, false));
+                    }
+                    b(matches!(last, Some((e, true)) if j - e < wb))
+                }).collect());
+            }
             "add" => put("out", zip(inp("a"), inp("b"), &|x, y| x + y)),
             "sub" => put("out", zip(inp("a"), inp("b"), &|x, y| x - y)),
             "mul" => put("out", zip(inp("a"), inp("b"), &|x, y| x * y)),
+            "div" => put("out", zip(inp("a"), inp("b"), &|x, y| if y == 0.0 { f64::NAN } else { x / y })),
             "scale" => put("out", inp("in").iter().map(|x| x * k).collect()),
             "offset" => put("out", inp("in").iter().map(|x| x + val).collect()),
             "min" => put("out", zip(inp("a"), inp("b"), &|x, y| if x.is_nan() || y.is_nan() { f64::NAN } else { x.min(y) })),
             "max" => put("out", zip(inp("a"), inp("b"), &|x, y| if x.is_nan() || y.is_nan() { f64::NAN } else { x.max(y) })),
             "abs" => put("out", inp("in").iter().map(|x| x.abs()).collect()),
+            "to_price" => put("out", inp("in").iter().map(|x| to_price(*x)).collect()),
+            "to_tick" => put("out", inp("in").iter().map(|x| to_tick(*x)).collect()),
             "around" => {
                 let below = node.p.get("below").copied().unwrap_or(0.5);
                 let (c, w) = (inp("center"), inp("width"));
@@ -900,11 +974,17 @@ fn value(g: &Graph, ev: &Eval, i: usize, port: &str, at: &At) -> f64 {
         "add" => inp("a") + inp("b"),
         "sub" => inp("a") - inp("b"),
         "mul" => inp("a") * inp("b"),
+        "div" => {
+            let b = inp("b");
+            if b == 0.0 { f64::NAN } else { inp("a") / b }
+        }
         "scale" => inp("in") * node.p.get("k").copied().unwrap_or(0.0),
         "offset" => inp("in") + val,
         "min" => inp("a").min(inp("b")),
         "max" => inp("a").max(inp("b")),
         "abs" => inp("in").abs(),
+        "to_price" => to_price(inp("in")),
+        "to_tick" => to_tick(inp("in")),
         "between" => {
             let x = inp("in");
             b(x >= inp("lower") && x < inp("upper"))
@@ -942,6 +1022,46 @@ pub fn wanted(g: &Graph, ev: &Eval, bar: usize, spacing: i64) -> Option<(i64, i6
         tu = tl + sp;
     }
     Some((tl.clamp(-887_200, 887_200 - sp), tu.clamp(-887_200 + sp, 887_200)))
+}
+
+/// A hedge block's settings (the ratio is its default; `hedge_ratio` gives the one at a bar).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HedgeCfg {
+    pub ratio: f64,
+    /// the drift from the target that trades, as a fraction of the target
+    pub band: f64,
+    pub min_usd: f64,
+    /// effective leverage: margin = notional / leverage
+    pub leverage: f64,
+    /// hours over which the exposure is averaged before it is hedged (0: as it is)
+    pub smooth_h: f64,
+    /// a position of its own, as a share of the strategy's value: + long, − short
+    pub size: f64,
+    /// whether a signal sets the size (its `size` input is connected)
+    pub sized: bool,
+}
+
+/// The hedge at `bar`: (the share of the pool's exposure to short, the position of its own as a
+/// share of the strategy's value, + long). Both 0 while the hedge's `when` input is connected and
+/// false; else each its input when connected (ratio clamped to 0–1.5, size to ±2; NaN while it warms
+/// up: the block's own), else the block's. None: the graph has no hedge.
+pub fn hedge_ratio(g: &Graph, ev: &Eval, bar: usize, tick: i64, range: Option<(i64, i64)>) -> Option<(f64, f64)> {
+    let h = g.sink("hedge")?;
+    let at = At { bar, tick, range, wanted: None };
+    if let Some(w) = input(g, ev, h, "when", &at) {
+        if !truth(w) {
+            return Some((0.0, 0.0));
+        }
+    }
+    let ratio = match input(g, ev, h, "ratio", &at) {
+        Some(r) if r.is_finite() => r.clamp(0.0, 1.5),
+        _ => g.param(h, "ratio"),
+    };
+    let size = match input(g, ev, h, "size", &at) {
+        Some(r) if r.is_finite() => r.clamp(-2.0, 2.0),
+        _ => g.param(h, "size"),
+    };
+    Some((ratio, size))
 }
 
 /// The token an exit at `bar` waits in: the exit sink's `to` input (+1 token0, -1 token1) when
@@ -1012,9 +1132,22 @@ pub fn decide(g: &Graph, ev: &Eval, st: &mut State, now: i64, bar: usize, tick: 
             st.exit_since = None;
         }
         if st.exited {
+            // when the exit was done: the first decision after it (one bar or cycle later at most)
+            // set at the exit (backtest and engine); a state saved before that was recorded starts now
+            let out = *st.out_since.get_or_insert(now);
             let back = input(g, ev, x, "reenter", &at).map(truth).unwrap_or(!when);
             if !back {
+                st.back_since = None;
                 return Decision::Keep("exited; waiting for the re-entry condition".into());
+            }
+            let since = *st.back_since.get_or_insert(now);
+            let min_out = (g.param(x, "min_out_hours") * 3600.0) as i64;
+            if now - out < min_out {
+                return Decision::Keep(format!("exited; out at least another {}", mins(min_out - (now - out))));
+            }
+            let confirm = (g.param(x, "confirm_hours") * 3600.0) as i64;
+            if now - since < confirm {
+                return Decision::Keep(format!("re-entry condition true; confirming for another {}", mins(confirm - (now - since))));
             }
             return match want {
                 Some((tl, tu)) => Decision::Move { tl, tu, reason: "re-entry condition true: depositing again".into() },
@@ -1142,7 +1275,7 @@ mod tests {
         let bar_idx: Vec<usize> = (0..n).collect();
         let fee = vec![1.0; n];
         let (bar_hi, bar_lo, bar_fee) = crate::data::bar_ranges(ticks, &fee, &bar_idx);
-        Market { ts, tick: ticks.to_vec(), sp: vec![1.0; n], fee, l_others: vec![1.0; n], l_active: vec![1.0; n], bar_end, bar_idx, bar_tick: ticks.to_vec(), bar_hi, bar_lo, bar_fee,
+        Market { ts, tick: ticks.to_vec(), sp: vec![1.0; n], fee, fee_sig: vec![], l_others: vec![1.0; n], l_active: vec![1.0; n], bar_end, bar_idx, bar_tick: ticks.to_vec(), bar_hi, bar_lo, bar_fee,
                  decimals: 6, px_scale: 1.0, liq_scale: 1.0, num1: true, bar_s: 300 }
     }
 
@@ -1157,6 +1290,64 @@ mod tests {
             {"id": "r", "kind": "range", "in": {"lower": ["bb", "lower"], "upper": ["bb", "upper"]}},
             {"id": "m", "kind": "rebalance", "p": {"delay_min": 0, "cooldown_min": 0}}
         ]})
+    }
+
+    #[test]
+    fn a_price_block_gives_the_price_itself_and_back() {
+        let ticks: Vec<i64> = (0..600).map(|k| 6931 + (k % 7) * 1000).collect();
+        let m = market(&ticks);
+        let g = graph(json!({"type": "graph", "nodes": [
+            {"id": "p", "kind": "price"},
+            {"id": "px", "kind": "to_price", "in": {"in": ["p", "tick"]}},
+            {"id": "back", "kind": "to_tick", "in": {"in": ["px", "out"]}},
+            {"id": "lad", "kind": "ladder", "p": {"hours": 1, "span": 3, "every_hours": 6, "turnover": 0.4}}]})).unwrap();
+        let ev = evaluate(&g, &m);
+        let id = |s: &str| g.nodes.iter().position(|n| n.id == s).unwrap();
+        let px = &ev.series[&(id("px"), "out".to_string())];
+        let back = &ev.series[&(id("back"), "out".to_string())];
+        for b in [0usize, 1, 6, 599] {
+            assert!((px[b] - 1.0001f64.powf(ticks[b] as f64)).abs() < 1e-9 * px[b], "bar {b}");
+            assert!((back[b] - ticks[b] as f64).abs() < 1e-6, "bar {b}");
+        }
+        assert!((px[0] - 2.0).abs() < 1e-3);
+        assert!(to_tick(0.0).is_nan());
+    }
+
+    #[test]
+    fn an_exit_stays_out_its_minimum_and_re_enters_only_after_a_confirmed_signal() {
+        let g = |back: f64| graph(json!({"type": "graph", "nodes": [
+            {"id": "lad", "kind": "ladder", "p": {"hours": 1, "span": 3, "every_hours": 6, "turnover": 0.4}},
+            {"id": "no", "kind": "const", "p": {"value": 0}}, {"id": "back", "kind": "const", "p": {"value": back}},
+            {"id": "x", "kind": "exit", "p": {"min_out_hours": 48, "confirm_hours": 24}, "in": {"when": ["no", "value"], "reenter": ["back", "value"]}}]})).unwrap();
+        let (yes, no) = (g(1.0), g(0.0));
+        let m = market(&[100; 300]);
+        let (ey, en) = (evaluate(&yes, &m), evaluate(&no, &m));
+        let (b, h) = (299, 3600);
+        let now = 10_000_000;
+        let mut st = State::default();
+        st.exited_to(ExitTo::Token1);
+        let go = |st: &mut State, g: &Graph, ev: &Eval, t: i64| matches!(decide(g, ev, st, t, b, 100, None, 1), Decision::Move { .. });
+        // out since now; the signal is back at once, but the minimum time out holds
+        assert!(!go(&mut st, &yes, &ey, now));
+        assert!(!go(&mut st, &yes, &ey, now + 47 * h));
+        // the signal breaks at 30 h: its 24 h confirmation starts again from 31 h
+        let mut st2 = State::default();
+        st2.exited_to(ExitTo::Token1);
+        assert!(!go(&mut st2, &yes, &ey, now));
+        assert!(!go(&mut st2, &no, &en, now + 30 * h));
+        assert!(!go(&mut st2, &yes, &ey, now + 31 * h));
+        assert!(!go(&mut st2, &yes, &ey, now + 50 * h), "48 h out but only 19 h confirmed");
+        assert!(go(&mut st2, &yes, &ey, now + 55 * h));
+        // without the break it re-enters at 48 h
+        assert!(go(&mut st, &yes, &ey, now + 48 * h));
+        st.moved(now + 48 * h);
+        assert_eq!((st.out_since, st.back_since), (None, None));
+        // the clock starts at the exit as recorded, not at the first decision after it
+        let mut st3 = State::default();
+        st3.exited_to(ExitTo::Token1);
+        st3.out_since = Some(now);
+        assert!(!go(&mut st3, &yes, &ey, now + 10 * h));
+        assert!(go(&mut st3, &yes, &ey, now + 48 * h), "48 h after the exit, 38 h confirmed");
     }
 
     #[test]
@@ -1245,9 +1436,79 @@ mod tests {
     }
 
     #[test]
+    fn the_volatile_price_rises_with_the_volatile_token_either_way_round() {
+        let ticks: Vec<i64> = (0..600).map(|i| i / 3).collect();
+        let g = graph(json!({"type": "graph", "nodes": [
+            {"id": "p", "kind": "price"}, {"id": "v", "kind": "vol_price"},
+            {"id": "w", "kind": "const", "p": {"value": 10}},
+            {"id": "ar", "kind": "around", "in": {"center": ["p", "tick"], "width": ["w", "value"]}},
+            {"id": "r", "kind": "range", "in": {"lower": ["ar", "lower"], "upper": ["ar", "upper"]}}]})).unwrap();
+        let vi = g.nodes.iter().position(|n| n.id == "v").unwrap();
+        for num1 in [true, false] {
+            let mut m = market(&ticks);
+            m.num1 = num1;
+            let v = &evaluate(&g, &m).series[&(vi, "tick".to_string())];
+            // numeraire token1: the volatile token is token0, priced by the tick; else its inverse
+            assert_eq!(v[599], if num1 { 199.0 } else { -199.0 });
+            assert_eq!(evaluate(&g, &m).series[&(vi, "token".to_string())][599], if num1 { 1.0 } else { -1.0 });
+        }
+    }
+
+    #[test]
+    fn a_latch_stays_on_from_set_to_reset() {
+        // set while the price is above 30, reset once it is below -30: on through the band between
+        let ticks: Vec<i64> = (0..600).map(|i| ((i as f64 / 50.0).sin() * 40.0) as i64).collect();
+        let g = graph(json!({"type": "graph", "nodes": [
+            {"id": "p", "kind": "price"}, {"id": "hi", "kind": "const", "p": {"value": 30}}, {"id": "lo", "kind": "const", "p": {"value": -30}},
+            {"id": "up", "kind": "gt", "in": {"a": ["p", "tick"], "b": ["hi", "value"]}},
+            {"id": "dn", "kind": "lt", "in": {"a": ["p", "tick"], "b": ["lo", "value"]}},
+            {"id": "l", "kind": "latch", "in": {"set": ["up", "out"], "reset": ["dn", "out"]}},
+            {"id": "w", "kind": "const", "p": {"value": 10}},
+            {"id": "ar", "kind": "around", "in": {"center": ["p", "tick"], "width": ["w", "value"]}},
+            {"id": "r", "kind": "range", "in": {"lower": ["ar", "lower"], "upper": ["ar", "upper"]}}]})).unwrap();
+        let m = market(&ticks);
+        let ev = evaluate(&g, &m);
+        let li = g.nodes.iter().position(|n| n.id == "l").unwrap();
+        let v = &ev.series[&(li, "out".to_string())];
+        let mut on = false;
+        for (k, t) in ticks.iter().enumerate() {
+            if *t > 30 {
+                on = true;
+            } else if *t < -30 {
+                on = false;
+            }
+            assert_eq!(v[k] == 1.0, on, "bar {k}, tick {t}");
+        }
+    }
+
+    #[test]
+    fn a_latch_forgets_a_set_older_than_the_live_window() {
+        // set in the first bars only, never reset: on for the live engine's window (10 days of
+        // 5-minute bars), then off, as live, rebuilding from the last 10 days, would see it
+        let ticks: Vec<i64> = (0..4000).map(|i| if i < 10 { 50 } else { 0 }).collect();
+        let g = graph(json!({"type": "graph", "nodes": [
+            {"id": "p", "kind": "price"}, {"id": "hi", "kind": "const", "p": {"value": 30}}, {"id": "lo", "kind": "const", "p": {"value": -30}},
+            {"id": "up", "kind": "gt", "in": {"a": ["p", "tick"], "b": ["hi", "value"]}},
+            {"id": "dn", "kind": "lt", "in": {"a": ["p", "tick"], "b": ["lo", "value"]}},
+            {"id": "l", "kind": "latch", "in": {"set": ["up", "out"], "reset": ["dn", "out"]}},
+            {"id": "w", "kind": "const", "p": {"value": 10}},
+            {"id": "ar", "kind": "around", "in": {"center": ["p", "tick"], "width": ["w", "value"]}},
+            {"id": "r", "kind": "range", "in": {"lower": ["ar", "lower"], "upper": ["ar", "upper"]}}]})).unwrap();
+        let m = market(&ticks);
+        let ev = evaluate(&g, &m);
+        let li = g.nodes.iter().position(|n| n.id == "l").unwrap();
+        let v = &ev.series[&(li, "out".to_string())];
+        let wb = (g.replay_days() * 24 * 12) as usize;
+        assert_eq!(v[9], 1.0);
+        assert_eq!(v[9 + wb - 1], 1.0);
+        assert_eq!(v[9 + wb], 0.0);
+        assert_eq!(v[3999], 0.0);
+    }
+
+    #[test]
     fn every_new_kind_parses_and_long_chains_are_refused() {
         for (kind, ins, _, _) in KINDS.iter() {
-            if ["range", "ladder", "rebalance", "exit", "hold", "token_price"].contains(kind) {
+            if ["range", "ladder", "rebalance", "exit", "hold", "hedge", "token_price", "funding"].contains(kind) {
                 continue;
             }
             let mut inputs = serde_json::Map::new();
@@ -1264,16 +1525,17 @@ mod tests {
             let g = g.unwrap();
             let xi = g.nodes.iter().position(|n| n.id == "x").unwrap();
             let ev = evaluate(&g, &m);
-            // longer than this market, or needing hourly bars: tested on their own below
-            if !STATEFUL.contains(kind) && !["breakout", "fee_vs_arb"].contains(kind) {
+            // longer than this market, or needing hourly bars (or, to_tick, a positive price, not the
+            // ticks it is fed here): tested on their own
+            if !STATEFUL.contains(kind) && !["breakout", "fee_vs_arb", "to_tick"].contains(kind) {
                 let out = ev.series.iter().filter(|((i, _), _)| *i == xi).map(|(_, v)| v).collect::<Vec<_>>();
                 assert!(!out.is_empty() && out.iter().all(|v| v[2999].is_finite()), "{kind} produced no value");
             }
         }
         let long = graph(json!({"type": "graph", "nodes": [
-            {"id": "p", "kind": "price"}, {"id": "a", "kind": "sma", "p": {"hours": 120}, "in": {"in": ["p", "tick"]}},
-            {"id": "b", "kind": "sma", "p": {"hours": 120}, "in": {"in": ["a", "out"]}},
-            {"id": "c", "kind": "sma", "p": {"hours": 160}, "in": {"in": ["b", "out"]}},
+            {"id": "p", "kind": "price"}, {"id": "a", "kind": "sma", "p": {"hours": 4000}, "in": {"in": ["p", "tick"]}},
+            {"id": "b", "kind": "sma", "p": {"hours": 4000}, "in": {"in": ["a", "out"]}},
+            {"id": "c", "kind": "sma", "p": {"hours": 1000}, "in": {"in": ["b", "out"]}},
             {"id": "r", "kind": "range", "in": {"lower": ["c", "out"], "upper": ["p", "tick"]}}]}));
         assert!(long.unwrap_err().contains("hours of history"));
         let bad = graph(json!({"type": "graph", "nodes": [

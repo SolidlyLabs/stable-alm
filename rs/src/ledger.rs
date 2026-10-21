@@ -21,17 +21,25 @@ use std::time::{Duration, Instant};
 
 const TRANSFER: &str = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 
-/// the totals, when they were computed and how long the executor log was then
-static LAST: Mutex<Option<(Instant, u64, Value)>> = Mutex::new(None);
+/// per wallet (wallets.rs): the totals, when they were computed and how long the executor log was then
+static LAST: Mutex<Option<std::collections::HashMap<String, (Instant, u64, Value)>>> = Mutex::new(None);
 
 /// Forget the cached totals: a transaction was just sent, so the next read recomputes them rather
 /// than show figures from before it for up to ten minutes.
 pub fn invalidate() {
-    *LAST.lock().unwrap() = None;
+    if let Some(m) = LAST.lock().unwrap().as_mut() {
+        m.remove(&crate::paths::wallet());
+    }
 }
 
 fn path() -> std::path::PathBuf {
     crate::paths::logs().join("ledger.json")
+}
+
+/// Every transaction the ledger has read, by hash (as saved; no network).
+pub fn transactions() -> Vec<(String, Value)> {
+    let m: Map<String, Value> = std::fs::read_to_string(path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    m.into_iter().collect()
 }
 
 fn hex_f64(v: &Value) -> f64 {
@@ -248,11 +256,11 @@ fn il_cost(cid: u64, wallet: &str, hist: &HashMap<(u64, String), Vec<(i64, f64)>
 }
 
 /// Per-chain totals: {"<chain id>": {earned_usd, claimed_usd, claimable_usd, gas_usd, swap_cost_usd,
-/// profit_usd, txs, claims, swaps}}. Recomputed at most every 10 minutes.
+/// profit_usd, txs, claims, swaps, since (the first position event)}}. Recomputed at most every 10 minutes.
 pub fn summary(wallet: &str, chains: &[u64]) -> Value {
     // a new transaction (the executor log grew) recomputes them once they are half a minute old
     let log_len = std::fs::metadata(crate::paths::logs().join("executor.jsonl")).map(|m| m.len()).unwrap_or(0);
-    if let Some((t, n, v)) = LAST.lock().unwrap().as_ref() {
+    if let Some((t, n, v)) = LAST.lock().unwrap().get_or_insert_with(Default::default).get(&crate::paths::wallet()) {
         if t.elapsed() < Duration::from_secs(600) && (*n == log_len || t.elapsed() < Duration::from_secs(30)) {
             return v.clone();
         }
@@ -351,13 +359,13 @@ pub fn summary(wallet: &str, chains: &[u64]) -> Value {
         let profit = earned - gas_usd.unwrap_or(0.0) - swap_cost - il.unwrap_or(0.0);
         out.insert(
             cid.to_string(),
-            json!({"earned_usd": earned, "claimed_usd": claimed, "claimable_usd": claimable, "pending_usd": pending, "il_usd": il, "gas_native": gas,
+            json!({"earned_usd": earned, "since": since, "claimed_usd": claimed, "claimable_usd": claimable, "pending_usd": pending, "il_usd": il, "gas_native": gas,
                    "gas_symbol": ch.gas_symbol, "gas_usd": gas_usd, "swap_cost_usd": swap_cost, "profit_usd": profit,
                    "txs": txs, "claims": claims, "swaps": swaps, "unpriced_swaps": unpriced, "by_pool": by_pool_json}),
         );
     }
     let v = Value::Object(out);
-    *LAST.lock().unwrap() = Some((Instant::now(), log_len, v.clone()));
+    LAST.lock().unwrap().get_or_insert_with(Default::default).insert(crate::paths::wallet(), (Instant::now(), log_len, v.clone()));
     v
 }
 

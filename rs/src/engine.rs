@@ -705,6 +705,8 @@ impl Executor {
                     }
                 }
                 st.exited_to(exit_to);
+                // the minimum time out counts from the exit itself
+                st.out_since = Some(crate::engine::now() as i64);
                 save(self, &st);
                 let side = match exit_to {
                     crate::custom::ExitTo::Token0 => crate::parking::Side::Token0,

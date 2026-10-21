@@ -182,6 +182,12 @@ pub struct State {
     /// re-solve on the next decision whatever the turnover (a parked lot was handed over)
     #[serde(default)]
     pub force_solve: bool,
+    /// when the strategy was first out after its exit (graph exits' min_out_hours)
+    #[serde(default)]
+    pub out_since: Option<i64>,
+    /// since when the re-entry condition has held without a break (graph exits' confirm_hours)
+    #[serde(default)]
+    pub back_since: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -263,6 +269,8 @@ impl State {
         self.force_solve = false;
         self.outside_since = None;
         self.exited = false;
+        self.out_since = None;
+        self.back_since = None;
     }
     /// An exit that waits in `to` is done.
     pub fn exited_to(&mut self, to: ExitTo) {
@@ -273,6 +281,7 @@ impl State {
         self.exited = true;
         self.exit_since = None;
         self.outside_since = None;
+        self.back_since = None;
     }
 }
 

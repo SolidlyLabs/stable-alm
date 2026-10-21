@@ -4,6 +4,8 @@
 //! - macOS: the login Keychain (service "StableALM", account "signer").
 //! - elsewhere: plain secrets/private_key (mode 600).
 //! The key is never returned by any API and never logged.
+//! Each wallet (wallets.rs) has its own: the paths above are its secrets folder (paths::secrets), and
+//! on macOS its Keychain account is "signer-<id>" ("signer" for the first wallet, as before).
 
 use crate::eth::Account;
 use serde_json::{json, Value};
@@ -89,10 +91,13 @@ mod store {
 mod store {
     use security_framework::passwords::{delete_generic_password, get_generic_password, set_generic_password};
     const SERVICE: &str = "StableALM";
-    const ACCOUNT: &str = "signer";
+    fn account() -> String {
+        let id = crate::paths::wallet();
+        if id == crate::paths::MAIN { "signer".into() } else { format!("signer-{id}") }
+    }
 
     pub fn save(key: &str) -> Result<(), String> {
-        set_generic_password(SERVICE, ACCOUNT, key.as_bytes()).map_err(|e| e.to_string())?;
+        set_generic_password(SERVICE, &account(), key.as_bytes()).map_err(|e| e.to_string())?;
         let _ = std::fs::remove_file(super::plain_path());
         Ok(())
     }
@@ -103,13 +108,13 @@ mod store {
             crate::eth::Account::from_key(&k)?;
             save(&k)?;
         }
-        match get_generic_password(SERVICE, ACCOUNT) {
+        match get_generic_password(SERVICE, &account()) {
             Ok(b) => Ok(Some(String::from_utf8(b).map_err(|e| e.to_string())?)),
             Err(_) => Ok(None),
         }
     }
     pub fn delete() {
-        let _ = delete_generic_password(SERVICE, ACCOUNT);
+        let _ = delete_generic_password(SERVICE, &account());
         let _ = std::fs::remove_file(super::plain_path());
     }
     pub const KIND: &str = "macOS Keychain";
@@ -146,8 +151,10 @@ pub fn forget() {
 
 pub fn account() -> Result<Option<Account>, String> {
     let _g = LOCK.lock().unwrap();
-    if let Ok(k) = std::env::var("ALM_PRIVATE_KEY") {
-        return Account::from_key(&normalise(&k)).map(Some);
+    if crate::paths::wallet() == crate::paths::MAIN {
+        if let Ok(k) = std::env::var("ALM_PRIVATE_KEY") {
+            return Account::from_key(&normalise(&k)).map(Some);
+        }
     }
     match store::load()? {
         Some(k) => Account::from_key(&normalise(&k)).map(Some),
@@ -172,32 +179,32 @@ pub fn status() -> Value {
 }
 
 /// Another secret (the Claude API key, the Telegram bot token), kept like the signer key: DPAPI on
-/// Windows in secrets/<name>.dpapi, elsewhere a 600 file secrets/<name>.
+/// Windows in secrets/<name>.dpapi, elsewhere a 600 file secrets/<name>. The app's, not a wallet's.
 pub fn save_secret(name: &str, value: &str) -> Result<(), String> {
     #[cfg(windows)]
     {
         let enc = store::run(value.as_bytes(), true)?;
-        crate::paths::write_secret(&crate::paths::secrets().join(format!("{name}.dpapi")), &enc).map_err(|e| e.to_string())
+        crate::paths::write_secret(&crate::paths::app_secrets().join(format!("{name}.dpapi")), &enc).map_err(|e| e.to_string())
     }
     #[cfg(not(windows))]
     {
-        crate::paths::write_secret(&crate::paths::secrets().join(name), value.as_bytes()).map_err(|e| e.to_string())
+        crate::paths::write_secret(&crate::paths::app_secrets().join(name), value.as_bytes()).map_err(|e| e.to_string())
     }
 }
 
 pub fn load_secret(name: &str) -> Option<String> {
     #[cfg(windows)]
     {
-        let b = std::fs::read(crate::paths::secrets().join(format!("{name}.dpapi"))).ok()?;
+        let b = std::fs::read(crate::paths::app_secrets().join(format!("{name}.dpapi"))).ok()?;
         String::from_utf8(store::run(&b, false).ok()?).ok()
     }
     #[cfg(not(windows))]
     {
-        std::fs::read_to_string(crate::paths::secrets().join(name)).ok().map(|s| s.trim().to_string())
+        std::fs::read_to_string(crate::paths::app_secrets().join(name)).ok().map(|s| s.trim().to_string())
     }
 }
 
 pub fn delete_secret(name: &str) {
-    let _ = std::fs::remove_file(crate::paths::secrets().join(format!("{name}.dpapi")));
-    let _ = std::fs::remove_file(crate::paths::secrets().join(name));
+    let _ = std::fs::remove_file(crate::paths::app_secrets().join(format!("{name}.dpapi")));
+    let _ = std::fs::remove_file(crate::paths::app_secrets().join(name));
 }

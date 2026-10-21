@@ -211,16 +211,23 @@ or earlier becomes a node strategy with one ladder block and the same settings o
    update from 0.4 or earlier) a setup wizard opens: create a wallet, or import one from a recovery
    phrase or a private key, pick chains and parking pools. **Settings › Run the setup wizard** opens
    it again.
-2. **Pools** lists your pools and every Solidly V3 pool on the chains you show with the chain
-   filters at the top (a view filter only: balances, funding and your pools cover every chain). Sort by any column; pegged pairs are shown by default. Add one, enable it,
-   give it money with **Add** (from Unallocated, the free tokens no pool holds), and watch a few
-   dry-run cycles.
+2. **Pools › Find pools** lists every Solidly V3 pool on the chains you show with the chain filters
+   at the top (a view filter only: balances, funding and your pools cover every chain). Sort by any
+   column; pegged pairs are shown by default. Add one, enable it, give it money with **Add** (from
+   Unallocated, the free tokens no pool holds), and watch a few dry-run cycles. **My pools** shows
+   your balances per chain, your pools, and each position's range against the price now (as prices
+   or ticks), with its measured APR and history.
 3. When the plan looks right, add your wallet's private key (in the wizard, or **Settings › Update
    key**) and press **Go live**. The wallet address is blurred on screen until you click it.
    - On Windows the key is encrypted for your user account (DPAPI); on macOS it goes into the
      Keychain.
    - It never leaves your computer and is never shown again.
    - The same address is used on every chain. Keep a little of each chain's gas token there.
+4. To manage more than one wallet, add one with **+** on the wallet switcher at the top. Each wallet has its
+   own key (or none, watched only), pools, money split, live switch and history; the Overview shows
+   them together and one at a time.
+5. **Settings › Chains & RPC** sets each chain's endpoints and its gas speed: Normal is the node's
+   suggested priority fee, Low and Instant what recent blocks paid at the 10th and 90th percentile.
 
 Your settings, data and logs are kept in `%LOCALAPPDATA%\StableALM` (Windows) or
 `~/Library/Application Support/StableALM` (macOS). Run only one copy per wallet.
@@ -240,18 +247,18 @@ cargo build --release
 ```
 
 The app is `rs/target/release/StableALM.exe` on Windows, or `rs/target/release/StableALM` on macOS.
-It is a single file of about 2.3 MB; copy it anywhere and run it.
+It is a single file of about 8 MB; copy it anywhere and run it.
 
 To build the Windows installer, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run, from `rs/`:
 
 ```bash
-ISCC /DAppVersion=0.5.1 installer/StableALM.iss     # -> rs/dist/StableALM-Setup-0.5.1.exe
+ISCC /DAppVersion=0.6.0 installer/StableALM.iss     # -> rs/dist/StableALM-Setup-0.6.0.exe
 ```
 
 To sign a release (writes `SHA256SUMS.txt` and `SHA256SUMS.txt.sig` next to the files; upload both):
 
 ```bash
-pwsh release/sign.ps1 -Files dist/StableALM-Setup-0.5.1.exe, dist/StableALM.exe
+pwsh release/sign.ps1 -Files dist/StableALM-Setup-0.6.0.exe, dist/StableALM.exe
 ```
 
 Signers are listed in `rs/release/allowed_signers` (OpenSSH format). To let someone else sign

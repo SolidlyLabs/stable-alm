@@ -183,6 +183,16 @@ fn packable(m: &str, p: &Value) -> Option<(String, Vec<u8>, Value)> {
 }
 
 pub fn batch(cid: u64, calls: &[(&str, Value)]) -> Result<Vec<R>, String> {
+    batch_with(cid, calls, 10, Duration::from_secs(90))
+}
+
+/// batch() for a page that must not wait long: 3 tries and 20 s per request instead of 10 tries
+/// (about 3 minutes of pauses when the node cannot be reached) and 90 s.
+pub fn batch_quick(cid: u64, calls: &[(&str, Value)]) -> Result<Vec<R>, String> {
+    batch_with(cid, calls, 3, Duration::from_secs(20))
+}
+
+fn batch_with(cid: u64, calls: &[(&str, Value)], rounds: usize, timeout: Duration) -> Result<Vec<R>, String> {
     // Group packable eth_calls by block tag; each group of 2+ becomes one aggregate3 call.
     let mut out: Vec<Option<R>> = vec![None; calls.len()];
     let mut reqs: Vec<(String, Value)> = vec![]; // (method, params) actually sent
@@ -214,7 +224,7 @@ pub fn batch(cid: u64, calls: &[(&str, Value)]) -> Result<Vec<R>, String> {
             }
         }
     }
-    let res = send_requests(cid, &reqs)?;
+    let res = send_requests(cid, &reqs, rounds, timeout)?;
     for (k, r) in res.into_iter().enumerate() {
         let idx = &map[k];
         if idx.len() == 1 && reqs[k].1[0]["to"] != MULTICALL3 {
@@ -232,7 +242,7 @@ pub fn batch(cid: u64, calls: &[(&str, Value)]) -> Result<Vec<R>, String> {
             _ => {
                 // The multicall itself failed (no Multicall3 on this chain, or a node error): ask one by one.
                 let single: Vec<(String, Value)> = idx.iter().map(|i| (calls[*i].0.to_string(), calls[*i].1.clone())).collect();
-                for (j, r) in send_requests(cid, &single)?.into_iter().enumerate() {
+                for (j, r) in send_requests(cid, &single, rounds, timeout)?.into_iter().enumerate() {
                     out[idx[j]] = Some(r);
                 }
             }
@@ -242,13 +252,13 @@ pub fn batch(cid: u64, calls: &[(&str, Value)]) -> Result<Vec<R>, String> {
 }
 
 /// Send requests in batches of the chain's batch size; rate-limited entries are retried after a pause.
-fn send_requests(cid: u64, reqs: &[(String, Value)]) -> Result<Vec<R>, String> {
+fn send_requests(cid: u64, reqs: &[(String, Value)], rounds: usize, timeout: Duration) -> Result<Vec<R>, String> {
     let size = crate::chains::get(cid).batch_size.max(1);
     let mut out: Vec<Option<R>> = vec![None; reqs.len()];
     let mut todo: Vec<usize> = (0..reqs.len()).collect();
     let mut delay = 2u64;
     let mut why = String::new(); // last reason a retry was needed, for the log
-    for round in 0..10 {
+    for round in 0..rounds {
         let mut again = vec![];
         for part in todo.chunks(size) {
             let payload: Vec<Value> = part.iter().map(|i| json!({"jsonrpc": "2.0", "id": i, "method": reqs[*i].0, "params": reqs[*i].1})).collect();
@@ -256,7 +266,7 @@ fn send_requests(cid: u64, reqs: &[(String, Value)]) -> Result<Vec<R>, String> {
             let url = rpc_url(cid);
             pace(cid, &url, part.len());
             let before = again.len();
-            let res = agent().post(&url).set("Content-Type", "application/json").send_json(body);
+            let res = agent().post(&url).timeout(timeout).set("Content-Type", "application/json").send_json(body);
             let limited = matches!(&res, Err(ureq::Error::Status(429, _)));
             match res {
                 Ok(resp) => {
@@ -298,7 +308,7 @@ fn send_requests(cid: u64, reqs: &[(String, Value)]) -> Result<Vec<R>, String> {
         if again.is_empty() {
             break;
         }
-        if round == 9 {
+        if round + 1 == rounds {
             return Err(format!("RPC: still rate limited or unreachable after retries ({} requests, {}): {why}", again.len(), reqs[again[0]].0));
         }
         if round >= 1 {

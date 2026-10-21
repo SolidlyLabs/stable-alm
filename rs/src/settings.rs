@@ -73,11 +73,33 @@ pub fn write_atomic(path: &std::path::Path, v: &Value) -> std::io::Result<()> {
     std::fs::rename(tmp, path)
 }
 
+/// The settings each wallet has its own of (wallets.rs); the rest are the app's. The first wallet's
+/// are in config/settings.json with the app's, as they always were; another wallet's are in its own
+/// config/settings.json, merged over the app's.
+pub const WALLET_KEYS: &[&str] = &["execute", "wallet", "claim", "sell_rewards", "funding_by_chain", "solid_lp", "parking",
+                                   "idle_redeploy_pct", "resize_tolerance_pct", "retries"];
+
+fn settings_raw() -> Value {
+    let _g = LOCK.lock().unwrap();
+    let root = read(&crate::paths::app_config().join("settings.json")).unwrap_or(json!({}));
+    if crate::paths::wallet() == crate::paths::MAIN {
+        return root;
+    }
+    let mut out = root.as_object().cloned().unwrap_or_default();
+    for k in WALLET_KEYS {
+        out.remove(*k);
+    }
+    let own = read(&crate::paths::config().join("settings.json")).unwrap_or(json!({}));
+    for (k, v) in own.as_object().cloned().unwrap_or_default() {
+        if WALLET_KEYS.contains(&k.as_str()) {
+            out.insert(k, v);
+        }
+    }
+    Value::Object(out)
+}
+
 pub fn load_settings() -> Value {
-    let cur = {
-        let _g = LOCK.lock().unwrap();
-        read(&crate::paths::config().join("settings.json")).unwrap_or(json!({}))
-    };
+    let cur = settings_raw();
     let mut cur = cur;
     if let Some(o) = cur.as_object_mut() {
         if let Some(old) = o.remove("funding_token") {
@@ -123,7 +145,28 @@ pub fn funding_tokens(s: &Value, cid: u64) -> Vec<String> {
 
 pub fn save_settings(s: &Value) -> std::io::Result<()> {
     let _g = LOCK.lock().unwrap();
-    write_atomic(&crate::paths::config().join("settings.json"), s)
+    let root_path = crate::paths::app_config().join("settings.json");
+    if crate::paths::wallet() == crate::paths::MAIN {
+        return write_atomic(&root_path, s);
+    }
+    // this wallet's own keys to its file, the app's to the app's file (the first wallet's keys there stay)
+    let mut root = read(&root_path).and_then(|v| v.as_object().cloned()).unwrap_or_default();
+    let seen = merge(&defaults(), &Value::Object(root.clone()));
+    let (mut own, mut changed) = (Map::new(), false);
+    for (k, v) in s.as_object().cloned().unwrap_or_default() {
+        if WALLET_KEYS.contains(&k.as_str()) {
+            own.insert(k, v);
+        } else if seen.get(&k) != Some(&v) {
+            root.insert(k, v);
+            changed = true;
+        }
+    }
+    write_atomic(&crate::paths::config().join("settings.json"), &Value::Object(own))?;
+    // the app's file is rewritten only when an app setting changed
+    if changed {
+        write_atomic(&root_path, &Value::Object(root))?;
+    }
+    Ok(())
 }
 
 pub fn load_pools() -> Vec<Value> {
@@ -333,6 +376,11 @@ pub fn validate_pool(p: &Value) -> Result<(), String> {
         "graph" => {
             if serde_json::to_string(st).map(|s| s.len()).unwrap_or(0) > 64 * 1024 {
                 return Err(format!("{name}: node strategy too large"));
+            }
+            // the hedge block is backtested only for now: the live hedge
+            // is not built, and a pool must not run a strategy whose result assumed one
+            if st["nodes"].as_array().map(|a| a.iter().any(|n| n["kind"] == "hedge" || n["kind"] == "funding")).unwrap_or(false) {
+                return Err(format!("{name}: the Hedge block runs in backtests only until the live hedge on Hyperliquid is built; remove it to run this strategy"));
             }
             let spacing = p["tick_spacing"].as_i64().unwrap_or(1);
             crate::graph::Graph::parse(st.as_object().ok_or(format!("{name}: strategy must be an object"))?, spacing)

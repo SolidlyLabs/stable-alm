@@ -226,6 +226,13 @@ fn combine(legs: Vec<Series>) -> Series {
 static CACHE: Mutex<Option<Vec<((u64, String, i64, i64, usize), Series)>>> = Mutex::new(None);
 
 /// The token's USD price series over the bars `bar_end` (cached: a backtest's variants share it).
+/// A token's series as `load` would return it for these bars, without fetching (tests).
+#[cfg(test)]
+pub fn preload(cid: u64, token: &str, bar_end: &[i64], s: Series) {
+    let key = (cid, token.to_lowercase(), bar_end[0], *bar_end.last().unwrap(), bar_end.len());
+    CACHE.lock().unwrap().get_or_insert_with(Vec::new).push((key, s));
+}
+
 pub fn load(cid: u64, token: &str, bar_end: &[i64]) -> Result<Series, String> {
     if bar_end.is_empty() {
         return Ok(Series::default());

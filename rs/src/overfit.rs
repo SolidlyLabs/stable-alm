@@ -102,16 +102,27 @@ pub fn variants(s: &Map<String, Value>, n: usize) -> Vec<Map<String, Value>> {
 /// `capital`. `series` is [[ts, value, hold value], …] in time order.
 pub fn slice_excess(series: &[Value], t0: i64, t1: i64, n: usize, capital: f64) -> Vec<f64> {
     let pts: Vec<(i64, f64, f64)> = series.iter().filter_map(|p| Some((p[0].as_i64()?, p[1].as_f64()?, p[2].as_f64()?))).collect();
-    let at = |t: i64| -> (f64, f64) {
-        let k = pts.partition_point(|p| p.0 <= t);
-        let p = if k == 0 { pts.first() } else { pts.get(k - 1) };
+    // a slice ends with the last value at or before its end and starts from where the one before
+    // ended; at the very start of the run, the first value at that instant, before any trade, so
+    // the first slice carries the entry costs
+    let at = |t: i64, end: bool| -> (f64, f64) {
+        let p = if end {
+            let k = pts.partition_point(|p| p.0 <= t);
+            if k == 0 { pts.first() } else { pts.get(k - 1) }
+        } else {
+            let k = pts.partition_point(|p| p.0 < t);
+            match pts.get(k) {
+                Some(q) if q.0 == t => Some(q),
+                _ => if k == 0 { pts.first() } else { pts.get(k - 1) },
+            }
+        };
         p.map(|p| (p.1, p.2)).unwrap_or((capital, capital))
     };
     let len = (t1 - t0) as f64 / n as f64;
     (0..n)
         .map(|k| {
             let (a, b) = (t0 + (len * k as f64) as i64, t0 + (len * (k + 1) as f64) as i64);
-            let ((va, ha), (vb, hb)) = (at(a), at(b));
+            let ((va, ha), (vb, hb)) = (at(a, false), at(b, true));
             ((vb - va) - (hb - ha)) / capital * (365.0 * 86400.0 / (b - a).max(1) as f64) * 100.0
         })
         .collect()

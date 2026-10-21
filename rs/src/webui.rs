@@ -13,6 +13,7 @@ use tiny_http::{Header, Method, Request, Response, Server};
 const INDEX: &str = include_str!("../static/index.html");
 const HELP: &str = include_str!("../static/help.js");
 const LAB: &str = include_str!("../static/lab.js");
+const POSITIONS: &str = include_str!("../static/positions.js");
 const WIZARD: &str = include_str!("../static/wizard.js");
 const COOKIE: &str = "alm_t";
 
@@ -22,7 +23,7 @@ pub fn ui_token() -> String {
         if let Ok(t) = std::env::var("ALM_UI_TOKEN") {
             return t;
         }
-        let p = crate::paths::secrets().join("ui_token");
+        let p = crate::paths::app_secrets().join("ui_token");
         if let Ok(t) = std::fs::read_to_string(&p) {
             if !t.trim().is_empty() {
                 return t.trim().to_string();
@@ -133,11 +134,15 @@ pub fn serve(worker: Arc<Worker>, port: u16, fallback: bool) -> Result<u16, Stri
     Ok(port)
 }
 
+const UI_THREADS: usize = 16;
+
 fn start(server: Server, asked: u16) -> u16 {
     let port = server.server_addr().to_ip().map(|a| a.port()).unwrap_or(asked);
     let server = Arc::new(server);
     let w = WORKER.get().expect("serve() sets the worker").clone();
-    for _ in 0..4 {
+    // enough threads that a slow answer (positions, wallet tokens) never queues the quick ones: the
+    // lab's progress polls during an optimization, the status every 10 s
+    for _ in 0..UI_THREADS {
         let (s, w) = (server.clone(), w.clone());
         std::thread::spawn(move || {
             for req in s.incoming_requests() {
@@ -213,6 +218,9 @@ fn handle(mut req: Request, w: &Arc<Worker>) {
         if path == "/lab.js" {
             return send(req, 200, LAB.as_bytes().to_vec(), "application/javascript; charset=utf-8");
         }
+        if path == "/positions.js" {
+            return send(req, 200, POSITIONS.as_bytes().to_vec(), "application/javascript; charset=utf-8");
+        }
         if !path.starts_with("/api/") {
             return send_json(req, 404, json!({"error": "not found"}));
         }
@@ -223,7 +231,10 @@ fn handle(mut req: Request, w: &Arc<Worker>) {
             return send_logo(req, rest);
         }
         let t0 = std::time::Instant::now();
-        let (code, body) = get(&path, w);
+        let (code, body) = match wallet_of(&path, query) {
+            Ok(id) => crate::paths::scope(&id, || get(&path, w)),
+            Err(e) => (400, json!({"error": e})),
+        };
         slow(&path, t0);
         return send_json(req, code, body);
     }
@@ -245,12 +256,49 @@ fn handle(mut req: Request, w: &Arc<Worker>) {
     let _ = req.as_reader().take(1 << 20).read_to_string(&mut raw);
     let body: Value = serde_json::from_str(if raw.is_empty() { "{}" } else { &raw }).unwrap_or(json!({}));
     let t0 = std::time::Instant::now();
-    let res = post(&path, body, w);
+    let res = wallet_of(&path, query).and_then(|id| crate::paths::scope(&id, || post(&path, body, w)));
     slow(&path, t0);
     match res {
         Ok(v) => send_json(req, 200, v),
         Err(e) => send_json(req, 400, json!({"error": if path == "/api/key" { "invalid private key".to_string() } else { e }})),
     }
+}
+
+/// The wallet a request is for: ?wallet=<id>, or without it `main` (so every request made before there
+/// were several wallets means the same as before), or the first listed once `main` was removed. The
+/// agent's pages and the wallet list are the app's own and run as `main`.
+fn wallet_of(path: &str, query: &str) -> Result<String, String> {
+    if path.starts_with("/api/agent") || path == "/api/experimental" || path.starts_with("/api/wallets") {
+        return Ok(crate::paths::MAIN.into());
+    }
+    let id = match query.split('&').find_map(|kv| kv.strip_prefix("wallet=")) {
+        Some(id) => id.to_string(),
+        None => crate::wallets::default_id(),
+    };
+    if crate::wallets::valid_id(&id) && crate::wallets::exists(&id) {
+        Ok(id)
+    } else {
+        Err("no such wallet".into())
+    }
+}
+
+/// Every wallet's card and the totals over them (the Overview's "All wallets").
+fn wallets_overview(w: &Arc<Worker>) -> Value {
+    let chains = crate::chains::as_json();
+    let min_gas = |id: u64| chains.as_array().and_then(|a| a.iter().find(|c| c["id"].as_u64() == Some(id))).and_then(|c| c["min_gas"].as_f64()).unwrap_or(0.0);
+    let cards: Vec<Value> = crate::wallets::list()
+        .iter()
+        .map(|meta| {
+            let id = meta["id"].as_str().unwrap_or(crate::paths::MAIN).to_string();
+            crate::paths::scope(&id, || {
+                let mut c = crate::wallets::summary(meta, &w.status_of(&id), &load_settings(), &crate::signer::status(), &load_pools(), &snapshots(),
+                                                    crate::capital::requests().len(), &min_gas, engine::now() as i64);
+                c["paused"] = json!(crate::paths::wallet_pause_file().exists());
+                c
+            })
+        })
+        .collect();
+    json!({"totals": crate::wallets::totals(&cards), "wallets": cards, "paused": crate::paths::stop_file().exists(), "now": engine::now()})
 }
 
 /// Requests that keep one of the 4 handler threads busy for long are logged by path (never the
@@ -268,20 +316,24 @@ fn tail_text(p: &std::path::Path, n: usize) -> Vec<String> {
     lines[lines.len().saturating_sub(n)..].to_vec()
 }
 
-static SNAPS: Mutex<Option<((u64, std::time::SystemTime), Vec<Value>)>> = Mutex::new(None);
+type Stamp = (u64, std::time::SystemTime);
+static SNAPS: Mutex<Option<std::collections::HashMap<std::path::PathBuf, (Stamp, Vec<Value>)>>> = Mutex::new(None);
 
-/// The chart series, re-read only when snapshots.jsonl changes (once a cycle), not on every poll.
+/// The chart series of the current wallet, re-read only when its snapshots.jsonl changes (once a
+/// cycle), not on every poll.
 fn snapshots() -> Vec<Value> {
     let p = crate::paths::logs().join("snapshots.jsonl");
     let stamp = std::fs::metadata(&p).ok().map(|m| (m.len(), m.modified().unwrap_or(std::time::UNIX_EPOCH)));
-    if let (Some(st), Some((k, v))) = (stamp, SNAPS.lock().unwrap().as_ref()) {
-        if *k == st {
-            return v.clone();
+    if let Some(st) = stamp {
+        if let Some((k, v)) = SNAPS.lock().unwrap().get_or_insert_with(Default::default).get(&p) {
+            if *k == st {
+                return v.clone();
+            }
         }
     }
     let rows = snapshots_read(&p);
     if let Some(st) = stamp {
-        *SNAPS.lock().unwrap() = Some((st, rows.clone()));
+        SNAPS.lock().unwrap().get_or_insert_with(Default::default).insert(p, (st, rows.clone()));
     }
     rows
 }
@@ -289,6 +341,7 @@ fn snapshots() -> Vec<Value> {
 fn snapshots_read(p: &std::path::Path) -> Vec<Value> {
     let s = std::fs::read_to_string(p).unwrap_or_default();
     let rows: Vec<Value> = s.lines().rev().take(20000).filter_map(|l| serde_json::from_str(l).ok()).collect::<Vec<_>>().into_iter().rev().collect();
+    let rows = clean_history(rows);
     let step = (rows.len() / 600).max(1);
     let mut keep: Vec<&Value> = rows.iter().step_by(step).collect();
     if !rows.is_empty() && (rows.len() - 1) % step != 0 {
@@ -305,6 +358,48 @@ fn snapshots_read(p: &std::path::Path) -> Vec<Value> {
                    "solid_usd": r["solid_usd"], "idle_usd": idle, "pools": pools, "chains": chains})
         })
         .collect()
+}
+
+/// The value history without the cycles that were mis-measured, as they are read (the file keeps every
+/// line): a cycle whose valuation was incomplete (a pool, balance or parked lot could not be read, so
+/// the total lacks it; each chain lists those in `incomplete`, written since 0.3), and a dip or spike
+/// of one to three cycles that the cycles either side of it, agreeing with each other, contradict.
+/// Money moved in or out is a step, not a V, and stays.
+fn clean_history(rows: Vec<Value>) -> Vec<Value> {
+    const AGREE: f64 = 0.01; // the flanks within 1% of each other
+    const OFF: f64 = 0.03; // every cycle of the run at least 3% away from them
+    let flagged = |r: &Value| r["chains"].as_object().is_some_and(|c| c.values().any(|v| v["incomplete"].as_array().is_some_and(|a| !a.is_empty())));
+    let rows: Vec<Value> = rows.into_iter().filter(|r| !flagged(r)).collect();
+    let v = |r: &Value| r["value_usd"].as_f64().or_else(|| r["total_usd"].as_f64()).unwrap_or(0.0);
+    let mut drop = vec![false; rows.len()];
+    let mut i = 1;
+    while i + 1 < rows.len() {
+        let mut hit = 0;
+        for k in 1..=3 {
+            if i + k >= rows.len() {
+                break;
+            }
+            let (a, b) = (v(&rows[i - 1]), v(&rows[i + k]));
+            let mid = (a + b) / 2.0;
+            if mid <= 0.0 || (a - b).abs() > AGREE * a.max(b) {
+                continue;
+            }
+            let run = &rows[i..i + k];
+            let below = run.iter().all(|r| v(r) < mid * (1.0 - OFF));
+            let above = run.iter().all(|r| v(r) > mid * (1.0 + OFF));
+            if below || above {
+                hit = k;
+                break;
+            }
+        }
+        if hit > 0 {
+            drop[i..i + hit].iter_mut().for_each(|d| *d = true);
+            i += hit;
+        } else {
+            i += 1;
+        }
+    }
+    rows.into_iter().zip(drop).filter(|(_, d)| !d).map(|(r, _)| r).collect()
 }
 
 fn configured() -> Vec<(u64, String)> {
@@ -331,13 +426,18 @@ fn get(path: &str, w: &Arc<Worker>) -> (u16, Value) {
             let mut rw = if base.is_null() { json!({"claimable": [], "usd": total}) } else { base };
             rw["by_chain"] = rewards;
             rw["usd_all_chains"] = json!(total);
-            let errors: Vec<String> = tail_text(&crate::paths::logs().join("errors.log"), 80).into_iter().rev().collect();
-            (200, json!({"worker": w.status.lock().unwrap().clone(), "settings": s, "pools": load_pools(), "signer": crate::signer::status(),
-                         "paused": crate::paths::stop_file().exists(), "events": events, "errors": errors, "snapshots": snapshots(),
+            let errors: Vec<String> = tail_text(&crate::paths::app_logs().join("errors.log"), 80).into_iter().rev().collect();
+            let id = crate::paths::wallet();
+            let me = crate::wallets::list().into_iter().find(|x| x["id"] == id.as_str()).unwrap_or(json!({"id": id}));
+            (200, json!({"worker": w.status_of(&id), "wallet": me, "wallets": crate::wallets::list(),
+                         "settings": s, "pools": load_pools(), "signer": crate::signer::status(),
+                         "paused": crate::paths::stop_file().exists(), "wallet_paused": crate::paths::wallet_pause_file().exists(), "events": events, "errors": errors, "snapshots": snapshots(),
                          "rewards": rw, "chains": crate::chains::as_json(), "now": engine::now(), "runtime": "rust",
                          "ladder_defaults": crate::ladder::plain_defaults(), "update": crate::update::status(), "pool_defaults": settings::pool_defaults()}))
         }
         "/api/chains" => (200, json!({"chains": crate::chains::as_json()})),
+        "/api/ui_prefs" => (200, ui_prefs()),
+        "/api/wallets" => (200, wallets_overview(w)),
         "/api/update" => (200, crate::update::status()),
         "/api/onboard" => (200, crate::onboard::status()),
         "/api/onboard/parking" => (200, crate::onboard::parking_suggestions()),
@@ -356,17 +456,29 @@ fn get(path: &str, w: &Arc<Worker>) -> (u16, Value) {
             }
             (200, crate::experimental::overview(&s))
         }
-        p if p.starts_with("/api/market") => match crate::market_data::shortlist(&wallet, &configured()) {
-            Ok(mut rows) => {
-                let conf = configured();
-                for r in rows.iter_mut() {
-                    let c = (r["chain_id"].as_u64().unwrap_or(8453), r["pool"].as_str().unwrap_or("").to_string());
-                    r["configured"] = json!(conf.contains(&c));
+        p if p.starts_with("/api/market") => {
+            // /api/market/fresh: the Refresh button, which re-reads the pool lists from the Solidly UI
+            let errors = if p == "/api/market/fresh" { crate::market_data::reload(&wallet, &configured()) } else { vec![] };
+            match crate::market_data::shortlist(&wallet, &configured()) {
+                Ok(mut rows) => {
+                    let conf = configured();
+                    for r in rows.iter_mut() {
+                        let c = (r["chain_id"].as_u64().unwrap_or(8453), r["pool"].as_str().unwrap_or("").to_string());
+                        r["configured"] = json!(conf.contains(&c));
+                    }
+                    (200, json!({"pools": rows, "errors": errors}))
                 }
-                (200, json!({"pools": rows}))
+                Err(e) => (502, json!({"error": format!("Solidly market data unavailable: {e}")})),
             }
-            Err(e) => (502, json!({"error": format!("Solidly market data unavailable: {e}")})),
-        },
+        }
+        // the Positions tab: /api/positions or /api/positions/<days> (1 to 90)
+        p if p == "/api/positions" || p.starts_with("/api/positions/") => {
+            let days = p.strip_prefix("/api/positions/").and_then(|d| d.parse::<u64>().ok()).unwrap_or(30).clamp(1, 90);
+            match crate::positions::view(&wallet, days) {
+                Some(v) => (200, v),
+                None => (503, json!({"error": "positions are still loading from the Solidly UI; try again in a moment"})),
+            }
+        }
         p if p.starts_with("/api/solidpools") => {
             let mut rows = vec![];
             for c in crate::chains::all().into_iter().filter(|c| !c.solid.is_empty()) {
@@ -394,6 +506,16 @@ fn get(path: &str, w: &Arc<Worker>) -> (u16, Value) {
                 .collect();
             (200, json!({"names": names}))
         }
+        p if p.starts_with("/api/gas/") => {
+            // /api/gas/<chain>: base fee and the tip, fee cap and bump wait of each gas speed
+            match p["/api/gas/".len()..].parse::<u64>() {
+                Ok(cid) => match crate::chain::gas_preview(cid) {
+                    Ok(v) => (200, v),
+                    Err(e) => (502, json!({"error": e})),
+                },
+                Err(_) => (400, json!({"error": "use /api/gas/<chain id>"})),
+            }
+        }
         p if p.starts_with("/api/price_sources/") => {
             // /api/price_sources/<chain>: tokens a node strategy can watch there, their pools and active liquidity
             match p["/api/price_sources/".len()..].parse::<u64>() {
@@ -419,10 +541,9 @@ fn get(path: &str, w: &Arc<Worker>) -> (u16, Value) {
                     extra.push((crate::chains::BASE, a.to_lowercase()));
                 }
             }
-            match crate::market_data::tokens(&wallet, &extra) {
-                Ok(t) => (200, json!({"tokens": t})),
-                Err(e) => (502, json!({"error": e})),
-            }
+            // the saved list at once; `refreshing` while a background refresh runs (the page asks again)
+            let (t, refreshing) = crate::market_data::tokens(&wallet, &extra);
+            (200, json!({"tokens": t, "refreshing": refreshing}))
         }
         _ => (404, json!({"error": "not found"})),
     }
@@ -536,11 +657,18 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
             if s["execute"].as_bool().unwrap_or(false) && !crate::signer::configured() {
                 return Err("set a private key before turning live trading on".into());
             }
+            // a wallet with a key has the key's address; only a watched wallet's address is set by hand
+            if let (Some(a), Ok(Some(acct))) = (body["wallet"].as_str(), crate::signer::account()) {
+                if !a.eq_ignore_ascii_case(&acct.address) {
+                    return Err("this wallet has a key: its address is the key's (remove the key to watch another address)".into());
+                }
+            }
             // the linked Telegram chat is set by linking only
             for k in ["chat_id", "user_id", "user_name"] {
                 s["experimental"]["telegram"][k] = old_x["telegram"][k].clone();
             }
             settings::validate_settings(&s)?;
+            crate::wallets::check_address(&crate::paths::wallet(), s["wallet"].as_str().unwrap_or(""))?;
             crate::agent::settings_changed(&old_x, &s["experimental"]);
             // a new port is bound before the setting is saved: a port in use is refused, not saved
             let mut moved = None;
@@ -587,6 +715,10 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
                 crate::chains::set_rpc(id, body["rpc"].as_str(), body["send_rpc"].as_str(), body["batch_size"].as_u64(), rate)?;
                 return Ok(json!({"ok": true, "chains": crate::chains::as_json()}));
             }
+            if let Some(sp) = body["gas_speed"].as_str() {
+                crate::chains::set_gas_speed(id, sp)?;
+                return Ok(json!({"ok": true, "chains": crate::chains::as_json()}));
+            }
             if let Some(url) = body["test"].as_str() {
                 return crate::chains::test_rpc(id, url);
             }
@@ -611,6 +743,7 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
             Ok(json!({"ok": true, "id": crate::backtest::start(body, wallet)?}))
         }
         "/api/strategies" => crate::library::post(&body),
+        "/api/ui_prefs" => set_ui_prefs(&body),
         "/api/pools/add" => {
             let cid = body["chain_id"].as_u64().unwrap_or(crate::chains::BASE);
             Ok(json!({"ok": true, "pool": add_pool(body["pool"].as_str().unwrap_or(""), body["name"].as_str(), cid)?}))
@@ -678,6 +811,19 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
                     let _ = std::fs::remove_file(crate::paths::stop_file());
                     w.request(false);
                 }
+                // one wallet (?wallet=<id>): it signs nothing while paused (checked before every send)
+                "pause_wallet" => {
+                    let f = crate::paths::wallet_pause_file();
+                    let _ = std::fs::create_dir_all(crate::paths::config());
+                    std::fs::write(&f, "paused from the web UI\n").map_err(|e| e.to_string())?;
+                    crate::info!("ui", "wallet {} paused", crate::paths::wallet());
+                    w.request(false);
+                }
+                "resume_wallet" => {
+                    let _ = std::fs::remove_file(crate::paths::wallet_pause_file());
+                    crate::info!("ui", "wallet {} started", crate::paths::wallet());
+                    w.request(false);
+                }
                 "resolve_now" => {
                     let _ = std::fs::remove_file(crate::paths::logs().join(format!("last_solve_{}.json", body["name"].as_str().unwrap_or(""))));
                     w.request(false);
@@ -689,6 +835,48 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
             }
             Ok(json!({"ok": true}))
         }
+        // the wallet list (wallets.rs): add (watched until a key is set), rename / recolour, remove
+        "/api/wallets" => match body["action"].as_str().unwrap_or("") {
+            // with a private key or a recovery phrase account the wallet is created with its key in one
+            // step (checked before anything is stored); without, it is watched only
+            "add" => {
+                let key = crate::wallets::key_from(&body)?;
+                let addr = key.as_ref().map(|k| k.0.clone()).unwrap_or_else(|| body["address"].as_str().unwrap_or("").to_string());
+                let w2 = crate::wallets::add(body["label"].as_str().unwrap_or(""), &addr, body["copy_pools_from"].as_str())?;
+                if let Some((_, k)) = key {
+                    let id = w2["id"].as_str().unwrap_or("").to_string();
+                    crate::paths::scope(&id, || crate::onboard::save_key(&k))?;
+                }
+                w.request(false);
+                Ok(json!({"ok": true, "wallet": w2, "address": addr}))
+            }
+            "edit" => {
+                crate::wallets::edit(body["id"].as_str().unwrap_or(""), body["label"].as_str(), body["color"].as_str())?;
+                Ok(json!({"ok": true, "wallets": crate::wallets::list()}))
+            }
+            "remove" => {
+                let id = body["id"].as_str().unwrap_or("");
+                if !crate::wallets::exists(id) {
+                    return Err("no such wallet".into());
+                }
+                // positions on chain, read now: a wallet is removed only once it holds none
+                let has = crate::paths::scope(id, || -> Result<bool, String> {
+                    let wallet = load_settings()["wallet"].as_str().unwrap_or("").to_string();
+                    if wallet.is_empty() {
+                        return Ok(false);
+                    }
+                    for p in load_pools() {
+                        if !wallet_positions(pool_chain(&p), p["pool"].as_str().unwrap_or(""), &wallet)?.is_empty() {
+                            return Ok(true);
+                        }
+                    }
+                    Ok(false)
+                })?;
+                crate::wallets::remove(id, has)?;
+                Ok(json!({"ok": true}))
+            }
+            a => Err(format!("unknown action {a}")),
+        },
         "/api/key" => crate::onboard::save_key(body["private_key"].as_str().unwrap_or("")),
         "/api/key/delete" => {
             crate::signer::forget();
@@ -703,9 +891,82 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
     }
 }
 
+// -- dashboard preferences ----------------------------------------------------------------------------
+
+/// The dashboard's own choices that should outlive a restart and a change of port (browser storage is
+/// per port): config/ui.json, shared by every wallet. Only the keys below are kept.
+const UI_PREFS: &[(&str, &[&str])] = &[("range_units", &["price", "tick"])];
+
+fn ui_prefs_path() -> std::path::PathBuf {
+    crate::paths::app_config().join("ui.json")
+}
+
+pub fn ui_prefs() -> Value {
+    let saved: Value = std::fs::read_to_string(ui_prefs_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!({}));
+    let mut out = json!({});
+    for (k, allowed) in UI_PREFS {
+        if let Some(v) = saved[*k].as_str().filter(|v| allowed.contains(v)) {
+            out[*k] = json!(v);
+        }
+    }
+    out
+}
+
+fn set_ui_prefs(body: &Value) -> Result<Value, String> {
+    let mut cur = ui_prefs();
+    for (k, v) in body.as_object().into_iter().flatten() {
+        let Some((_, allowed)) = UI_PREFS.iter().find(|(name, _)| name == k) else { return Err(format!("unknown preference {k}")) };
+        match v.as_str().filter(|v| allowed.contains(v)) {
+            Some(v) => cur[k.as_str()] = json!(v),
+            None => return Err(format!("{k}: expected one of {}", allowed.join(", "))),
+        }
+    }
+    std::fs::create_dir_all(crate::paths::app_config()).map_err(|e| e.to_string())?;
+    crate::settings::write_atomic(&ui_prefs_path(), &cur).map_err(|e| e.to_string())?;
+    Ok(json!({"ok": true, "prefs": cur}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_value_history_leaves_out_mis_measured_cycles_and_keeps_real_moves() {
+        let row = |ts: u64, v: f64| json!({"ts": ts, "total_usd": v, "value_usd": v, "chains": {"8453": {"incomplete": []}}});
+        let ts = |rows: &[Value]| rows.iter().map(|r| r["ts"].as_u64().unwrap()).collect::<Vec<_>>();
+        // one cycle where a pool could not be read: flagged, left out
+        let mut bad = row(3, 6000.0);
+        bad["chains"]["8453"]["incomplete"] = json!(["usdc-usdt: rate limited"]);
+        let h = clean_history(vec![row(1, 15000.0), row(2, 15010.0), bad, row(4, 15005.0)]);
+        assert_eq!(ts(&h), [1, 2, 4]);
+        // the same dip without the flag (an old file, or an answer that was wrong but not an error)
+        let h = clean_history(vec![row(1, 15000.0), row(2, 15010.0), row(3, 6000.0), row(4, 15005.0), row(5, 15002.0)]);
+        assert_eq!(ts(&h), [1, 2, 4, 5]);
+        // two and three cycles low, and a one-cycle spike
+        let h = clean_history(vec![row(1, 100.0), row(2, 60.0), row(3, 61.0), row(4, 100.5), row(5, 160.0), row(6, 100.2)]);
+        assert_eq!(ts(&h), [1, 4, 6]);
+        // a withdrawal is a step: kept, and so is ordinary noise under 3%
+        let h = clean_history(vec![row(1, 15000.0), row(2, 9000.0), row(3, 9001.0), row(4, 9002.0), row(5, 8900.0), row(6, 9003.0)]);
+        assert_eq!(ts(&h), [1, 2, 3, 4, 5, 6]);
+        // the newest cycle has no cycle after it to judge it by: kept until the next one
+        let h = clean_history(vec![row(1, 100.0), row(2, 100.0), row(3, 40.0)]);
+        assert_eq!(ts(&h), [1, 2, 3]);
+    }
+
+    #[test]
+    fn ui_prefs_keep_only_known_values_and_survive_a_reread() {
+        let d = crate::wallets::tests::temp_home("uiprefs");
+        assert_eq!(ui_prefs(), json!({}));
+        set_ui_prefs(&json!({"range_units": "tick"})).unwrap();
+        assert_eq!(ui_prefs(), json!({"range_units": "tick"}));
+        assert!(set_ui_prefs(&json!({"range_units": "bananas"})).is_err());
+        assert!(set_ui_prefs(&json!({"wallet": "x"})).is_err());
+        assert_eq!(ui_prefs(), json!({"range_units": "tick"}));
+        // a hand-edited file with a bad value is read as nothing
+        std::fs::write(ui_prefs_path(), r#"{"range_units": 3, "other": "x"}"#).unwrap();
+        assert_eq!(ui_prefs(), json!({}));
+        let _ = std::fs::remove_dir_all(d);
+    }
 
     /// How long each page request takes on a copy of a real app folder (never the live one):
     /// ALM_HOME=<copy> cargo test -- --ignored page_timings --nocapture

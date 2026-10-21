@@ -100,14 +100,55 @@ pub fn builtin() -> Vec<Value> {
     let mut s = graph("Wait out the move, watching WETH", v);
     s["park"] = json!(false);
     out.push(json!({"id": "b:waitout_weth", "category": "Directional", "name": "Wait out the move, watching WETH",
-                    "description": "Wait out the move, plus the market's own moves: for 24 hours after WETH makes a new 7-day high or low (its price from Base pools with at least $500 of active liquidity, on hourly candles) the position waits in the winning token too, even when this pool has not broken out yet. While WETH has no reliable price the position holds still. For pools of tokens that move with ETH (AERO/WETH and the like). On Base over 90 days: AERO/WETH +5.4% against holding where the plain one lost 5.3%, WETH/USDC +7.9% (plain +5.3%); one quarter of data, so a lead to test, not a result.",
+                    "description": "Wait out the move, plus the market's own moves: for 24 hours after WETH makes a new 7-day high or low (its price from Base pools with at least $500 of active liquidity, on hourly candles) the position waits in the winning token too, even when this pool has not broken out yet. While WETH has no reliable price the position holds still. For pools of tokens that move with ETH (AERO/WETH and the like). Over the year to Oct 2026 on Base: AERO/WETH +89% in WETH (holding +32%, the plain one +86%), WETH/USDC −4% (holding −14%, the plain one −7%), with drawdowns of about a third to a half; the walk-forward found no reliable edge, so a lead to test, not a result.",
                     "strategy": s}));
+
+    // hedged: a perp short on Hyperliquid holds the pool's exposure to its
+    // volatile token, so what is left is fees and emissions less the convexity loss and the hedge's
+    // costs, plus funding. Backtests only until the live hedge is built.
+    let hedge = |when: Option<&str>| n("h", "hedge", 960, 860, json!({"ratio": 1, "band_pct": 10, "min_usd": 25, "leverage": 2}),
+                                       when.map(|w| json!({"when": [w, "out"]})).unwrap_or_else(|| json!({})));
+    let hedged = |id: &str, name: &str, desc: &str, mut v: Vec<Value>, park: bool| {
+        let mut s = graph(name, std::mem::take(&mut v));
+        if !park {
+            s["park"] = json!(false);
+        }
+        json!({"id": format!("b:{id}"), "category": "Hedged", "name": name, "description": desc, "strategy": s})
+    };
+    let v = vec![n("lad", "ladder", 960, 60, json!({"hours": 24, "span": 60, "every_hours": 6, "turnover": 0.4, "unit": "spacings"}), json!({})), hedge(None)];
+    out.push(hedged("ladder_hedged", "Ladder, hedged",
+                    "For volatile pairs: the ladder over 60 spacings of the 24-hour median, with a Hyperliquid short holding all of the pool's exposure to the volatile token (traded back at 10% drift, margin at 2x from the pool's capital). Shows whether fees beat the convexity loss once price risk is gone.", v, true));
+    let mut v = waitout(["brk", "hot"]);
+    v.retain(|x| !["brk", "fa", "one", "poor", "out", "zero", "side", "x"].contains(&x["id"].as_str().unwrap_or("")));
+    v.push(hedge(None));
+    out.push(hedged("band_hedged", "Wide band, hedged",
+                    "For volatile pairs: one range of ±5 daily sigmas, re-centred after 4 hours out of range, never exiting, with a Hyperliquid short holding the pool's exposure. The classic delta-neutral LP: earns fees and funding, pays the convexity loss and the hedge's trades.", v, true));
+    // the band four times as wide, shorted only while the volatile token is in a downtrend: on 1%
+    // under its 72-hour average, off once back above it (a latch, so it does not flip every bar)
+    let mut v = waitout(["brk", "hot"]);
+    v.retain(|x| !["brk", "fa", "one", "poor", "out", "zero", "side", "x"].contains(&x["id"].as_str().unwrap_or("")));
+    for x in v.iter_mut().filter(|x| x["id"] == "k") {
+        x["p"]["k"] = json!(40);
+    }
+    v.extend([n("vp", "vol_price", 240, 760, json!({}), json!({})),
+              n("avg", "ema", 470, 760, json!({"hours": 72}), json!({"in": ["vp", "tick"]})),
+              n("under", "offset", 470, 860, json!({"value": -100}), json!({"in": ["avg", "out"]})),
+              n("fall", "lt", 700, 760, json!({}), json!({"a": ["vp", "tick"], "b": ["under", "out"]})),
+              n("back", "gt", 700, 860, json!({}), json!({"a": ["vp", "tick"], "b": ["avg", "out"]})),
+              n("down", "latch", 830, 800, json!({}), json!({"set": ["fall", "out"], "reset": ["back", "out"]})),
+              hedge(Some("down"))]);
+    out.push(hedged("band_trend_short", "Wide band, short in downtrends",
+                    "For volatile pairs: one wide range (±20 daily sigmas), re-centred after 4 hours out of range, never exiting. A Hyperliquid short holds the pool's exposure to the volatile token only while that token is in a downtrend: from 1% under its 72-hour average until it is back above it. It is a trend bet on the token as much as a hedge. Its earlier backtest gains were an artefact of a price filter the backtest used to execute at (fixed Oct 2026): over the year to Oct 2026 it lost 25% on Base WETH/USDC (holding −14%) and 18% on AERO/WETH (holding +21%). Backtests only until the live hedge is built.", v, true));
+    let mut v = waitout(["brk", "hot"]);
+    v.extend([n("calm", "not", 960, 760, json!({}), json!({"in": ["out", "out"]})), hedge(Some("calm"))]);
+    out.push(hedged("waitout_hedged", "Wait out the move, hedged",
+                    "Wait out the move, with a Hyperliquid short holding the pool's exposure while it farms. While it waits out a move in one token the short is closed, so the bet on the move stays.", v, false));
 
     out
 }
 
 fn path() -> std::path::PathBuf {
-    crate::paths::config().join("strategies.json")
+    crate::paths::app_config().join("strategies.json")
 }
 
 pub fn saved() -> Vec<Value> {
@@ -115,7 +156,7 @@ pub fn saved() -> Vec<Value> {
 }
 
 fn write(list: &[Value]) -> Result<(), String> {
-    let _ = std::fs::create_dir_all(crate::paths::config());
+    let _ = std::fs::create_dir_all(crate::paths::app_config());
     crate::settings::write_atomic(&path(), &Value::Array(list.to_vec())).map_err(|e| e.to_string())
 }
 
@@ -220,6 +261,25 @@ mod tests {
                     _ => {}
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod builtin_tests {
+    #[test]
+    fn every_builtin_node_strategy_parses() {
+        for s in super::builtin() {
+            if s["strategy"]["type"] == "graph" {
+                let g = crate::graph::Graph::parse(s["strategy"].as_object().unwrap(), 100);
+                assert!(g.is_ok(), "{}: {:?}", s["id"], g.err());
+            }
+        }
+        let hedged: Vec<_> = super::builtin().into_iter().filter(|s| s["category"] == "Hedged").collect();
+        assert_eq!(hedged.len(), 4);
+        for s in hedged {
+            let g = crate::graph::Graph::parse(s["strategy"].as_object().unwrap(), 100).unwrap();
+            assert_eq!(g.hedge().map(|h| h.ratio), Some(1.0), "{}", s["id"]);
         }
     }
 }

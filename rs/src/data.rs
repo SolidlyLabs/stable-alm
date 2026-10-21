@@ -281,10 +281,15 @@ pub fn load_apr(cid: u64, pool: &str) -> HashMap<i64, (f64, f64)> {
 // -- the replay market -------------------------------------------------------------------------------
 pub struct Market {
     pub ts: Vec<i64>,
+    /// each swap's tick as it traded (execution, fees, valuation); the bars hold the cleaned signal
     pub tick: Vec<i64>,
     /// sqrt price after each swap, raw units (sqrtPriceX96 / 2^96), consistent with `tick`.
     pub sp: Vec<f64>,
+    /// each swap's fee (numeraire) at its hour's final rate: what liquidity earned on it
     pub fee: Vec<f64>,
+    /// the same at the rate known when it traded (the last completed hour's), for signals: the
+    /// hour's rate is final only once the hour is over. Empty: `fee` (synthetic markets)
+    pub fee_sig: Vec<f64>,
     pub l_others: Vec<f64>,
     /// the pool's active liquidity at each swap as it happened (the wallet's own included): the
     /// liquidity that earned the swap's fee
@@ -303,6 +308,13 @@ pub struct Market {
     pub num1: bool,
     /// bar length in seconds: BAR_S, or 60 for a node strategy that decides every minute
     pub bar_s: i64,
+}
+
+impl Market {
+    /// Swap k's fee as a decision could know it then (`fee_sig`).
+    pub fn sig_fee(&self, k: usize) -> f64 {
+        self.fee_sig.get(k).copied().unwrap_or(self.fee[k])
+    }
 }
 
 /// A week of this market's bars.
@@ -375,6 +387,34 @@ pub fn rolling_median_trailing(x: &[i64], w: usize, mp: usize) -> Vec<f64> {
     out
 }
 
+/// The signal price: each swap's tick with spikes (a sandwich's front-run, a fat-finger trade)
+/// replaced by the trailing median of the last 51 swaps. A spike is a swap farther from that median
+/// than 20 ticks and than 6 median absolute deviations of the window, so a pool that is moving
+/// keeps its moves; and three such swaps in a row on the same side are a new level, kept as they
+/// are. Trailing: a swap's value never depends on later swaps (live reads the same).
+/// Before Oct 2026 every swap more than 20 ticks from the median was replaced: right for a stable
+/// pool, but on a volatile one it swapped 78% of a year's swaps (AERO/WETH) for a lagging median.
+pub fn spike_filter(tick: &[i64]) -> Vec<i64> {
+    const W: usize = 51;
+    let med = rolling_median_trailing(tick, W, 1);
+    let (mut run, mut side) = (0usize, 0i8);
+    let mut dev: Vec<f64> = Vec::with_capacity(W);
+    (0..tick.len()).map(|k| {
+        let m = med[k];
+        dev.clear();
+        dev.extend(tick[k.saturating_sub(W - 1)..=k].iter().map(|t| (*t as f64 - m).abs()));
+        let mad = median(&mut dev);
+        let d = tick[k] as f64 - m;
+        if d.abs() <= (6.0 * mad).max(20.0) {
+            run = 0;
+            return tick[k];
+        }
+        let s = if d > 0.0 { 1 } else { -1 };
+        if s == side { run += 1 } else { (run, side) = (1, s) }
+        if run >= 3 { tick[k] } else { round_even(m) as i64 }
+    }).collect()
+}
+
 fn f(s: &str) -> f64 {
     s.parse::<f64>().unwrap_or(0.0)
 }
@@ -386,6 +426,16 @@ pub fn build_market(events: Vec<Ev>, wallet: &str, apr: &HashMap<i64, (f64, f64)
 
 /// build_market() on bars of `bar_s` seconds.
 pub fn build_market_bars(events: Vec<Ev>, wallet: &str, apr: &HashMap<i64, (f64, f64)>, d0: i32, d1: i32, numeraire: i64, bar_s: i64) -> Result<Market, String> {
+    build_market_asof(events, wallet, apr, d0, d1, numeraire, bar_s, None)
+}
+
+/// build_market_bars() with the time the events are complete to (`as_of`, the store's coverage):
+/// every bar that has closed by then, swaps or none, so live has the bars a replay of the same
+/// time has (bars once ended only before the last swap, and live, which has no later swap, lagged
+/// behind the replay in a quiet pool). None: through the last swap.
+#[allow(clippy::too_many_arguments)]
+pub fn build_market_asof(events: Vec<Ev>, wallet: &str, apr: &HashMap<i64, (f64, f64)>, d0: i32, d1: i32, numeraire: i64, bar_s: i64,
+                         as_of: Option<i64>) -> Result<Market, String> {
     let mut seen = HashSet::new();
     let mut ev: Vec<Ev> = events.into_iter().filter(|e| seen.insert((e.block, e.log_index))).collect();
     ev.sort_by_key(|e| (e.block, e.log_index));
@@ -395,21 +445,17 @@ pub fn build_market_bars(events: Vec<Ev>, wallet: &str, apr: &HashMap<i64, (f64,
     if sw.is_empty() {
         return Err("no swaps in the replay window yet".into());
     }
-    let raw_tick: Vec<i64> = sw.iter().map(|(_, e)| e.tick).collect();
-    // trailing: a swap's cleaned price never depends on later swaps
-    let med = rolling_median_trailing(&raw_tick, 51, 1);
-    let mut tick = Vec::with_capacity(sw.len());
-    let mut sp = Vec::with_capacity(sw.len());
-    for (k, (_, e)) in sw.iter().enumerate() {
-        let m = round_even(med[k]);
-        if (raw_tick[k] as f64 - m).abs() > 20.0 {
-            tick.push(m as i64);
-            sp.push(1.0001f64.powf((m + 0.5) / 2.0));
-        } else {
-            tick.push(raw_tick[k]);
-            sp.push(f(&e.sqrt_price_x96) / 2f64.powi(96));
-        }
-    }
+    // every swap at the price it traded at: that is where our ranges were active, earned its fee,
+    // and where a trade of ours could fill. The cleaned price (a swap far from the trailing median
+    // of 51 replaced by it: spikes such as sandwiches) is for signals only, the bars below, which
+    // strategies read; using it to execute and value let a replay trade at a price that was gone
+    // (Oct 2026 review)
+    let tick: Vec<i64> = sw.iter().map(|(_, e)| e.tick).collect();
+    let sp: Vec<f64> = sw.iter().map(|(_, e)| {
+        let x = f(&e.sqrt_price_x96) / 2f64.powi(96);
+        if x > 0.0 && x.is_finite() { x } else { 1.0001f64.powf(e.tick as f64 / 2.0) }
+    }).collect();
+    let clean = spike_filter(&tick);
     // Wallet liquidity active at each swap's (post) tick.
     let lp: Vec<(usize, &Ev)> = ev.iter().enumerate().filter(|(_, e)| e.kind != "swap" && e.owner == wallet).collect();
     let mut positions: Vec<((i64, i64), f64)> = vec![];
@@ -431,8 +477,10 @@ pub fn build_market_bars(events: Vec<Ev>, wallet: &str, apr: &HashMap<i64, (f64,
     }
     let ts: Vec<i64> = sw.iter().map(|(_, e)| e.ts).collect();
     let mut fee = Vec::with_capacity(sw.len());
+    let mut fee_sig = Vec::with_capacity(sw.len());
     let mut l_others = Vec::with_capacity(sw.len());
     let mut l_active = Vec::with_capacity(sw.len());
+    let mut sig_rate = 0.0;
     for (k, (_, e)) in sw.iter().enumerate() {
         let a0 = f(&e.amount0) / 10f64.powi(d0);
         let a1 = f(&e.amount1) / 10f64.powi(d1);
@@ -442,17 +490,23 @@ pub fn build_market_bars(events: Vec<Ev>, wallet: &str, apr: &HashMap<i64, (f64,
         let amount_in = if numeraire == 0 { in0 + in1 / p } else { in0 * p + in1 };
         let hour = ts[k].div_euclid(3600) * 3600;
         fee.push(amount_in * apr.get(&hour).map(|x| x.0).unwrap_or(0.0));
+        if let Some(r) = apr.get(&(hour - 3600)) {
+            sig_rate = r.0;
+        }
+        fee_sig.push(amount_in * sig_rate);
         l_others.push((f(&e.liquidity) - l_wallet[k]).max(0.0) / liq_scale);
         l_active.push(f(&e.liquidity).max(0.0) / liq_scale);
     }
     let bs = bar_s;
     let t0 = (ts[0].div_euclid(bs) + 1) * bs;
     let last = *ts.last().unwrap();
-    let bar_end: Vec<i64> = (0..).map(|i| t0 + i * bs).take_while(|t| *t < last).collect();
+    let upto = as_of.filter(|a| *a >= last).unwrap_or(last - 1);
+    let bar_end: Vec<i64> = (0..).map(|i| t0 + i * bs).take_while(|t| *t <= upto).collect();
     let bar_idx: Vec<usize> = bar_end.iter().map(|b| ts.partition_point(|t| t <= b) - 1).collect();
-    let bar_tick: Vec<i64> = bar_idx.iter().map(|i| tick[*i]).collect();
-    let (bar_hi, bar_lo, bar_fee) = bar_ranges(&tick, &fee, &bar_idx);
-    Ok(Market { ts, tick, sp, fee, l_others, l_active, bar_end, bar_idx, bar_tick, bar_hi, bar_lo, bar_fee, decimals: d0, px_scale, liq_scale, num1: numeraire == 1, bar_s })
+    // the bars are the signal: cleaned closes, highs and lows
+    let bar_tick: Vec<i64> = bar_idx.iter().map(|i| clean[*i]).collect();
+    let (bar_hi, bar_lo, bar_fee) = bar_ranges(&clean, &fee_sig, &bar_idx);
+    Ok(Market { ts, tick, sp, fee, fee_sig, l_others, l_active, bar_end, bar_idx, bar_tick, bar_hi, bar_lo, bar_fee, decimals: d0, px_scale, liq_scale, num1: numeraire == 1, bar_s })
 }
 
 /// Per bar: the high and low swap tick in (previous bar, this bar] (the close when none), and the fees.
@@ -494,7 +548,8 @@ pub fn live_market_bars(cid: u64, pool: &str, wallet: &str, d0: i32, d1: i32, nu
     if ev.is_empty() {
         return Err(format!("no event data for pool {pool}; run the data bootstrap first"));
     }
-    build_market_bars(ev, &wallet.to_lowercase(), &load_apr(cid, pool), d0, d1, numeraire, bar_s)
+    let as_of = crate::history::coverage(cid, pool).map(|c| c.to_ts.min(now));
+    build_market_asof(ev, &wallet.to_lowercase(), &load_apr(cid, pool), d0, d1, numeraire, bar_s, as_of)
 }
 
 /// (tl, tu) of the wallet's ranges from its Mint/Burn history.
@@ -595,6 +650,25 @@ pub fn cached_flvr(cid: u64, pool: &str) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_spike_filter_drops_spikes_and_keeps_moves() {
+        // calm around 0, a two-swap sandwich spike of 300, then calm again: the spike goes
+        let mut x: Vec<i64> = (0..200).map(|k| (k % 5) - 2).collect();
+        x[100] = 300;
+        x[101] = 298;
+        let c = spike_filter(&x);
+        assert!(c[100].abs() <= 2 && c[101].abs() <= 2, "{} {}", c[100], c[101]);
+        assert_eq!(&c[..100], &x[..100]);
+        // a steady trend of 10 ticks a swap: every swap is kept
+        let tr: Vec<i64> = (0..400).map(|k| k * 10).collect();
+        assert_eq!(spike_filter(&tr), tr);
+        // a jump to a new level that holds: kept from its third swap on
+        let lv: Vec<i64> = (0..200).map(|k| if k < 100 { (k % 3) - 1 } else { 500 + (k % 3) - 1 }).collect();
+        let c = spike_filter(&lv);
+        assert!(c[100].abs() <= 1 && c[101].abs() <= 1);
+        assert!(c[102..].iter().all(|t| *t >= 498), "{:?}", &c[100..106]);
+    }
 
     #[test]
     fn trailing_median_never_looks_ahead() {
