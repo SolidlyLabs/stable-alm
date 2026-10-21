@@ -109,6 +109,20 @@ pub fn check_swap(wallet: &str, tin: &str, amount_in: f64, tout: &str, min_out: 
 }
 
 #[cfg(test)]
+mod stale_price {
+    use super::stale_ok;
+    use std::time::Duration;
+
+    #[test]
+    fn a_price_from_the_last_hour_serves_when_it_cannot_be_refreshed() {
+        assert_eq!(stale_ok(Some((1.0001, Duration::from_secs(1800)))), Some(1.0001));
+        assert_eq!(stale_ok(Some((1.0001, Duration::from_secs(3700)))), None);
+        assert_eq!(stale_ok(Some((0.0, Duration::from_secs(10)))), None);
+        assert_eq!(stale_ok(None), None);
+    }
+}
+
+#[cfg(test)]
 mod swap_checks {
     use super::*;
     const W: &str = "0x00000000000000000000000000000000000000aa";
@@ -188,7 +202,19 @@ pub fn usd(cid: u64, token: &str) -> Result<f64, String> {
     }
     let d = meta(cid, &t)?.decimals;
     let ud = meta(cid, &usdc)?.decimals;
-    let q = quote(cid, &t, &usdc, &format!("1{}", "0".repeat(d as usize)), d, ud)?;
+    let q = match quote(cid, &t, &usdc, &format!("1{}", "0".repeat(d as usize)), d, ud) {
+        Ok(q) => q,
+        Err(e) => {
+            // the Solidly UI's API is down for a moment (a 502 from its proxy, say): a price read in the
+            // last hour serves, so a pool's cycle does not stop over it
+            let old = USD.lock().unwrap().as_ref().and_then(|m| m.get(&(cid, t.clone())).copied());
+            if let Some(p) = stale_ok(old.map(|(p, at)| (p, at.elapsed()))) {
+                crate::warn!("prices", "USD price of {t} not refreshed ({e}); using the one from the last hour");
+                return Ok(p);
+            }
+            return Err(e);
+        }
+    };
     let best = &q["best"];
     let p = best["amountInUsd"].as_f64().or_else(|| best["amountInUsd"].as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0);
     let p = if p > 0.0 { p } else { num_out(best) / 10f64.powi(ud as i32) };
@@ -197,6 +223,11 @@ pub fn usd(cid: u64, token: &str) -> Result<f64, String> {
     }
     USD.lock().unwrap().as_mut().unwrap().insert((cid, t), (p, Instant::now()));
     Ok(p)
+}
+
+/// A cached USD price still usable when it cannot be refreshed: up to an hour old.
+fn stale_ok(cached: Option<(f64, Duration)>) -> Option<f64> {
+    cached.filter(|(p, age)| *p > 0.0 && *age < Duration::from_secs(3600)).map(|(p, _)| p)
 }
 
 /// best.amountOut as f64 (raw units).

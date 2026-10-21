@@ -326,6 +326,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_server_failures_and_rate_limits_are_asked_again() {
+        for c in [429, 500, 502, 503, 504, 522] {
+            assert!(transient(c), "{c}");
+        }
+        for c in [200, 400, 401, 403, 404, 422] {
+            assert!(!transient(c), "{c}");
+        }
+    }
+
+    #[test]
     fn aggregate3_round_trip_shape() {
         let calls = vec![("0x00000000000000000000000000000000000000a1".to_string(), vec![1, 2, 3, 4]),
                          ("0x00000000000000000000000000000000000000b2".to_string(), vec![9; 36])];
@@ -419,23 +429,46 @@ pub fn block_number(cid: u64) -> Result<u64, String> {
     Ok(hex_u64(&call_ok(cid, "eth_blockNumber", json!([]))?))
 }
 
-/// GET or POST JSON over HTTPS (Solidly API routes).
-pub fn get_json(url: &str) -> Result<Value, String> {
-    match agent().get(url).set("Accept", "application/json").call() {
-        Ok(r) => r.into_json().map_err(|e| e.to_string()),
-        Err(ureq::Error::Status(c, r)) => Err(format!("HTTP {c}: {}", r.into_string().unwrap_or_default().chars().take(300).collect::<String>())),
-        Err(e) => Err(e.to_string()),
+/// Whether an HTTP answer is worth asking again: the server or a proxy in front of it failing (5xx,
+/// e.g. Cloudflare's 502 when the origin is overloaded) or a rate limit (429). Other codes are answers.
+pub fn transient(code: u16) -> bool {
+    code == 429 || (500..600).contains(&code)
+}
+
+/// Seconds to wait before attempt `n` (from 1) of a web API call: 0, 1, 3.
+const API_WAITS: [u64; 3] = [0, 1, 3];
+
+/// A web API call, asked again (up to three times in all) when it fails in a way that may pass: a
+/// transient HTTP code, or no answer at all (connection reset, timeout).
+fn api_call(send: impl Fn() -> Result<ureq::Response, ureq::Error>) -> Result<Value, String> {
+    let mut last = String::new();
+    for wait in API_WAITS {
+        std::thread::sleep(std::time::Duration::from_secs(wait));
+        match send() {
+            Ok(r) => return r.into_json().map_err(|e| e.to_string()),
+            Err(ureq::Error::Status(c, r)) => {
+                last = format!("HTTP {c}: {}", r.into_string().unwrap_or_default().chars().take(300).collect::<String>());
+                if !transient(c) {
+                    return Err(last);
+                }
+            }
+            Err(e) => last = e.to_string(),
+        }
     }
+    Err(last)
+}
+
+/// GET or POST JSON over HTTPS (Solidly API routes), asked again on a transient failure.
+pub fn get_json(url: &str) -> Result<Value, String> {
+    api_call(|| agent().get(url).set("Accept", "application/json").call())
 }
 
 pub fn post_json(url: &str, body: &Value, headers: &[(&str, &str)]) -> Result<Value, String> {
-    let mut req = agent().post(url).set("Content-Type", "application/json").set("Accept", "application/json");
-    for (k, v) in headers {
-        req = req.set(k, v);
-    }
-    match req.send_json(body.clone()) {
-        Ok(r) => r.into_json().map_err(|e| e.to_string()),
-        Err(ureq::Error::Status(c, r)) => Err(format!("HTTP {c}: {}", r.into_string().unwrap_or_default().chars().take(300).collect::<String>())),
-        Err(e) => Err(e.to_string()),
-    }
+    api_call(|| {
+        let mut req = agent().post(url).set("Content-Type", "application/json").set("Accept", "application/json");
+        for (k, v) in headers {
+            req = req.set(k, v);
+        }
+        req.send_json(body.clone())
+    })
 }

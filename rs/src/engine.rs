@@ -909,7 +909,10 @@ impl Executor {
                 let rest: f64 = ranges[i..].iter().map(|x| x.2).sum();
                 let share = wi / rest;
                 match self.retry(&format!("mint [{tl},{tu})"), |s| s.mint_one(tl, tu, share, budget0)) {
-                    Ok(true) => minted_any = true,
+                    Ok(true) => {
+                        minted_any = true;
+                        UNMINTED_SWAP.lock().unwrap().get_or_insert_with(HashMap::new).remove(&unminted_key(self.cid, &self.cfg.pool));
+                    }
                     Ok(false) => {}
                     Err(e) => self.say_err(format!("  mint [{tl},{tu}) gave up: {e}; tokens stay idle for the next pass")),
                 }
@@ -957,6 +960,14 @@ impl Executor {
             return Ok(());
         }
         let zero_for_one = diff0 < 0.0;
+        let key = unminted_key(self.cid, &self.cfg.pool);
+        let earlier = UNMINTED_SWAP.lock().unwrap().get_or_insert_with(HashMap::new).get(&key).copied();
+        if swaps_back(earlier, now(), zero_for_one) {
+            let at = earlier.map(|x| x.0).unwrap_or(0);
+            self.say_warn(format!("  e. ratio swap skipped: it would undo the swap of {} min ago, after which nothing was minted; minting with the balances on hand",
+                                  now().saturating_sub(at) / 60));
+            return Ok(());
+        }
         let (tin, tout) = if zero_for_one { (self.t0.clone(), self.t1.clone()) } else { (self.t1.clone(), self.t0.clone()) };
         let mut amount_in = if zero_for_one { -diff0 } else { diff0 * p };
         let (din, dout) = (prices::meta(self.cid, &tin)?.decimals, prices::meta(self.cid, &tout)?.decimals);
@@ -977,6 +988,8 @@ impl Executor {
         let fair = if zero_for_one { amount_in as f64 * p } else { amount_in as f64 / p };
         let max_cost = self.cfg.max_swap_cost_bps;
         self.swap(&tin, &tout, amount_in, fair, max_cost, "e. ratio swap")?;
+        // pending until a mint follows (deploy clears it)
+        UNMINTED_SWAP.lock().unwrap().get_or_insert_with(HashMap::new).insert(key, (now(), zero_for_one));
         Ok(())
     }
 
@@ -1919,6 +1932,40 @@ impl Executor {
 fn transfer_failed(reason: &str) -> bool {
     let r = reason.trim();
     ["TF", "STF"].iter().any(|c| r == *c || r.starts_with(&format!("{c} ")))
+}
+
+/// Ratio swaps that no mint has followed yet, per (chain, pool): when made and which way (true:
+/// token0 in). While a mint keeps failing, the next pass would otherwise size a new ratio swap from the
+/// balances the last one left, and can swap back the other way, paying the swap cost each time with
+/// nothing deployed. Kept in memory: a restart starts afresh.
+static UNMINTED_SWAP: std::sync::Mutex<Option<HashMap<(u64, String), (u64, bool)>>> = std::sync::Mutex::new(None);
+/// How long an unminted swap holds back a swap the other way.
+const SWAP_BACK_HOLD_S: u64 = 6 * 3600;
+
+/// Whether a ratio swap `zero_for_one` would undo an earlier one that no mint followed.
+fn swaps_back(earlier: Option<(u64, bool)>, now: u64, zero_for_one: bool) -> bool {
+    matches!(earlier, Some((at, dir)) if dir != zero_for_one && now.saturating_sub(at) < SWAP_BACK_HOLD_S)
+}
+
+fn unminted_key(cid: u64, pool: &str) -> (u64, String) {
+    (cid, pool.to_lowercase())
+}
+
+#[cfg(test)]
+mod swap_back_tests {
+    use super::swaps_back;
+
+    #[test]
+    fn a_ratio_swap_does_not_undo_an_earlier_one_that_no_mint_followed() {
+        let now = 1_000_000;
+        // swapped token0 in an hour ago and nothing was minted: swapping token1 in now would undo it
+        assert!(swaps_back(Some((now - 3600, true)), now, false));
+        // the same way again is a top-up, not a swap back
+        assert!(!swaps_back(Some((now - 3600, true)), now, true));
+        // after the hold, or with nothing pending, the strategy decides again
+        assert!(!swaps_back(Some((now - 7 * 3600, true)), now, false));
+        assert!(!swaps_back(None, now, false));
+    }
 }
 
 #[cfg(test)]
