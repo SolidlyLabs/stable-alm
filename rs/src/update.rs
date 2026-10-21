@@ -174,7 +174,14 @@ pub fn install() -> Result<Value, String> {
         if std::fs::read(&path).map(|x| sha256_hex(&x)).ok().as_deref() != Some(want) {
             return Err("the saved installer changed on disk".into());
         }
-        std::process::Command::new(&path).args(["/SILENT", "/NORESTART"]).spawn().map_err(|e| format!("could not start the installer: {e}"))?;
+        // stop sending first, so the running cycle ends at once and the installer's --quit returns
+        // (a transaction already sent is still followed until it is mined); the new version removes it
+        let marker = crate::paths::update_file();
+        std::fs::write(&marker, crate::engine::now().to_string()).map_err(|e| format!("could not pause for the update: {e}"))?;
+        if let Err(e) = std::process::Command::new(&path).args(["/SILENT", "/NORESTART"]).spawn() {
+            let _ = std::fs::remove_file(&marker);
+            return Err(format!("could not start the installer: {e}"));
+        }
         crate::info!("update", "installing version {} (signed by {}; installer {got})", s["latest"].as_str().unwrap_or(""), s["signed_by"].as_str().unwrap_or(""));
         Ok(json!({"started": true, "version": s["latest"]}))
     })();
@@ -184,8 +191,10 @@ pub fn install() -> Result<Value, String> {
     r
 }
 
-/// The periodic check (settings "update_check", on by default).
+/// The periodic check (settings "update_check", on by default). Also ends the pause an update set:
+/// this is the version that update started.
 pub fn start() {
+    let _ = std::fs::remove_file(crate::paths::update_file());
     std::thread::spawn(|| {
         std::thread::sleep(std::time::Duration::from_secs(60));
         loop {

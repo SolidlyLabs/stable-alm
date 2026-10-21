@@ -144,6 +144,18 @@ pub fn wallet_pause_file() -> PathBuf {
     config().join("PAUSED")
 }
 
+/// Written (with the unix time) when the app starts installing an update, removed when the new
+/// version starts: while it is there and under 30 minutes old no transaction is sent, so the running
+/// cycle winds down at once and the installer's `--quit` is not kept waiting by a live pass.
+pub fn update_file() -> PathBuf {
+    app_config().join("UPDATING")
+}
+
+/// Whether the update marker (its contents, the unix time it was written) still holds at `now`.
+fn updating(contents: Option<&str>, now: u64) -> bool {
+    contents.and_then(|s| s.trim().parse::<u64>().ok()).is_some_and(|at| now.saturating_sub(at) < 1800)
+}
+
 /// Why signing is not allowed right now (Pause / STOP file, or ALM_DISABLED=1), checked immediately
 /// before every broadcast so a pause stops the next transaction, not only the next cycle.
 pub fn execution_blocked() -> Option<String> {
@@ -155,6 +167,9 @@ pub fn execution_blocked() -> Option<String> {
     }
     if std::env::var("ALM_DISABLED").as_deref() == Ok("1") {
         return Some("ALM_DISABLED=1 is set".into());
+    }
+    if updating(std::fs::read_to_string(update_file()).ok().as_deref(), crate::engine::now()) {
+        return Some("paused while the update installs".into());
     }
     None
 }
@@ -214,5 +229,20 @@ pub fn seed() {
     let pools = config().join("pools.json");
     if !pools.exists() {
         let _ = std::fs::write(pools, "[]\n");
+    }
+}
+
+#[cfg(test)]
+mod update_marker_tests {
+    use super::updating;
+
+    #[test]
+    fn the_update_marker_pauses_sending_for_half_an_hour_at_most() {
+        assert!(updating(Some("1000"), 1000 + 60));
+        assert!(updating(Some("1000
+"), 1000 + 1799));
+        assert!(!updating(Some("1000"), 1000 + 1800));
+        assert!(!updating(Some("garbage"), 1000));
+        assert!(!updating(None, 1000));
     }
 }
