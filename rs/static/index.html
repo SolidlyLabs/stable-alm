@@ -252,6 +252,7 @@ svg.chart{width:100%;height:210px;display:block}
 .rpcrow{display:grid;grid-template-columns:1fr 1fr 64px 76px auto;gap:8px;align-items:end;padding:10px 0;border-top:1px solid var(--line)}
 .rpcrow:first-child{border-top:0;padding-top:0}
 .fundrow{grid-template-columns:1fr auto;align-items:center}.fundrow .picker .sel{min-height:38px}.rpcrow .nm{grid-column:1/-1;display:flex;align-items:center;gap:8px}
+#rpcList input.draft{border-color:color-mix(in srgb,var(--warn) 60%,var(--line2))}
 .gasrow{grid-column:1/-1;display:flex;align-items:center;gap:10px;flex-wrap:wrap}.gasrow label.f{margin:0}.gasrow .pos-seg button .mute{font-weight:400}
 @media (max-width:640px){.rpcrow{grid-template-columns:1fr}}
 .hide{display:none!important}.empty{padding:28px;text-align:center;color:var(--mute)}
@@ -592,8 +593,8 @@ document.addEventListener("click", e => {
     case "fund-unpick": e.stopPropagation(); fundEdit[+a] = fundCur(+a).filter(x => x !== el.dataset.addr); refreshFundRow(+a); if (fundOpen === +a) filterFund(+a); break;
     case "fund-save": saveFund(+a, fundEdit[+a] ?? fundSaved(+a)); break;
     case "fund-reset": delete fundEdit[+a]; saveFund(+a, null); break;
-    case "rpc-save": saveRpc(+a); break;
-    case "rpc-test": testRpc(+a); break;
+    case "rpc-save": saveRpc(+a).catch(e => toast("Save failed: " + e.message, true)); break;
+    case "rpc-test": testRpc(+a).catch(e => { rpcStatus(+a, `<span class=bad>${esc(e.message)}</span>`); toast("Test failed: " + e.message, true); }); break;
     case "rpc-reset": resetRpc(+a); break;
     case "gas-set": setGas(+a, el.dataset.speed); break;
     default: return;
@@ -1570,6 +1571,7 @@ function renderRpc() {
       <div class="row" style="gap:6px"><button class="sec sm" data-act="rpc-test" data-arg="${c.id}">Test</button><button class="sm" data-act="rpc-save" data-arg="${c.id}">Save</button>
         <button class="ghost sm" data-act="rpc-reset" data-arg="${c.id}" title="back to the default endpoints">Reset</button></div>
       ${gasRow(c)}</div>`).join("");
+  rpcRestore();
   loadGas();
 }
 // gas speed per chain, with the live tip of each speed (refreshed once a minute while Settings is open)
@@ -1596,9 +1598,31 @@ async function setGas(id, speed) {
     toast(`${chainOf(id).name}: gas set to ${speed}.`); }
   catch (e) { toast(e.message, true); }
 }
-const rpcRow = id => document.querySelector(`.rpcrow[data-chain="${id}"]`);
+// the Chains & RPC card's rows only: the Funding card's rows share the rpcrow class and come first
+const rpcRow = id => $("rpcList").querySelector(`.rpcrow[data-chain="${id}"]`);
 const rpcVal = (id, k) => rpcRow(id).querySelector(`[data-k="${k}"]`).value.trim();
-const rpcStatus = (id, html) => { rpcRow(id).querySelector('[data-k="status"]').innerHTML = html; };
+// what was typed and not saved yet, and the last test's result, per chain: the card is redrawn from the
+// saved settings (on every refresh once nothing in it has focus, and after Save settings), and both
+// must survive that until Save or Reset
+const RPC_DRAFT = {}, RPC_STATUS = {};
+const rpcStatus = (id, html) => { RPC_STATUS[id] = html; const r = rpcRow(id); if (r) r.querySelector('[data-k="status"]').innerHTML = html; };
+function rpcRestore() {
+  for (const [id, d] of Object.entries(RPC_DRAFT)) {
+    const r = rpcRow(+id);
+    if (!r) continue;
+    for (const [k, v] of Object.entries(d)) { const el = r.querySelector(`[data-k="${k}"]`); if (el) { el.value = v; el.classList.add("draft"); } }
+    if (Object.keys(d).length) r.querySelector('[data-k="status"]').innerHTML = RPC_STATUS[id] || `<span class=warn>not saved: press Save</span>`;
+  }
+  for (const [id, html] of Object.entries(RPC_STATUS)) { const r = rpcRow(+id); if (r && !RPC_DRAFT[id]) r.querySelector('[data-k="status"]').innerHTML = html; }
+}
+document.addEventListener("input", e => {
+  const el = e.target, r = el.closest && el.closest("#rpcList .rpcrow");
+  if (!r || !el.dataset.k || el.dataset.k === "status") return;
+  const id = +r.dataset.chain;
+  (RPC_DRAFT[id] = RPC_DRAFT[id] || {})[el.dataset.k] = el.value;
+  el.classList.add("draft");
+  delete RPC_STATUS[id];
+});
 async function testRpc(id) {
   rpcStatus(id, "testing…");
   const out = [];
@@ -1614,11 +1638,12 @@ async function saveRpc(id) {
   if (!(await testRpc(id))) { toast("Not saved: fix the RPC that failed the test first.", true); return; }
   try { const r = await api("/api/chains", {id, rpc: rpcVal(id, "rpc"), send_rpc: rpcVal(id, "send_rpc"), batch_size: +rpcVal(id, "batch_size") || 3,
     rate_per_min: rpcVal(id, "rate_per_min") === "" ? null : +rpcVal(id, "rate_per_min")});
-    S.chains = r.chains; toast(`${chainOf(id).name}: RPC settings saved.`); document.activeElement.blur(); renderRpc(); }
+    S.chains = r.chains; delete RPC_DRAFT[id]; toast(`${chainOf(id).name}: RPC settings saved.`); document.activeElement.blur(); renderRpc(); }
   catch (e) { toast(e.message, true); }
 }
 async function resetRpc(id) {
-  try { const r = await api("/api/chains", {id, rpc: "", send_rpc: "", batch_size: 3, rate_per_min: null}); S.chains = r.chains; renderRpc(); toast(`${chainOf(id).name}: default RPCs restored.`); }
+  try { const r = await api("/api/chains", {id, rpc: "", send_rpc: "", batch_size: 3, rate_per_min: null}); S.chains = r.chains; delete RPC_DRAFT[id]; delete RPC_STATUS[id];
+    document.activeElement.blur(); renderRpc(); toast(`${chainOf(id).name}: default RPCs restored.`); }
   catch (e) { toast(e.message, true); }
 }
 function renderSettings() {

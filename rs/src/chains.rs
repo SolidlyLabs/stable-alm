@@ -223,7 +223,8 @@ pub fn set_gas_speed(id: u64, speed: &str) -> Result<(), String> {
         return Err(format!("chain {id} is not supported"));
     }
     let sp = crate::chain::GasSpeed::parse(speed).ok_or("gas_speed: expected low, normal or instant")?;
-    let p = crate::paths::config().join("chains.json");
+    // the app's chains.json, which every wallet reads (not the current wallet's folder)
+    let p = crate::paths::app_config().join("chains.json");
     let mut user: Value = std::fs::read_to_string(&p).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!({}));
     if !user.is_object() {
         user = json!({});
@@ -355,4 +356,23 @@ pub fn blocks_per_day(id: u64) -> i64 {
     block_ts(id, 0);
     let a = ANCHOR.lock().unwrap();
     a.as_ref().and_then(|m| m.get(&id)).map(|(_, _, spb)| (86400.0 / spb) as i64).unwrap_or(43_200)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_gas_speed_set_from_any_wallet_lands_in_the_app_wide_chains_file() {
+        let d = crate::wallets::tests::temp_home("gasspeed");
+        crate::paths::scope("second", || set_gas_speed(BASE, "instant")).unwrap();
+        let read = |p: std::path::PathBuf| std::fs::read_to_string(p).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()).unwrap_or(json!({}));
+        assert_eq!(read(crate::paths::app_config().join("chains.json"))["8453"]["gas_speed"], "instant");
+        assert!(!crate::paths::scope("second", crate::paths::config).join("chains.json").exists());
+        // normal is the default, stored as no entry
+        set_gas_speed(BASE, "normal").unwrap();
+        assert!(read(crate::paths::app_config().join("chains.json"))["8453"].get("gas_speed").is_none());
+        assert!(set_gas_speed(BASE, "fast").is_err());
+        let _ = std::fs::remove_dir_all(d);
+    }
 }
