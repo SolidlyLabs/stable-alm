@@ -252,13 +252,13 @@ It is a single file of about 8 MB; copy it anywhere and run it.
 To build the Windows installer, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run, from `rs/`:
 
 ```bash
-ISCC /DAppVersion=0.6.3 installer/StableALM.iss     # -> rs/dist/StableALM-Setup-0.6.3.exe
+ISCC /DAppVersion=0.6.4 installer/StableALM.iss     # -> rs/dist/StableALM-Setup-0.6.4.exe
 ```
 
 To sign a release (writes `SHA256SUMS.txt` and `SHA256SUMS.txt.sig` next to the files; upload both):
 
 ```bash
-pwsh release/sign.ps1 -Files dist/StableALM-Setup-0.6.3.exe, dist/StableALM.exe
+pwsh release/sign.ps1 -Files dist/StableALM-Setup-0.6.4.exe, dist/StableALM.exe
 ```
 
 Signers are listed in `rs/release/allowed_signers` (OpenSSH format). To let someone else sign

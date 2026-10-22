@@ -1082,62 +1082,53 @@ impl Executor {
     }
 
     pub fn mint_one(&mut self, tl: i64, tu: i64, share: f64, budget0: f64) -> Res<bool> {
-        let (mut sp, _, _, p) = self.price()?;
         let (sa, sb) = (sqrt_ratio_at_tick(tl), sqrt_ratio_at_tick(tu));
-        let (x, y) = self.usable(budget0, p)?;
         let one = BigUint::from(10u8).pow(18);
-        let (a0, a1) = crate::tickmath::amounts_for_liquidity(&sp, &sa, &sb, &one);
-        let (fa0, fa1) = (to_f64(&a0), to_f64(&a1));
-        let f0 = if fa0 + fa1 > 0.0 { fa0 / (fa0 + fa1 / p) } else { 1.0 };
-        let v0 = (x as f64 + y as f64 / p) * share;
-        let x_r = ((f0 * v0) as i128).min(x);
-        let y_r = (((1.0 - f0) * v0 * p) as i128).min(y);
-        let mut liq = (to_f64(&liquidity_for_amounts(&sp, &sa, &sb, &big(x_r), &big(y_r))) * 0.999) as i128;
-        if liq > 0 {
-            let (m0, m1) = crate::tickmath::amounts_for_liquidity(&sp, &sa, &sb, &big(liq));
-            if self.value0(to_f64(&m0), to_f64(&m1), p) < self.cfg.min_swap_value {
-                liq = 0;
-            }
-        }
-        if liq <= 0 {
-            self.say(format!("  f. mint [{tl},{tu}): nothing to add (usable {} t0 / {} t1)", self.fmt0(x as f64), self.fmt1(y as f64)));
-            return Ok(false);
-        }
-        let slip = if self.is_solid_lp { self.cfg.slippage_bps / 1e4 } else { self.cfg.slippage_bps / 1e4 };
+        let mut shrink = 1.0;
+        let mut floor = 0;
         let mut reapproved = false;
         for _ in 0..7 {
-            let (m0, m1) = crate::tickmath::amounts_for_liquidity(&sp, &sa, &sb, &big(liq));
+            // every attempt sizes from the price and the balances as they are now
+            let (sp, _, _, p) = self.price()?;
+            let (x, y) = self.usable(budget0, p)?;
+            let (a0, a1) = crate::tickmath::amounts_for_liquidity(&sp, &sa, &sb, &one);
+            let (fa0, fa1) = (to_f64(&a0), to_f64(&a1));
+            let f0 = if fa0 + fa1 > 0.0 { fa0 / (fa0 + fa1 / p) } else { 1.0 };
+            let v0 = (x as f64 + y as f64 / p) * share;
+            let x_r = ((f0 * v0) as i128).min(x);
+            let y_r = (((1.0 - f0) * v0 * p) as i128).min(y);
+            let target = liquidity_for_amounts(&sp, &sa, &sb, &big(x_r), &big(y_r));
+            let fit = mint_liquidity(&sp, &sa, &sb, &big(x), &big(y));
+            let mut liq = (to_f64(&target.min(fit)) * 0.999 * shrink) as i128;
+            let (m0, m1) = crate::tickmath::amounts_for_liquidity(&sp, &sa, &sb, &big(liq.max(0)));
             let (m0, m1) = (small(&m0), small(&m1));
+            if liq > 0 && self.value0(m0 as f64, m1 as f64, p) < self.cfg.min_swap_value {
+                liq = 0;
+            }
+            if liq <= 0 {
+                self.say(format!("  f. mint [{tl},{tu}): nothing to add (usable {} t0 / {} t1)", self.fmt0(x as f64), self.fmt1(y as f64)));
+                return Ok(false);
+            }
+            let floor_bps = DEPOSIT_FLOOR_BPS[floor].max(self.cfg.slippage_bps);
+            let b = mint_bounds(&sp, &sa, &sb, liq, floor_bps);
             let (t0, t1) = (self.t0.clone(), self.t1.clone());
-            self.ensure_allowance(&t0, m0 + m0 / 1000 + 10, None)?;
-            self.ensure_allowance(&t1, m1 + m1 / 1000 + 10, None)?;
+            self.ensure_allowance(&t0, b.max0 + b.max0 / 1000 + 10, None)?;
+            self.ensure_allowance(&t1, b.max1 + b.max1 / 1000 + 10, None)?;
             let data = calldata(
                 "mint(address,int24,int24,uint128,uint256,uint256,uint256)",
-                &[addr(&self.wallet), chain::int(tl), chain::int(tu), u(big(liq)), u(big((m0 as f64 * (1.0 - slip)) as i128)),
-                  u(big((m1 as f64 * (1.0 - slip)) as i128)), u(now() + DEADLINE_S)],
+                &[addr(&self.wallet), chain::int(tl), chain::int(tu), u(big(liq)), u(big(b.min0)), u(big(b.min1)), u(now() + DEADLINE_S)],
             );
-            self.say(format!("  f. mint [{tl},{tu}) liquidity {liq} uses {} t0 + {} t1", self.fmt0(m0 as f64), self.fmt1(m1 as f64)));
+            self.say(format!("  f. mint [{tl},{tu}) liquidity {liq} uses {} t0 + {} t1 (floors {floor_bps} bp of price)", self.fmt0(m0 as f64), self.fmt1(m1 as f64)));
             let pool = self.cfg.pool.clone();
-            let live = small(&chain::erc20_balance(self.cid, &t0, &self.wallet)?) >= m0
-                && small(&chain::erc20_balance(self.cid, &t1, &self.wallet)?) >= m1
-                && small(&chain::erc20_allowance(self.cid, &t0, &self.wallet, &pool)?) >= m0
-                && small(&chain::erc20_allowance(self.cid, &t1, &self.wallet, &pool)?) >= m1;
+            let live = small(&chain::erc20_balance(self.cid, &t0, &self.wallet)?) >= b.max0
+                && small(&chain::erc20_balance(self.cid, &t1, &self.wallet)?) >= b.max1
+                && small(&chain::erc20_allowance(self.cid, &t0, &self.wallet, &pool)?) >= b.max0
+                && small(&chain::erc20_allowance(self.cid, &t1, &self.wallet, &pool)?) >= b.max1;
             match self.tx(&pool, &data, &format!("mint {tl}:{tu}"), live) {
                 Ok(_) => {}
-                Err(e) if (e.message.starts_with("eth_call reverted") || e.message.starts_with("estimateGas failed")) && transfer_failed(&e.reason) && !reapproved => {
-                    // the pool could not pull a token: approve again (the allowance read may have been stale) and retry the same size
-                    reapproved = true;
-                    self.say_warn(format!("    simulation failed ({}): approving both tokens again", e.reason));
-                    self.virt_allow.insert((t0.to_lowercase(), pool.to_lowercase()), 0);
-                    self.virt_allow.insert((t1.to_lowercase(), pool.to_lowercase()), 0);
-                    continue;
-                }
-                Err(e) if e.message.starts_with("eth_call reverted") || e.message.starts_with("estimateGas failed") => {
-                    // the minimums are amounts at the price read before: read it again, so a move
-                    // since then (or a stale read) is not mistaken for too large a mint
-                    liq = (liq as f64 * 0.995) as i128;
-                    sp = self.price()?.0;
-                    self.say_warn(format!("    simulation failed ({}); price read again, liquidity 0.5% smaller", e.reason));
+                Err(e) if simulation_reverted(&e) => {
+                    let w = self.mint_recover(&e.reason, &t0, &t1, &pool, &mut shrink, &mut floor, &mut reapproved);
+                    self.say_warn(format!("    simulation failed ({}): {w}", e.reason));
                     continue;
                 }
                 Err(e) => return Err(e.into()),
@@ -1151,52 +1142,78 @@ impl Executor {
             }
             return Ok(true);
         }
-        Err(StepErr::Fail(format!("mint [{tl},{tu}) still fails after shrinking liquidity by ~3%")))
+        Err(StepErr::Fail(format!("mint [{tl},{tu}) still fails after 7 attempts (floors widened to {} bp)", DEPOSIT_FLOOR_BPS[floor])))
+    }
+
+    /// What a failed mint simulation changes for the next attempt (said back for the log); every
+    /// attempt reads the price and the balances again. STF, the pool's pull failing on an allowance:
+    /// approve both tokens again (unlimited, to this pool), once. TF, the wallet holding less than the
+    /// mint pulls (the price moved toward the scarcer token): 0.5% smaller. AL or "Price slippage
+    /// check", the deposit below its floors: the floors widen a step. Anything else: 0.5% smaller.
+    #[allow(clippy::too_many_arguments)]
+    fn mint_recover(&mut self, reason: &str, t0: &str, t1: &str, pool: &str, shrink: &mut f64, floor: &mut usize, reapproved: &mut bool) -> String {
+        match mint_failure(reason) {
+            MintFailure::Allowance if !*reapproved => {
+                *reapproved = true;
+                self.virt_allow.insert((t0.to_lowercase(), pool.to_lowercase()), 0);
+                self.virt_allow.insert((t1.to_lowercase(), pool.to_lowercase()), 0);
+                "approving both tokens again".into()
+            }
+            MintFailure::Floors if *floor + 1 < DEPOSIT_FLOOR_BPS.len() => {
+                *floor += 1;
+                format!("price read again, floors widened to {} bp", DEPOSIT_FLOOR_BPS[*floor])
+            }
+            MintFailure::Shortfall => {
+                *shrink *= 0.995;
+                "the wallet held less than the mint pulls: balances and price read again, 0.5% smaller".into()
+            }
+            _ => {
+                *shrink *= 0.995;
+                "price read again, liquidity 0.5% smaller".into()
+            }
+        }
     }
 
     /// Mint exactly `x` token0 + `y` token1 (raw, at most) into [tl, tu); returns the liquidity minted.
     fn mint_exact(&mut self, tl: i64, tu: i64, x: i128, y: i128) -> Res<i128> {
-        let (mut sp, _, _, _) = self.price()?;
         let (sa, sb) = (sqrt_ratio_at_tick(tl), sqrt_ratio_at_tick(tu));
-        let mut liq = (to_f64(&liquidity_for_amounts(&sp, &sa, &sb, &big(x), &big(y))) * 0.999) as i128;
-        let slip = self.cfg.slippage_bps / 1e4;
+        let (mut x, mut y) = (x, y);
+        let mut shrink = 1.0;
+        let mut floor = 0;
         let mut reapproved = false;
         for _ in 0..7 {
+            let (sp, _, _, _) = self.price()?;
+            let liq = (to_f64(&mint_liquidity(&sp, &sa, &sb, &big(x), &big(y))) * 0.999 * shrink) as i128;
             if liq <= 0 {
                 return Err(StepErr::Fail(format!("nothing to mint into [{tl},{tu})")));
             }
             let (m0, m1) = crate::tickmath::amounts_for_liquidity(&sp, &sa, &sb, &big(liq));
             let (m0, m1) = (small(&m0), small(&m1));
+            let floor_bps = DEPOSIT_FLOOR_BPS[floor].max(self.cfg.slippage_bps);
+            let b = mint_bounds(&sp, &sa, &sb, liq, floor_bps);
             let (t0, t1) = (self.t0.clone(), self.t1.clone());
-            self.ensure_allowance(&t0, m0 + m0 / 1000 + 10, None)?;
-            self.ensure_allowance(&t1, m1 + m1 / 1000 + 10, None)?;
+            self.ensure_allowance(&t0, b.max0 + b.max0 / 1000 + 10, None)?;
+            self.ensure_allowance(&t1, b.max1 + b.max1 / 1000 + 10, None)?;
             let data = calldata(
                 "mint(address,int24,int24,uint128,uint256,uint256,uint256)",
-                &[addr(&self.wallet), chain::int(tl), chain::int(tu), u(big(liq)), u(big((m0 as f64 * (1.0 - slip)) as i128)),
-                  u(big((m1 as f64 * (1.0 - slip)) as i128)), u(now() + DEADLINE_S)],
+                &[addr(&self.wallet), chain::int(tl), chain::int(tu), u(big(liq)), u(big(b.min0)), u(big(b.min1)), u(now() + DEADLINE_S)],
             );
-            self.say(format!("  park: mint [{tl},{tu}) liquidity {liq} uses {} t0 + {} t1", self.fmt0(m0 as f64), self.fmt1(m1 as f64)));
+            self.say(format!("  park: mint [{tl},{tu}) liquidity {liq} uses {} t0 + {} t1 (floors {floor_bps} bp of price)", self.fmt0(m0 as f64), self.fmt1(m1 as f64)));
             let pool = self.cfg.pool.clone();
-            let live = small(&chain::erc20_balance(self.cid, &t0, &self.wallet)?) >= m0
-                && small(&chain::erc20_balance(self.cid, &t1, &self.wallet)?) >= m1
-                && small(&chain::erc20_allowance(self.cid, &t0, &self.wallet, &pool)?) >= m0
-                && small(&chain::erc20_allowance(self.cid, &t1, &self.wallet, &pool)?) >= m1;
+            let (h0, h1) = (small(&chain::erc20_balance(self.cid, &t0, &self.wallet)?), small(&chain::erc20_balance(self.cid, &t1, &self.wallet)?));
+            let live = h0 >= b.max0
+                && h1 >= b.max1
+                && small(&chain::erc20_allowance(self.cid, &t0, &self.wallet, &pool)?) >= b.max0
+                && small(&chain::erc20_allowance(self.cid, &t1, &self.wallet, &pool)?) >= b.max1;
             match self.tx(&pool, &data, &format!("mint {tl}:{tu}"), live) {
                 Ok(_) => {}
-                Err(e) if (e.message.starts_with("eth_call reverted") || e.message.starts_with("estimateGas failed")) && transfer_failed(&e.reason) && !reapproved => {
-                    // the pool could not pull a token: approve again (the allowance read may have been stale) and retry the same size
-                    reapproved = true;
-                    self.say_warn(format!("    simulation failed ({}): approving both tokens again", e.reason));
-                    self.virt_allow.insert((t0.to_lowercase(), pool.to_lowercase()), 0);
-                    self.virt_allow.insert((t1.to_lowercase(), pool.to_lowercase()), 0);
-                    continue;
-                }
-                Err(e) if e.message.starts_with("eth_call reverted") || e.message.starts_with("estimateGas failed") => {
-                    // the minimums are amounts at the price read before: read it again, so a move
-                    // since then (or a stale read) is not mistaken for too large a mint
-                    liq = (liq as f64 * 0.995) as i128;
-                    sp = self.price()?.0;
-                    self.say_warn(format!("    simulation failed ({}); price read again, liquidity 0.5% smaller", e.reason));
+                Err(e) if simulation_reverted(&e) => {
+                    if mint_failure(&e.reason) == MintFailure::Shortfall && self.execute {
+                        // what the wallet holds now caps what is minted
+                        (x, y) = (x.min(h0), y.min(h1));
+                    }
+                    let w = self.mint_recover(&e.reason, &t0, &t1, &pool, &mut shrink, &mut floor, &mut reapproved);
+                    self.say_warn(format!("    simulation failed ({}): {w}", e.reason));
                     continue;
                 }
                 Err(e) => return Err(e.into()),
@@ -1207,7 +1224,7 @@ impl Executor {
             self.spent(&t1, &pool, m1);
             return Ok(liq);
         }
-        Err(StepErr::Fail(format!("mint [{tl},{tu}) still fails after shrinking liquidity by ~3%")))
+        Err(StepErr::Fail(format!("mint [{tl},{tu}) still fails after 7 attempts (floors widened to {} bp)", DEPOSIT_FLOOR_BPS[floor])))
     }
 
     /// An exit to the dollar stable: this pool's tokens (up to its budget) sold for the chain's USD
@@ -1927,11 +1944,155 @@ impl Executor {
     }
 }
 
-/// A revert of the pool pulling a token (transferFrom): an allowance or a balance, not the size.
-/// (A Solidly pool's "AL", amounts below the minimums, is the price having moved: not this.)
-fn transfer_failed(reason: &str) -> bool {
+fn simulation_reverted(e: &TxError) -> bool {
+    e.message.starts_with("eth_call reverted") || e.message.starts_with("estimateGas failed")
+}
+
+#[derive(Debug, PartialEq)]
+enum MintFailure {
+    /// STF: the pool's transferFrom failed, on an allowance (or a balance)
+    Allowance,
+    /// TF: the token's transfer failed, the wallet holding less than the mint pulls
+    Shortfall,
+    /// AL, "Price slippage check": what the mint would deposit is below its floors
+    Floors,
+    Other,
+}
+
+/// A mint simulation's revert reason (as revert_reason gives it: the code, then a hint) by what fixes it.
+fn mint_failure(reason: &str) -> MintFailure {
     let r = reason.trim();
-    ["TF", "STF"].iter().any(|c| r == *c || r.starts_with(&format!("{c} ")))
+    let is = |c: &str| r == c || r.starts_with(&format!("{c} "));
+    if is("STF") {
+        MintFailure::Allowance
+    } else if is("TF") {
+        MintFailure::Shortfall
+    } else if is("AL") || is("Price slippage check") {
+        MintFailure::Floors
+    } else {
+        MintFailure::Other
+    }
+}
+
+/// How far (bp of price) the price may move between a mint's sizing and its execution before the
+/// wallet would hold too little of a token: a mint is sized to be paid for anywhere in this band.
+/// In a narrow range the ratio a mint pulls swings hard with the price (near an edge of a 7-tick
+/// stable range, a third of a basis point moved a third of one side), so a mint sized to the wallet
+/// at one price fails its transfer (TF) at the next block's. What this leaves out of the mint is
+/// deployed by the deploy's top-up round (a ratio swap, then a mint of the leftovers).
+const MINT_SIZING_BPS: f64 = 0.5;
+
+/// The mint's floors: how far (bp of price) the price may move before the mint reverts instead of
+/// depositing at the moved price, widened a step at each revert on them, without asking: the floors
+/// only bound the price a mint deposits at. Floors as a share of each amount do not work in a narrow
+/// range: the smaller side swings by tens of percent per basis point, so any floor that protects
+/// anything reverts on a block's drift (AL). A mint that deposits less than planned leaves the rest
+/// in the wallet, where the top-up round picks it up. The pool's slippage setting, when looser, is
+/// the first step.
+const DEPOSIT_FLOOR_BPS: [f64; 3] = [10.0, 25.0, 50.0];
+
+/// sqrt prices `bps` of price below and above `sp`, kept strictly inside (sa, sb) while `sp` is in
+/// it: past an edge the amounts stop changing, so the edge bounds the deposit price there. Out of
+/// range the amounts do not depend on the price, and the band is `sp` alone.
+fn price_band(sp: &BigUint, sa: &BigUint, sb: &BigUint, bps: f64) -> (BigUint, BigUint) {
+    if sp <= sa || sp >= sb {
+        return (sp.clone(), sp.clone());
+    }
+    let e18 = BigUint::from(10u64.pow(18));
+    let k = |f: f64| BigUint::from((f.sqrt() * 1e18) as u128);
+    let lo = (sp * k(1.0 - bps / 1e4) / &e18).max(sa + 1u8);
+    let hi = (sp * k(1.0 + bps / 1e4) / &e18 + 1u8).min(sb - 1u8);
+    (lo, hi)
+}
+
+/// The liquidity that `x` token0 + `y` token1 pay for wherever in the sizing band the price is.
+fn mint_liquidity(sp: &BigUint, sa: &BigUint, sb: &BigUint, x: &BigUint, y: &BigUint) -> BigUint {
+    let (lo, hi) = price_band(sp, sa, sb, MINT_SIZING_BPS);
+    // token0 binds at the bottom of the band, token1 at the top
+    liquidity_for_amounts(&lo, sa, sb, x, y).min(liquidity_for_amounts(&hi, sa, sb, x, y))
+}
+
+struct MintBounds {
+    /// the most of each token the mint can pull with the price in the sizing band
+    max0: i128,
+    max1: i128,
+    /// its floors: the least of each it deposits with the price in the floor band
+    min0: i128,
+    min1: i128,
+}
+
+fn mint_bounds(sp: &BigUint, sa: &BigUint, sb: &BigUint, liq: i128, floor_bps: f64) -> MintBounds {
+    let l = big(liq);
+    let at = |s: &BigUint| {
+        let (a0, a1) = crate::tickmath::amounts_for_liquidity(s, sa, sb, &l);
+        (small(&a0), small(&a1))
+    };
+    let (slo, shi) = price_band(sp, sa, sb, MINT_SIZING_BPS);
+    let (flo, fhi) = price_band(sp, sa, sb, floor_bps);
+    // the pool rounds what it pulls up
+    MintBounds { max0: at(&slo).0 + 1, max1: at(&shi).1 + 1, min0: at(&fhi).0, min1: at(&flo).1 }
+}
+
+#[cfg(test)]
+mod mint_tests {
+    use super::*;
+
+    // a reverted mint (Base, USDC/USDT [9,16)): the wallet's two balances, and the pool's sqrt price
+    // in the block before and in the block that mined it, a third of a basis point higher
+    const BAL: (i128, i128) = (3_179_698, 17_196_840);
+    const BEFORE: &str = "79287432421297101572492660427";
+    const MINED: &str = "79288900042731835809062276645";
+
+    fn sq(s: &str) -> BigUint {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn a_mint_sized_before_the_block_goes_through_in_it() {
+        let (sa, sb) = (sqrt_ratio_at_tick(9), sqrt_ratio_at_tick(16));
+        let liq = (to_f64(&mint_liquidity(&sq(BEFORE), &sa, &sb, &big(BAL.0), &big(BAL.1))) * 0.999) as i128;
+        let b = mint_bounds(&sq(BEFORE), &sa, &sb, liq, DEPOSIT_FLOOR_BPS[0]);
+        let (p0, p1) = crate::tickmath::amounts_for_liquidity(&sq(MINED), &sa, &sb, &big(liq));
+        let (p0, p1) = (small(&p0), small(&p1));
+        assert!(p0 < BAL.0 && p1 < BAL.1, "pulls {p0} + {p1}: more than the wallet holds (TF)");
+        assert!(b.max0 <= BAL.0 && b.max1 <= BAL.1);
+        assert!(p0 >= b.min0 && p1 >= b.min1, "deposits {p0} + {p1}, below the floors {} + {} (AL)", b.min0, b.min1);
+        // the app's old mint (this liquidity, floors 2 bp of each amount) fell below its USDC floor
+        let (o0, _) = crate::tickmath::amounts_for_liquidity(&sq(MINED), &sa, &sb, &big(54_162_105_889));
+        assert!(small(&o0) < 2_595_776);
+        // most of the wallet still goes in; the top-up round has the rest
+        let (d0, d1) = crate::tickmath::amounts_for_liquidity(&sq(BEFORE), &sa, &sb, &big(liq));
+        let used = (small(&d0) + small(&d1)) as f64 / (BAL.0 + BAL.1) as f64;
+        assert!(used > 0.6, "only {used:.2} of the wallet minted");
+    }
+
+    #[test]
+    fn floors_stay_inside_the_range_and_bound_both_sides() {
+        let (sa, sb) = (sqrt_ratio_at_tick(9), sqrt_ratio_at_tick(16));
+        let sp = sq(BEFORE);
+        let (lo, hi) = price_band(&sp, &sa, &sb, 50.0);
+        assert!(lo > sa && hi < sb);
+        let b = mint_bounds(&sp, &sa, &sb, 54_000_000_000, 50.0);
+        assert!(b.min0 <= b.max0 && b.min1 <= b.max1);
+        // a wide range keeps the whole band, and real floors on both sides
+        let (wa, wb) = (sqrt_ratio_at_tick(-500), sqrt_ratio_at_tick(500));
+        let w = mint_bounds(&sqrt_ratio_at_tick(0), &wa, &wb, 10i128.pow(12), 10.0);
+        assert!(w.min0 > 0 && w.min1 > 0 && w.min0 < w.max0 && w.min1 < w.max1);
+        // out of range the amounts do not move with the price: the floors are the amounts
+        let o = mint_bounds(&sqrt_ratio_at_tick(5), &sa, &sb, 10i128.pow(12), 50.0);
+        assert_eq!((o.min0 + 1, o.min1 + 1), (o.max0, o.max1));
+    }
+
+    #[test]
+    fn a_mint_revert_is_told_by_what_fixes_it() {
+        assert_eq!(mint_failure("STF (token transferFrom failed (balance or allowance too low))"), MintFailure::Allowance);
+        assert_eq!(mint_failure("TF (token transfer failed)"), MintFailure::Shortfall);
+        assert_eq!(mint_failure("AL (amounts below the minimums: the price moved (slippage))"), MintFailure::Floors);
+        assert_eq!(mint_failure("Price slippage check (pool price moved past the min amounts (slippage))"), MintFailure::Floors);
+        for r in ["LOK (pool is locked (reentrancy guard))", "TFX", "ALX", ""] {
+            assert_eq!(mint_failure(r), MintFailure::Other, "{r}");
+        }
+    }
 }
 
 /// Ratio swaps that no mint has followed yet, per (chain, pool): when made and which way (true:
@@ -1965,21 +2126,6 @@ mod swap_back_tests {
         // after the hold, or with nothing pending, the strategy decides again
         assert!(!swaps_back(Some((now - 7 * 3600, true)), now, false));
         assert!(!swaps_back(None, now, false));
-    }
-}
-
-#[cfg(test)]
-mod allowance_tests {
-    use super::transfer_failed;
-
-    #[test]
-    fn a_failed_token_pull_is_told_from_a_size_problem() {
-        for r in ["TF (token transfer failed)", "STF (token transferFrom failed (balance or allowance too low))"] {
-            assert!(transfer_failed(r), "{r}");
-        }
-        for r in ["Price slippage check (pool price moved past the min amounts (slippage))", "AL (amounts below the minimums: the price moved (slippage))", "LOK (pool is locked (reentrancy guard))", "TFX", ""] {
-            assert!(!transfer_failed(r), "{r}");
-        }
     }
 }
 

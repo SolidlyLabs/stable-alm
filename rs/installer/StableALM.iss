@@ -1,13 +1,13 @@
 ; Inno Setup script: per-user Windows installer for the Rust app (rs/target/release/StableALM.exe).
 ;   cd rs && cargo build --release
-;   "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" /DAppVersion=0.6.3 installer\StableALM.iss
+;   "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" /DAppVersion=0.6.4 installer\StableALM.iss
 ; Output: rs\dist\StableALM-Setup-<version>.exe
 ; Program: %LOCALAPPDATA%\Programs\StableALM (no admin). State: %LOCALAPPDATA%\StableALM, kept on
 ; uninstall unless the user chooses to delete it. A running instance is stopped gracefully first
 ; (StableALM.exe --quit waits for the current cycle to finish).
 
 #ifndef AppVersion
-  #define AppVersion "0.6.3"
+  #define AppVersion "0.6.4"
 #endif
 #ifndef ExePath
   #define ExePath "..\target\release\StableALM.exe"

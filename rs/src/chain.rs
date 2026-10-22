@@ -39,7 +39,7 @@ const HINTS: [(&str, &str); 15] = [
     ("AL", "amounts below the minimums: the price moved (slippage)"),
     ("Price slippage check", "pool price moved past the min amounts (slippage)"),
     ("STF", "token transferFrom failed (balance or allowance too low)"),
-    ("TF", "token transfer failed"),
+    ("TF", "token transfer failed (for a mint: the wallet holds less than it pulls)"),
     ("LOK", "pool is locked (reentrancy guard)"),
     ("TLU", "tickLower must be below tickUpper"),
     ("TLM", "tickLower below the minimum tick"),

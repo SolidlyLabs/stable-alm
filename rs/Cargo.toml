@@ -1,6 +1,6 @@
 [package]
 name = "stable-alm"
-version = "0.6.3"
+version = "0.6.4"
 edition = "2021"
 description = "Stable ALM: automated liquidity management for Solidly V3 (desktop app)"
 license = "Apache-2.0"
