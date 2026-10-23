@@ -473,11 +473,21 @@ pub fn build_market_asof(events: Vec<Ev>, wallet: &str, apr: &HashMap<i64, (f64,
     // of 51 replaced by it: spikes such as sandwiches) is for signals only, the bars below, which
     // strategies read; using it to execute and value let a replay trade at a price that was gone
     // (Oct 2026 review)
-    let tick: Vec<i64> = sw.iter().map(|(_, e)| e.tick).collect();
-    let sp: Vec<f64> = sw.iter().map(|(_, e)| {
+    // a swap through an empty pool (no liquidity left in range after it) moves the price as far as
+    // the next liquidity, up to the tick limit, for any amount: nobody could trade there, so the
+    // price stays where the pool last had depth (a 0.008 wS swap once took wS/Anon to tick -887272,
+    // valuing a replay at 10^42)
+    let (mut tick, mut sp) = (Vec::with_capacity(sw.len()), Vec::with_capacity(sw.len()));
+    for (k, (_, e)) in sw.iter().enumerate() {
+        if k > 0 && e.liquidity.trim() == "0" {
+            tick.push(tick[k - 1]);
+            sp.push(sp[k - 1]);
+            continue;
+        }
         let x = f(&e.sqrt_price_x96) / 2f64.powi(96);
-        if x > 0.0 && x.is_finite() { x } else { 1.0001f64.powf(e.tick as f64 / 2.0) }
-    }).collect();
+        tick.push(e.tick);
+        sp.push(if x > 0.0 && x.is_finite() { x } else { 1.0001f64.powf(e.tick as f64 / 2.0) });
+    }
     let clean = spike_filter(&tick);
     // Wallet liquidity active at each swap's (post) tick.
     let lp: Vec<(usize, &Ev)> = ev.iter().enumerate().filter(|(_, e)| e.kind != "swap" && e.owner == wallet).collect();
@@ -698,6 +708,23 @@ mod tests {
         let c = spike_filter(&lv);
         assert!(c[100].abs() <= 1 && c[101].abs() <= 1);
         assert!(c[102..].iter().all(|t| *t >= 498), "{:?}", &c[100..106]);
+    }
+
+    #[test]
+    fn a_swap_through_an_empty_pool_keeps_the_last_price() {
+        let sq = |t: i64| format!("{:.0}", 1.0001f64.powf(t as f64 / 2.0) * 2f64.powi(96));
+        let swap = |i: i64, tick: i64, liq: &str| Ev {
+            block: i, ts: 1_000_000 + i * 600, kind: "swap".into(), amount0: "1000".into(), amount1: "-1000".into(),
+            sqrt_price_x96: sq(tick), liquidity: liq.into(), tick, ..Default::default()
+        };
+        // the pool emptied: a dust swap goes to the tick limit, then liquidity comes back near where it was
+        let ev = vec![swap(1, -26800, "1000000"), swap(2, -26900, "1000000"), swap(3, -887272, "0"), swap(4, -26950, "900000")];
+        let m = build_market(ev, "", &HashMap::new(), 18, 18, 0).unwrap();
+        assert_eq!(m.tick, vec![-26800, -26900, -26900, -26950]);
+        assert_eq!(m.sp[2], m.sp[1]);
+        // a pool's very first swap has no earlier price: it stands as it is
+        let m = build_market(vec![swap(1, -100, "0"), swap(2, -110, "5")], "", &HashMap::new(), 18, 18, 0).unwrap();
+        assert_eq!(m.tick, vec![-100, -110]);
     }
 
     #[test]
