@@ -141,9 +141,9 @@ pub fn reload(wallet: &str, configured: &[(u64, String)]) -> Vec<String> {
 }
 
 fn chain_ids(configured: &[(u64, String)]) -> Vec<u64> {
-    let mut chains: Vec<u64> = crate::chains::all().into_iter().filter(|c| c.enabled).map(|c| c.id).collect();
+    let mut chains: Vec<u64> = crate::chains::all().into_iter().filter(|c| c.enabled && !c.off).map(|c| c.id).collect();
     for (c, _) in configured {
-        if !chains.contains(c) {
+        if !chains.contains(c) && !crate::chains::is_off(*c) {
             chains.push(*c);
         }
     }
@@ -339,7 +339,7 @@ fn on_list(rows: &Value, cid: u64, addr: &str) -> bool {
 }
 
 fn refresh_tokens(wallet: &str, extra: &[(u64, String)], prev: &[Value]) -> Vec<Value> {
-    let chains = crate::chains::all();
+    let chains: Vec<_> = crate::chains::all().into_iter().filter(|c| !c.off).collect();
     let mut out: Vec<Value> = std::thread::scope(|sc| {
         let hs: Vec<_> = chains.iter().map(|c| sc.spawn(move || chain_tokens(c.id, &c.name, wallet, extra, prev))).collect();
         hs.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()

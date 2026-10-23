@@ -274,6 +274,9 @@ pub struct Executor {
     /// Transactions handed to the network in this pass (counted before broadcasting). A step that
     /// failed after broadcasting is never retried: its transaction may have gone through.
     broadcasts: usize,
+    /// the pass's rebalance entry, logged with its first transaction: a pass that sends nothing
+    /// is not an action (it neither shows in the activity nor counts against the daily cap)
+    begun: Option<Value>,
 }
 
 impl Executor {
@@ -316,6 +319,7 @@ impl Executor {
             is_solid_lp: false,
             solid_pair: None,
             broadcasts: 0,
+            begun: None,
             cfg,
         })
     }
@@ -481,6 +485,9 @@ impl Executor {
             if let Err(why) = crate::agent::gate::pre_sign(self.cid, Some(&self.cfg.pool), what) {
                 return Err(chain::err(format!("not sent: {why}"), "gate"));
             }
+            if let Some(b) = self.begun.take() {
+                log(b);
+            }
             self.broadcasts += 1;
             let res = chain::send(self.cid, self.account.as_ref().unwrap(), to, data, gas)?;
             entry["kind"] = json!("sent");
@@ -493,6 +500,9 @@ impl Executor {
             return Ok(entry);
         }
         entry["kind"] = json!("dry_run");
+        if let Some(b) = self.begun.take() {
+            log(b);
+        }
         log(entry.clone());
         Ok(entry)
     }
@@ -536,9 +546,9 @@ impl Executor {
         Ok(!problems.is_empty())
     }
 
-    fn begin(&self, mode: &str, target: Option<&Target>) {
+    fn begin(&mut self, mode: &str, target: Option<&Target>) {
         let ranges: Vec<Value> = target.map(|t| t.ranges.iter().map(|(a, b, w)| json!([a, b, w])).collect()).unwrap_or_default();
-        log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "rebalance", "mode": mode, "live": self.execute, "ranges": ranges}));
+        self.begun = Some(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "rebalance", "mode": mode, "live": self.execute, "ranges": ranges}));
     }
 
     fn fmt0(&self, v: f64) -> String {
@@ -937,16 +947,10 @@ impl Executor {
         Ok(())
     }
 
+    /// The share of token0 (by value) the ranges' mints want: what pays for them anywhere in the
+    /// sizing band (mint_mix), so a ratio swap leaves headroom on both sides.
     pub fn need0_fraction(&self, ranges: &[(i64, i64, f64)], sp: &BigUint, p: f64) -> f64 {
-        let one = BigUint::from(10u8).pow(18);
-        ranges
-            .iter()
-            .map(|(tl, tu, wi)| {
-                let (a0, a1) = amounts_at(sp, *tl, *tu, &one);
-                let (a0, a1) = (to_f64(&a0), to_f64(&a1));
-                wi * if a0 + a1 > 0.0 { a0 / (a0 + a1 / p) } else { 1.0 }
-            })
-            .sum()
+        ranges.iter().map(|(tl, tu, wi)| wi * mint_mix(sp, &sqrt_ratio_at_tick(*tl), &sqrt_ratio_at_tick(*tu), p)).sum()
     }
 
     fn ratio_swap(&mut self, ranges: &[(i64, i64, f64)], budget0: f64) -> Res<()> {
@@ -962,7 +966,7 @@ impl Executor {
         let zero_for_one = diff0 < 0.0;
         let key = unminted_key(self.cid, &self.cfg.pool);
         let earlier = UNMINTED_SWAP.lock().unwrap().get_or_insert_with(HashMap::new).get(&key).copied();
-        if swaps_back(earlier, now(), zero_for_one) {
+        if swaps_back(earlier, now(), zero_for_one, f) {
             let at = earlier.map(|x| x.0).unwrap_or(0);
             self.say_warn(format!("  e. ratio swap skipped: it would undo the swap of {} min ago, after which nothing was minted; minting with the balances on hand",
                                   now().saturating_sub(at) / 60));
@@ -989,7 +993,7 @@ impl Executor {
         let max_cost = self.cfg.max_swap_cost_bps;
         self.swap(&tin, &tout, amount_in, fair, max_cost, "e. ratio swap")?;
         // pending until a mint follows (deploy clears it)
-        UNMINTED_SWAP.lock().unwrap().get_or_insert_with(HashMap::new).insert(key, (now(), zero_for_one));
+        UNMINTED_SWAP.lock().unwrap().get_or_insert_with(HashMap::new).insert(key, (now(), zero_for_one, f));
         Ok(())
     }
 
@@ -1083,7 +1087,6 @@ impl Executor {
 
     pub fn mint_one(&mut self, tl: i64, tu: i64, share: f64, budget0: f64) -> Res<bool> {
         let (sa, sb) = (sqrt_ratio_at_tick(tl), sqrt_ratio_at_tick(tu));
-        let one = BigUint::from(10u8).pow(18);
         let mut shrink = 1.0;
         let mut floor = 0;
         let mut reapproved = false;
@@ -1091,13 +1094,11 @@ impl Executor {
             // every attempt sizes from the price and the balances as they are now
             let (sp, _, _, p) = self.price()?;
             let (x, y) = self.usable(budget0, p)?;
-            let (a0, a1) = crate::tickmath::amounts_for_liquidity(&sp, &sa, &sb, &one);
-            let (fa0, fa1) = (to_f64(&a0), to_f64(&a1));
-            let f0 = if fa0 + fa1 > 0.0 { fa0 / (fa0 + fa1 / p) } else { 1.0 };
+            let f0 = mint_mix(&sp, &sa, &sb, p);
             let v0 = (x as f64 + y as f64 / p) * share;
             let x_r = ((f0 * v0) as i128).min(x);
             let y_r = (((1.0 - f0) * v0 * p) as i128).min(y);
-            let target = liquidity_for_amounts(&sp, &sa, &sb, &big(x_r), &big(y_r));
+            let target = mint_liquidity(&sp, &sa, &sb, &big(x_r), &big(y_r));
             let fit = mint_liquidity(&sp, &sa, &sb, &big(x), &big(y));
             let mut liq = (to_f64(&target.min(fit)) * 0.999 * shrink) as i128;
             let (m0, m1) = crate::tickmath::amounts_for_liquidity(&sp, &sa, &sb, &big(liq.max(0)));
@@ -1974,13 +1975,32 @@ fn mint_failure(reason: &str) -> MintFailure {
     }
 }
 
-/// How far (bp of price) the price may move between a mint's sizing and its execution before the
-/// wallet would hold too little of a token: a mint is sized to be paid for anywhere in this band.
-/// In a narrow range the ratio a mint pulls swings hard with the price (near an edge of a 7-tick
-/// stable range, a third of a basis point moved a third of one side), so a mint sized to the wallet
-/// at one price fails its transfer (TF) at the next block's. What this leaves out of the mint is
-/// deployed by the deploy's top-up round (a ratio swap, then a mint of the leftovers).
+/// How far the price may move between a mint's sizing and its execution before the wallet would
+/// hold too little of a token: a mint is sized to be paid for anywhere in this band, and the ratio
+/// swap before it buys the mix that band needs. In a narrow range the ratio a mint pulls swings hard
+/// with the price (near an edge of a 7-tick stable range, a third of a basis point moved a third of
+/// one side), so a mint sized to the wallet at one price fails its transfer (TF) at the next
+/// block's. The band is a share of the range's width (at most MINT_SIZING_BPS): what it holds back
+/// is about that share of the value, and a wider band would leave a one-tick range unmintable.
+/// What is held back is deployed by the deploy's top-up round.
+const MINT_SIZING_SHARE: f64 = 0.05;
 const MINT_SIZING_BPS: f64 = 0.5;
+
+/// The sizing band for a range (bp of price).
+fn sizing_bps(sa: &BigUint, sb: &BigUint) -> f64 {
+    let width_bps = ((to_f64(sb) / to_f64(sa)).powi(2) - 1.0).abs() * 1e4;
+    (width_bps * MINT_SIZING_SHARE).min(MINT_SIZING_BPS)
+}
+
+/// The share of token0 (by value, `p` token1 per token0) that pays for a mint into [sa, sb) anywhere
+/// in the sizing band: token0 as at the band's bottom, token1 as at its top.
+fn mint_mix(sp: &BigUint, sa: &BigUint, sb: &BigUint, p: f64) -> f64 {
+    let one = BigUint::from(10u8).pow(18);
+    let (lo, hi) = price_band(sp, sa, sb, sizing_bps(sa, sb));
+    let a0 = to_f64(&crate::tickmath::amounts_for_liquidity(&lo, sa, sb, &one).0);
+    let a1 = to_f64(&crate::tickmath::amounts_for_liquidity(&hi, sa, sb, &one).1);
+    if a0 + a1 > 0.0 { a0 / (a0 + a1 / p) } else { 1.0 }
+}
 
 /// The mint's floors: how far (bp of price) the price may move before the mint reverts instead of
 /// depositing at the moved price, widened a step at each revert on them, without asking: the floors
@@ -2007,7 +2027,7 @@ fn price_band(sp: &BigUint, sa: &BigUint, sb: &BigUint, bps: f64) -> (BigUint, B
 
 /// The liquidity that `x` token0 + `y` token1 pay for wherever in the sizing band the price is.
 fn mint_liquidity(sp: &BigUint, sa: &BigUint, sb: &BigUint, x: &BigUint, y: &BigUint) -> BigUint {
-    let (lo, hi) = price_band(sp, sa, sb, MINT_SIZING_BPS);
+    let (lo, hi) = price_band(sp, sa, sb, sizing_bps(sa, sb));
     // token0 binds at the bottom of the band, token1 at the top
     liquidity_for_amounts(&lo, sa, sb, x, y).min(liquidity_for_amounts(&hi, sa, sb, x, y))
 }
@@ -2027,7 +2047,7 @@ fn mint_bounds(sp: &BigUint, sa: &BigUint, sb: &BigUint, liq: i128, floor_bps: f
         let (a0, a1) = crate::tickmath::amounts_for_liquidity(s, sa, sb, &l);
         (small(&a0), small(&a1))
     };
-    let (slo, shi) = price_band(sp, sa, sb, MINT_SIZING_BPS);
+    let (slo, shi) = price_band(sp, sa, sb, sizing_bps(sa, sb));
     let (flo, fhi) = price_band(sp, sa, sb, floor_bps);
     // the pool rounds what it pulls up
     MintBounds { max0: at(&slo).0 + 1, max1: at(&shi).1 + 1, min0: at(&fhi).0, min1: at(&flo).1 }
@@ -2050,20 +2070,49 @@ mod mint_tests {
     #[test]
     fn a_mint_sized_before_the_block_goes_through_in_it() {
         let (sa, sb) = (sqrt_ratio_at_tick(9), sqrt_ratio_at_tick(16));
+        // a 7-tick range: a band of 0.35 bp
+        assert!((sizing_bps(&sa, &sb) - 0.35).abs() < 0.01);
         let liq = (to_f64(&mint_liquidity(&sq(BEFORE), &sa, &sb, &big(BAL.0), &big(BAL.1))) * 0.999) as i128;
         let b = mint_bounds(&sq(BEFORE), &sa, &sb, liq, DEPOSIT_FLOOR_BPS[0]);
+        assert!(b.max0 <= BAL.0 && b.max1 <= BAL.1);
+        // the block moved the price 0.37 bp up, just past the band: the token1 it pulls is what fits
+        // at the band's top plus that last 0.02 bp, within the 0.1% the size is cut by
         let (p0, p1) = crate::tickmath::amounts_for_liquidity(&sq(MINED), &sa, &sb, &big(liq));
         let (p0, p1) = (small(&p0), small(&p1));
         assert!(p0 < BAL.0 && p1 < BAL.1, "pulls {p0} + {p1}: more than the wallet holds (TF)");
-        assert!(b.max0 <= BAL.0 && b.max1 <= BAL.1);
         assert!(p0 >= b.min0 && p1 >= b.min1, "deposits {p0} + {p1}, below the floors {} + {} (AL)", b.min0, b.min1);
         // the app's old mint (this liquidity, floors 2 bp of each amount) fell below its USDC floor
         let (o0, _) = crate::tickmath::amounts_for_liquidity(&sq(MINED), &sa, &sb, &big(54_162_105_889));
         assert!(small(&o0) < 2_595_776);
-        // most of the wallet still goes in; the top-up round has the rest
-        let (d0, d1) = crate::tickmath::amounts_for_liquidity(&sq(BEFORE), &sa, &sb, &big(liq));
-        let used = (small(&d0) + small(&d1)) as f64 / (BAL.0 + BAL.1) as f64;
-        assert!(used > 0.6, "only {used:.2} of the wallet minted");
+    }
+
+    /// The wallet's value (token1) a mint into [sa, sb) at `sp` uses, after a ratio swap to mint_mix.
+    fn used_after_swap(sp: &BigUint, sa: &BigUint, sb: &BigUint, value1: f64) -> f64 {
+        let p = (to_f64(sp) / 2f64.powi(96)).powi(2);
+        let f = mint_mix(sp, sa, sb, p);
+        let (x, y) = ((f * value1 / p) as i128, ((1.0 - f) * value1) as i128);
+        let liq = (to_f64(&mint_liquidity(sp, sa, sb, &big(x), &big(y))) * 0.999) as i128;
+        let (a0, a1) = crate::tickmath::amounts_for_liquidity(sp, sa, sb, &big(liq));
+        (to_f64(&a0) * p + to_f64(&a1)) / value1
+    }
+
+    #[test]
+    fn a_one_tick_range_still_takes_most_of_the_wallet() {
+        // cbETH/WETH [1329,1330), the price near the top of the tick (the position nearly all WETH):
+        // 0.6.4's 0.5 bp band was half the tick and left nothing to mint
+        let (sa, sb) = (sqrt_ratio_at_tick(1329), sqrt_ratio_at_tick(1330));
+        assert!((sizing_bps(&sa, &sb) - 0.05).abs() < 0.001);
+        for k in [3u32, 500, 997] {
+            let sp = &sa + (&sb - &sa) * BigUint::from(k) / BigUint::from(1000u32);
+            // the band holds back about its share of the width on each side it reaches (up to ~10%),
+            // which the top-up round mints next
+            let used = used_after_swap(&sp, &sa, &sb, 0.13e18);
+            assert!(used > 0.88, "{k}/1000 into the tick: only {used:.3} of the wallet minted");
+        }
+        // and the stable range of the reported mint
+        let (sa, sb) = (sqrt_ratio_at_tick(9), sqrt_ratio_at_tick(16));
+        let used = used_after_swap(&sq(BEFORE), &sa, &sb, 20.0e6);
+        assert!(used > 0.88, "stable range: only {used:.3} minted");
     }
 
     #[test]
@@ -2095,17 +2144,24 @@ mod mint_tests {
     }
 }
 
-/// Ratio swaps that no mint has followed yet, per (chain, pool): when made and which way (true:
-/// token0 in). While a mint keeps failing, the next pass would otherwise size a new ratio swap from the
+/// Ratio swaps that no mint has followed yet, per (chain, pool): when made, which way (true: token0
+/// in) and the share of token0 (by value) the ranges wanted then. While a mint keeps failing, the next pass would otherwise size a new ratio swap from the
 /// balances the last one left, and can swap back the other way, paying the swap cost each time with
 /// nothing deployed. Kept in memory: a restart starts afresh.
-static UNMINTED_SWAP: std::sync::Mutex<Option<HashMap<(u64, String), (u64, bool)>>> = std::sync::Mutex::new(None);
+static UNMINTED_SWAP: std::sync::Mutex<Option<HashMap<(u64, String), (u64, bool, f64)>>> = std::sync::Mutex::new(None);
 /// How long an unminted swap holds back a swap the other way.
 const SWAP_BACK_HOLD_S: u64 = 6 * 3600;
 
-/// Whether a ratio swap `zero_for_one` would undo an earlier one that no mint followed.
-fn swaps_back(earlier: Option<(u64, bool)>, now: u64, zero_for_one: bool) -> bool {
-    matches!(earlier, Some((at, dir)) if dir != zero_for_one && now.saturating_sub(at) < SWAP_BACK_HOLD_S)
+/// How far (share of token0 by value) the ranges' wanted mix may move before a swap the other way is
+/// the price having moved, not a swap being undone: in a one-tick range the mix runs from all of one
+/// token to all of the other across the tick.
+const SWAP_BACK_MIX_MOVE: f64 = 0.1;
+
+/// Whether a ratio swap `zero_for_one`, for ranges that want `need0` of token0 now, would undo an
+/// earlier one that no mint followed.
+fn swaps_back(earlier: Option<(u64, bool, f64)>, now: u64, zero_for_one: bool, need0: f64) -> bool {
+    matches!(earlier, Some((at, dir, then)) if dir != zero_for_one && now.saturating_sub(at) < SWAP_BACK_HOLD_S
+        && (need0 - then).abs() < SWAP_BACK_MIX_MOVE)
 }
 
 fn unminted_key(cid: u64, pool: &str) -> (u64, String) {
@@ -2119,13 +2175,17 @@ mod swap_back_tests {
     #[test]
     fn a_ratio_swap_does_not_undo_an_earlier_one_that_no_mint_followed() {
         let now = 1_000_000;
-        // swapped token0 in an hour ago and nothing was minted: swapping token1 in now would undo it
-        assert!(swaps_back(Some((now - 3600, true)), now, false));
+        // swapped token0 in an hour ago (the ranges wanted 30% token0) and nothing was minted: swapping
+        // token1 in now, for the same mix, would undo it
+        assert!(swaps_back(Some((now - 3600, true, 0.3)), now, false, 0.33));
         // the same way again is a top-up, not a swap back
-        assert!(!swaps_back(Some((now - 3600, true)), now, true));
+        assert!(!swaps_back(Some((now - 3600, true, 0.3)), now, true, 0.3));
         // after the hold, or with nothing pending, the strategy decides again
-        assert!(!swaps_back(Some((now - 7 * 3600, true)), now, false));
-        assert!(!swaps_back(None, now, false));
+        assert!(!swaps_back(Some((now - 7 * 3600, true, 0.3)), now, false, 0.3));
+        assert!(!swaps_back(None, now, false, 0.3));
+        // the price moved across a one-tick range: cbETH was swapped for WETH when the range wanted
+        // almost none of it (0.3%), and it wants 37% now; that is a new mix, not the swap undone
+        assert!(!swaps_back(Some((now - 250 * 60, true, 0.003)), now, false, 0.37));
     }
 }
 

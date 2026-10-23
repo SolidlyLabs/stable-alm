@@ -174,13 +174,8 @@ fn store_rows(cid: u64, pool: &str, rows: Vec<Ev>) -> Result<(), String> {
 
 /// The pool's stored events with from_ts <= ts < to_ts, in chain order.
 pub fn read(cid: u64, pool: &str, from_ts: i64, to_ts: i64) -> Vec<Ev> {
-    let dir = pool_dir(cid, pool);
     let mut out = vec![];
-    let mut d = from_ts.div_euclid(DAY) * DAY;
-    while d < to_ts {
-        out.extend(read_day(&dir.join(format!("{}.jsonl", day_name(d)))).into_iter().filter(|e| e.ts >= from_ts && e.ts < to_ts));
-        d += DAY;
-    }
+    scan(cid, pool, from_ts, to_ts, |e| out.push(e));
     // one row per event even where two sources filed it under neighbouring days (an RPC row's time
     // is the block time estimate, the processor's the real one)
     out.sort_by_key(|e| (e.block, e.log_index));
@@ -188,11 +183,27 @@ pub fn read(cid: u64, pool: &str, from_ts: i64, to_ts: i64) -> Vec<Ev> {
     out
 }
 
-/// Everything stored for the pool.
-pub fn read_all(cid: u64, pool: &str) -> Vec<Ev> {
-    match coverage(cid, pool) {
-        Some(c) => read(cid, pool, c.from_ts - DAY, c.to_ts + DAY),
-        None => vec![],
+/// Each stored event of the pool with from_ts <= ts < to_ts, read a line at a time: day by day, not
+/// sorted within a day's neighbours and not deduplicated (`read` does both for what it keeps). For
+/// a reader that keeps a little of each event: the store holds months of swaps, which as events in
+/// memory took several hundred MB on every cycle.
+pub fn scan(cid: u64, pool: &str, from_ts: i64, to_ts: i64, mut f: impl FnMut(Ev)) {
+    let dir = pool_dir(cid, pool);
+    let mut d = from_ts.div_euclid(DAY) * DAY;
+    while d < to_ts {
+        data::scan_jsonl(&dir.join(format!("{}.jsonl", day_name(d))), |e| {
+            if e.ts >= from_ts && e.ts < to_ts {
+                f(e)
+            }
+        });
+        d += DAY;
+    }
+}
+
+/// `scan` over everything stored for the pool.
+pub fn scan_all(cid: u64, pool: &str, f: impl FnMut(Ev)) {
+    if let Some(c) = coverage(cid, pool) {
+        scan(cid, pool, c.from_ts - DAY, c.to_ts + DAY, f);
     }
 }
 
@@ -918,6 +929,33 @@ mod tests {
             block, log_index: li, ts: 1_792_000_000 + block, kind: "swap".into(), amount0: "-5".into(), amount1: "5".into(),
             sqrt_price_x96: crate::tickmath::sqrt_ratio_at_tick(tick).to_string(), liquidity: "1000".into(), tick, ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_scan_sees_what_a_read_returns_without_collecting_it() {
+        let _home = crate::wallets::tests::temp_home("history-scan");
+        let pool = "0x00000000000000000000000000000000000000b2";
+        // three days, one row filed twice under neighbouring days (two sources), one line garbled
+        let (a, b, c) = (swap(10, 0, 5), swap(90_000, 1, 6), swap(180_000, 0, 7));
+        store_rows(8453, pool, vec![a.clone(), b.clone(), c.clone()]).unwrap();
+        let mut b_again = b.clone();
+        b_again.ts = c.ts;
+        store_rows(8453, pool, vec![b_again]).unwrap();
+        let day = pool_dir(8453, pool).join(format!("{}.jsonl", day_name(c.ts)));
+        let mut f = std::fs::OpenOptions::new().append(true).open(&day).unwrap();
+        writeln!(f, "{{not json").unwrap();
+        let (from, to) = (a.ts, c.ts + 1);
+        let read: Vec<(i64, i64)> = read(8453, pool, from, to).iter().map(|e| (e.block, e.log_index)).collect();
+        assert_eq!(read, vec![(10, 0), (90_000, 1), (180_000, 0)]);
+        // the scan sees every stored row in the window, the double one twice, and skips the garbled line
+        let mut seen = vec![];
+        scan(8453, pool, from, to, |e| seen.push((e.block, e.log_index)));
+        seen.sort();
+        assert_eq!(seen, vec![(10, 0), (90_000, 1), (90_000, 1), (180_000, 0)]);
+        // a window cuts by time
+        let mut late = vec![];
+        scan(8453, pool, b.ts, to, |e| late.push(e.block));
+        assert!(!late.contains(&10));
     }
 
     #[test]

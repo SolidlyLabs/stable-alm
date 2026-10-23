@@ -125,8 +125,19 @@ fn wallet_history(cid: u64, pool: &str, wallet: &str, head: i64) -> Result<Vec<E
 }
 
 pub fn read_jsonl(p: &PathBuf) -> Vec<Ev> {
-    let Ok(f) = std::fs::File::open(p) else { return vec![] };
-    std::io::BufReader::new(f).lines().map_while(Result::ok).filter_map(|l| serde_json::from_str(&l).ok()).collect()
+    let mut out = vec![];
+    scan_jsonl(p, |e| out.push(e));
+    out
+}
+
+/// Each row of an events file, a line at a time (rows that do not parse are skipped).
+pub fn scan_jsonl(p: &PathBuf, mut f: impl FnMut(Ev)) {
+    let Ok(file) = std::fs::File::open(p) else { return };
+    for l in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+        if let Ok(e) = serde_json::from_str(&l) {
+            f(e)
+        }
+    }
 }
 
 fn append_jsonl(p: &PathBuf, rows: &[Ev]) -> std::io::Result<()> {
@@ -170,8 +181,13 @@ pub fn sync_pool(cid: u64, pool: &str, wallet: &str, bootstrap_days: i64) -> Res
         let w = match crate::history::wallet_events(cid, &pool, &wallet) {
             Some(Ok(mut w)) => {
                 let have: HashSet<(i64, i64)> = w.iter().map(|e| (e.block, e.log_index)).collect();
-                w.extend(crate::history::read_all(cid, &pool).into_iter().filter(|e| e.kind != "swap" && e.owner == wallet && !have.contains(&(e.block, e.log_index))));
+                crate::history::scan_all(cid, &pool, |e| {
+                    if e.kind != "swap" && e.owner == wallet && !have.contains(&(e.block, e.log_index)) {
+                        w.push(e)
+                    }
+                });
                 w.sort_by_key(|e| (e.block, e.log_index));
+                w.dedup_by_key(|e| (e.block, e.log_index));
                 w
             }
             r => {
@@ -187,9 +203,16 @@ pub fn sync_pool(cid: u64, pool: &str, wallet: &str, bootstrap_days: i64) -> Res
     } else if rep.rows > 0 {
         let have: HashSet<(i64, i64)> = read_jsonl(&wp).into_iter().map(|e| (e.block, e.log_index)).collect();
         let from_ts = crate::chains::block_ts(cid, rep.from_block) - 3600;
-        let mine: Vec<Ev> = crate::history::read(cid, &pool, from_ts, now + 3600).into_iter()
-            .filter(|e| e.kind != "swap" && e.owner == wallet && e.block >= rep.from_block && !have.contains(&(e.block, e.log_index)))
-            .collect();
+        // a line at a time: the new rows can reach back weeks (a first download), and only the
+        // wallet's own are kept
+        let mut mine: Vec<Ev> = vec![];
+        crate::history::scan(cid, &pool, from_ts, now + 3600, |e| {
+            if e.kind != "swap" && e.owner == wallet && e.block >= rep.from_block && !have.contains(&(e.block, e.log_index)) {
+                mine.push(e)
+            }
+        });
+        mine.sort_by_key(|e| (e.block, e.log_index));
+        mine.dedup_by_key(|e| (e.block, e.log_index));
         if !mine.is_empty() {
             append_jsonl(&wp, &mine).map_err(|e| e.to_string())?;
         }
@@ -542,8 +565,15 @@ pub fn live_market_bars(cid: u64, pool: &str, wallet: &str, d0: i32, d1: i32, nu
     let now = crate::engine::now() as i64;
     let since = now - days * 86400;
     // swaps of the replay window; mints and burns as far back as the store goes (up to 31 days)
-    let mut ev: Vec<Ev> = crate::history::read(cid, pool, now - 31 * 86400, now + 3600).into_iter()
-        .filter(|e| e.ts >= since || e.kind != "swap").collect();
+    // (filtered as read: the older swaps are most of the 31 days)
+    let mut ev: Vec<Ev> = vec![];
+    crate::history::scan(cid, pool, now - 31 * 86400, now + 3600, |e| {
+        if e.ts >= since || e.kind != "swap" {
+            ev.push(e)
+        }
+    });
+    ev.sort_by_key(|e| (e.block, e.log_index));
+    ev.dedup_by_key(|e| (e.block, e.log_index));
     ev.extend(read_jsonl(&wallet_path(cid, pool, wallet)));
     if ev.is_empty() {
         return Err(format!("no event data for pool {pool}; run the data bootstrap first"));

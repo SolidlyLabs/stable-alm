@@ -172,12 +172,17 @@ impl PoolPx {
         let (t0, t1) = crate::chain::pool_tokens(cid, pool).ok()?;
         let (d0, d1) = (crate::prices::meta(cid, &t0).ok()?.decimals as i32, crate::prices::meta(cid, &t1).ok()?.decimals as i32);
         let scale = 10f64.powi(d0 - d1);
-        let mut swaps: Vec<(i64, f64)> = crate::history::read_all(cid, pool)
-            .into_iter()
-            .filter(|e| e.kind == "swap")
-            .map(|e| (e.block, 1.0001f64.powf(e.tick as f64) * scale))
-            .collect();
-        swaps.sort_by_key(|x| x.0);
+        // a line at a time, keeping only (block, log index, price): every stored swap as an event
+        // took several hundred MB each cycle
+        let mut all: Vec<(i64, i64, f64)> = vec![];
+        crate::history::scan_all(cid, pool, |e| {
+            if e.kind == "swap" {
+                all.push((e.block, e.log_index, 1.0001f64.powf(e.tick as f64) * scale))
+            }
+        });
+        all.sort_by_key(|x| (x.0, x.1));
+        all.dedup_by_key(|x| (x.0, x.1));
+        let swaps: Vec<(i64, f64)> = all.into_iter().map(|(b, _, p)| (b, p)).collect();
         Some(PoolPx { t0, t1, u0: 10f64.powi(d0), u1: 10f64.powi(d1), swaps })
     }
 

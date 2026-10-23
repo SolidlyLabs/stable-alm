@@ -13,7 +13,12 @@ pub const RETIRED: [u64; 1] = [250];
 pub struct Chain {
     pub id: u64,
     pub name: String,
+    /// Shown in the pools table (a view filter only).
     pub enabled: bool,
+    /// Switched off (config/chains.json `off`): nothing on the chain is read or sent. Its pools are
+    /// not run, valued or synced, its balances and rewards are not read, and the RPC layer refuses
+    /// its requests. Only while none of its pools is on (set_off).
+    pub off: bool,
     pub rpc: String,
     pub send_rpc: String,
     /// Most requests the RPC accepts in one batch (dRPC's free plan: 3).
@@ -93,6 +98,7 @@ fn load_all() -> HashMap<u64, Chain> {
                 id,
                 name: v["name"].as_str().unwrap_or(k).to_string(),
                 enabled: v["enabled"].as_bool().unwrap_or(false),
+                off: v["off"].as_bool().unwrap_or(false),
                 rpc: std::env::var(format!("ALM_RPC_URL_{id}"))
                     .or_else(|_| if id == BASE { std::env::var("ALM_RPC_URL") } else { Err(std::env::VarError::NotPresent) })
                     .unwrap_or_else(|_| v["rpc"].as_str().unwrap_or("").to_string())
@@ -125,6 +131,7 @@ pub fn get(id: u64) -> Chain {
         id,
         name: format!("chain {id}"),
         enabled: false,
+        off: false,
         rpc: String::new(),
         send_rpc: String::new(),
         batch_size: 3,
@@ -165,6 +172,53 @@ pub fn set_enabled(id: u64, on: bool) -> Result<(), String> {
         user[id.to_string()] = json!({});
     }
     user[id.to_string()]["enabled"] = json!(on);
+    crate::settings::write_atomic(&p, &user).map_err(|e| e.to_string())?;
+    *CACHE.lock().unwrap() = None;
+    Ok(())
+}
+
+/// Whether the chain is switched off.
+pub fn is_off(id: u64) -> bool {
+    get(id).off
+}
+
+/// The pools switched on (in any wallet) on chain `id`, by name.
+fn pools_on(id: u64) -> Vec<String> {
+    let mut out = vec![];
+    for w in crate::wallets::ids() {
+        crate::paths::scope(&w, || {
+            for p in crate::settings::load_pools() {
+                let c = crate::settings::PoolConfig::from(&p);
+                if c.enabled && crate::worker::pool_chain(&p) == id {
+                    out.push(c.name);
+                }
+            }
+        });
+    }
+    out
+}
+
+/// Switch a chain off (or back on): config/chains.json `off`. Refused while a pool on it is on, in
+/// any wallet: an off chain's pools are not run, so its positions would not be looked after.
+pub fn set_off(id: u64, off: bool) -> Result<(), String> {
+    if RETIRED.contains(&id) || !defaults().as_object().unwrap().contains_key(&id.to_string()) {
+        return Err(format!("chain {id} is not supported"));
+    }
+    if off {
+        let on = pools_on(id);
+        if !on.is_empty() {
+            return Err(format!("{} has pools switched on ({}): switch them off first", get(id).name, on.join(", ")));
+        }
+    }
+    let p = crate::paths::app_config().join("chains.json");
+    let mut user: Value = std::fs::read_to_string(&p).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!({}));
+    if !user.is_object() {
+        user = json!({});
+    }
+    if !user[id.to_string()].is_object() {
+        user[id.to_string()] = json!({});
+    }
+    user[id.to_string()]["off"] = json!(off);
     crate::settings::write_atomic(&p, &user).map_err(|e| e.to_string())?;
     *CACHE.lock().unwrap() = None;
     Ok(())
@@ -285,7 +339,7 @@ pub fn as_json() -> Value {
     Value::Array(
         all()
             .into_iter()
-            .map(|c| json!({"id": c.id, "name": c.name, "enabled": c.enabled, "explorer": c.explorer,
+            .map(|c| json!({"id": c.id, "name": c.name, "enabled": c.enabled, "off": c.off, "explorer": c.explorer,
                             "gas_symbol": c.gas_symbol, "min_gas": c.min_gas_wei / 1e18, "usd": c.usd, "solid": c.solid,
                             "rpc": c.rpc, "send_rpc": c.send_rpc, "batch_size": c.batch_size,
                             "rate_per_min": c.rate_per_min, "gas_speed": c.gas_speed, "funding_default": default_funding(c.id), "rate_effective": crate::rpc::rate_for(&c, &c.rpc),
@@ -361,6 +415,28 @@ pub fn blocks_per_day(id: u64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_chain_switched_off_is_not_read_and_needs_its_pools_off_first() {
+        let d = crate::wallets::tests::temp_home("chainoff");
+        let sonic = 146;
+        std::fs::create_dir_all(crate::paths::config()).unwrap();
+        let pool = |on: bool| json!([{"name": "ws-anon", "pool": "0x00000000000000000000000000000000000000c1", "chain_id": sonic, "enabled": on}]);
+        crate::settings::write_atomic(&crate::paths::config().join("pools.json"), &pool(true)).unwrap();
+        let e = set_off(sonic, true).unwrap_err();
+        assert!(e.contains("ws-anon"), "{e}");
+        assert!(!is_off(sonic));
+        // the pool switched off: the chain can go off, and nothing is asked of its RPC
+        crate::settings::write_atomic(&crate::paths::config().join("pools.json"), &pool(false)).unwrap();
+        set_off(sonic, true).unwrap();
+        assert!(is_off(sonic) && !is_off(BASE));
+        let e = crate::rpc::call(sonic, "eth_blockNumber", json!([])).unwrap_err();
+        assert!(e.contains("switched off"), "{e}");
+        assert_eq!(as_json().as_array().unwrap().iter().find(|c| c["id"] == sonic).unwrap()["off"], true);
+        set_off(sonic, false).unwrap();
+        assert!(!is_off(sonic));
+        let _ = std::fs::remove_dir_all(d);
+    }
 
     #[test]
     fn a_gas_speed_set_from_any_wallet_lands_in_the_app_wide_chains_file() {

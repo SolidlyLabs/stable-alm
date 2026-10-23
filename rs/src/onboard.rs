@@ -49,7 +49,7 @@ pub fn status() -> Value {
 pub fn parking_suggestions() -> Value {
     let s = load_settings();
     let wallet = s["wallet"].as_str().unwrap_or("").to_string();
-    json!({"chains": crate::chains::all().into_iter().filter(|c| c.enabled).map(|c| suggest(c.id, &c.name, &wallet)).collect::<Vec<_>>()})
+    json!({"chains": crate::chains::all().into_iter().filter(|c| c.enabled && !c.off).map(|c| suggest(c.id, &c.name, &wallet)).collect::<Vec<_>>()})
 }
 
 /// Pairs offered on their chain however thin they are: the owner parks ETH in cbETH/WETH on Base and

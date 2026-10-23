@@ -253,6 +253,9 @@ svg.chart{width:100%;height:210px;display:block}
 .rpcrow:first-child{border-top:0;padding-top:0}
 .fundrow{grid-template-columns:1fr auto;align-items:center}.fundrow .picker .sel{min-height:38px}.rpcrow .nm{grid-column:1/-1;display:flex;align-items:center;gap:8px}
 #rpcList input.draft{border-color:color-mix(in srgb,var(--warn) 60%,var(--line2))}
+.chainsw{margin-left:8px;padding:1px 9px;border-radius:999px;font-size:11px;font-weight:600;letter-spacing:.02em;background:transparent;color:var(--mute);border:1px solid var(--line2);cursor:pointer}
+.chainsw.on{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 55%,var(--line2));background:color-mix(in srgb,var(--ok) 10%,transparent)}
+#rpcList .rpcrow.off > :not(.nm){opacity:.45}
 .gasrow{grid-column:1/-1;display:flex;align-items:center;gap:10px;flex-wrap:wrap}.gasrow label.f{margin:0}.gasrow .pos-seg button .mute{font-weight:400}
 @media (max-width:640px){.rpcrow{grid-template-columns:1fr}}
 .hide{display:none!important}.empty{padding:28px;text-align:center;color:var(--mute)}
@@ -596,6 +599,7 @@ document.addEventListener("click", e => {
     case "rpc-save": saveRpc(+a).catch(e => toast("Save failed: " + e.message, true)); break;
     case "rpc-test": testRpc(+a).catch(e => { rpcStatus(+a, `<span class=bad>${esc(e.message)}</span>`); toast("Test failed: " + e.message, true); }); break;
     case "rpc-reset": resetRpc(+a); break;
+    case "chain-off": setChainOff(+a, el.dataset.off === "true"); break;
     case "gas-set": setGas(+a, el.dataset.speed); break;
     default: return;
   }
@@ -1562,8 +1566,11 @@ const getp = (o, k) => k.split(".").reduce((a, b) => a?.[b], o);
 function renderRpc() {
   const box = $("rpcList");
   if (box.contains(document.activeElement)) return;
-  box.innerHTML = chains().map(c => `<div class="rpcrow" data-chain="${c.id}">
-      <div class="nm"><span class="cdot" style="--cc:${cc(c.id)}"></span><b>${esc(c.name)}</b><span class="sp"></span><span class="mute small" data-k="status"></span></div>
+  box.innerHTML = chains().map(c => `<div class="rpcrow ${c.off ? "off" : ""}" data-chain="${c.id}">
+      <div class="nm"><span class="cdot" style="--cc:${cc(c.id)}"></span><b>${esc(c.name)}</b>
+        <button class="chainsw ${c.off ? "" : "on"}" data-act="chain-off" data-arg="${c.id}" data-off="${!c.off}" aria-pressed="${!c.off}"
+          title="${c.off ? "Off: nothing on this chain is read or sent. Click to switch it on." : "On. Click to switch it off: no reads or transactions on this chain (its pools must be off first)."}">${c.off ? "Off" : "On"}</button>
+        <span class="sp"></span><span class="mute small" data-k="status"></span></div>
       <div><label class="f">Read RPC</label><input data-k="rpc" value="${esc(c.rpc)}" placeholder="${esc(c.rpc_default)}" spellcheck="false"></div>
       <div><label class="f">Send RPC (transactions)</label><input data-k="send_rpc" value="${esc(c.send_rpc)}" placeholder="${esc(c.send_rpc_default)}" spellcheck="false"></div>
       <div><label class="f">Batch</label><input data-k="batch_size" type=number min=1 max=100 value="${+c.batch_size || 3}"></div>
@@ -1592,6 +1599,11 @@ async function loadGas() {
   gasAt = Date.now();
   await Promise.all(chains().map(c => api(`/api/gas/${c.id}`).then(g => { GAS[c.id] = g; }, e => { GAS[c.id] = {error: e.message}; })));
   renderRpc();
+}
+async function setChainOff(id, off) {
+  try { const r = await api("/api/chains", {id, off}); S.chains = r.chains; document.activeElement.blur(); renderRpc();
+    toast(`${chainOf(id).name} is ${off ? "off: nothing on it is read or sent" : "on"}.`); }
+  catch (e) { toast(e.message, true); }
 }
 async function setGas(id, speed) {
   try { const r = await api("/api/chains", {id, gas_speed: speed}); S.chains = r.chains; document.activeElement.blur(); renderRpc();

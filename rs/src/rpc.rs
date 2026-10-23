@@ -89,7 +89,16 @@ fn rpc_url(cid: u64) -> String {
     crate::chains::get(cid).rpc
 }
 
+/// An off chain's requests are refused here, whoever asks (chains::set_off).
+fn chain_on(cid: u64) -> Result<(), String> {
+    if crate::chains::is_off(cid) {
+        return Err(format!("{} is switched off (Settings, Chains & RPC)", crate::chains::get(cid).name));
+    }
+    Ok(())
+}
+
 fn send_url(cid: u64) -> Result<String, String> {
+    chain_on(cid)?;
     let u = crate::chains::get(cid).send_rpc;
     if u.is_empty() {
         return Err(format!("no send RPC configured for chain {cid}"));
@@ -253,6 +262,7 @@ fn batch_with(cid: u64, calls: &[(&str, Value)], rounds: usize, timeout: Duratio
 
 /// Send requests in batches of the chain's batch size; rate-limited entries are retried after a pause.
 fn send_requests(cid: u64, reqs: &[(String, Value)], rounds: usize, timeout: Duration) -> Result<Vec<R>, String> {
+    chain_on(cid)?;
     let size = crate::chains::get(cid).batch_size.max(1);
     let mut out: Vec<Option<R>> = vec![None; reqs.len()];
     let mut todo: Vec<usize> = (0..reqs.len()).collect();

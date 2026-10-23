@@ -64,7 +64,7 @@ fn ts_of(v: &Value) -> Option<u64> {
 }
 
 fn chains() -> Vec<u64> {
-    let mut ids: Vec<u64> = crate::settings::load_pools().iter().map(crate::worker::pool_chain).collect();
+    let mut ids: Vec<u64> = crate::settings::load_pools().iter().map(crate::worker::pool_chain).filter(|c| !crate::chains::is_off(*c)).collect();
     ids.sort();
     ids.dedup();
     ids

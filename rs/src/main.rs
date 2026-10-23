@@ -36,6 +36,7 @@ mod ladder;
 mod log;
 mod market_data;
 mod market_flvr;
+mod mem;
 #[cfg(test)]
 mod parity;
 mod paths;
@@ -54,6 +55,9 @@ mod wallets;
 mod webui;
 mod worker;
 
+#[global_allocator]
+static ALLOC: mem::Counting = mem::Counting;
+
 fn attach_console() {
     #[cfg(windows)]
     unsafe {
@@ -66,6 +70,9 @@ fn main() {
     let arg = args.get(1).map(String::as_str).unwrap_or("");
     if !arg.is_empty() {
         attach_console();
+    }
+    if matches!(arg, "" | "--headless" | "--once") {
+        mem::start();
     }
     let code = match arg {
         "" => desktop::run().map(|_| 0).unwrap_or_else(|e| {

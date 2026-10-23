@@ -481,7 +481,7 @@ fn get(path: &str, w: &Arc<Worker>) -> (u16, Value) {
         }
         p if p.starts_with("/api/solidpools") => {
             let mut rows = vec![];
-            for c in crate::chains::all().into_iter().filter(|c| !c.solid.is_empty()) {
+            for c in crate::chains::all().into_iter().filter(|c| !c.solid.is_empty() && !c.off) {
                 if let Ok(ps) = crate::market_data::pools(c.id, &wallet) {
                     rows.extend(ps.into_iter().filter(|p| p["token0"]["address"] == c.solid.as_str() || p["token1"]["address"] == c.solid.as_str()));
                 }
@@ -721,6 +721,11 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
             }
             if let Some(url) = body["test"].as_str() {
                 return crate::chains::test_rpc(id, url);
+            }
+            if let Some(off) = body["off"].as_bool() {
+                crate::chains::set_off(id, off)?;
+                w.request(false);
+                return Ok(json!({"ok": true, "chains": crate::chains::as_json()}));
             }
             crate::chains::set_enabled(id, body["enabled"].as_bool().unwrap_or(false))?;
             w.request(false);

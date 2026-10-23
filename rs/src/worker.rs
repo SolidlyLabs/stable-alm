@@ -387,10 +387,27 @@ impl Worker {
 
         let mut by_chain: BTreeMap<u64, Vec<(Value, PoolConfig)>> = BTreeMap::new();
         for p in &raw {
-            by_chain.entry(pool_chain(p)).or_default().push((p.clone(), PoolConfig::from(p)));
+            let (cid, cfg) = (pool_chain(p), PoolConfig::from(p));
+            if chains::is_off(cid) {
+                // a switched-off chain is not read at all (its pools are off: chains::set_off)
+                self.with_status(|st| st["pools"][&cfg.name] = json!({"mode": "disabled", "chain_id": cid, "chain_off": true}));
+                continue;
+            }
+            by_chain.entry(cid).or_default().push((p.clone(), cfg));
         }
+        // the pools last seen holding positions (a pool switched off is withdrawn while it holds any)
+        let (held, first): (Vec<String>, bool) = self.with_status(|st| {
+            let held = st["account"]["pools"].as_object().map(|m| m.iter()
+                .filter(|(_, v)| v["positions"].as_array().map(|a| !a.is_empty()).unwrap_or(true))
+                .map(|(k, _)| k.clone()).collect()).unwrap_or_default();
+            (held, st["account"]["pools"].is_null())
+        });
         for (cid, pools) in &by_chain {
             for (_, cfg) in pools {
+                // a pool that is off and held nothing last cycle needs no market data
+                if !cfg.enabled && !first && !held.contains(&cfg.name) {
+                    continue;
+                }
                 if let Err(e) = crate::data::sync_pool(*cid, &cfg.pool, &wallet, replay_days(cfg).max(13) + 1) {
                     crate::error!("data", "[{}] data refresh failed: {e}", cfg.name);
                 }
@@ -506,7 +523,7 @@ impl Worker {
         }
 
         // Fee vs arbitrage loss for every pool (Discover pairs), refreshed in the background.
-        let mut flvr_chains: Vec<u64> = chains::all().into_iter().filter(|c| c.enabled).map(|c| c.id).collect();
+        let mut flvr_chains: Vec<u64> = chains::all().into_iter().filter(|c| c.enabled && !c.off).map(|c| c.id).collect();
         flvr_chains.extend(by_chain.keys().filter(|c| !flvr_chains.contains(c)).copied().collect::<Vec<_>>());
         crate::market_flvr::refresh_in_background(flvr_chains, wallet.clone());
 

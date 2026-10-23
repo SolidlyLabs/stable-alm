@@ -228,6 +228,8 @@ or earlier becomes a node strategy with one ladder block and the same settings o
    them together and one at a time.
 5. **Settings › Chains & RPC** sets each chain's endpoints and its gas speed: Normal is the node's
    suggested priority fee, Low and Instant what recent blocks paid at the 10th and 90th percentile.
+   A chain's **On/Off** pill switches it off completely: nothing on it is read or sent (its pools
+   must be switched off first).
 
 Your settings, data and logs are kept in `%LOCALAPPDATA%\StableALM` (Windows) or
 `~/Library/Application Support/StableALM` (macOS). Run only one copy per wallet.
@@ -252,13 +254,13 @@ It is a single file of about 8 MB; copy it anywhere and run it.
 To build the Windows installer, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run, from `rs/`:
 
 ```bash
-ISCC /DAppVersion=0.6.4 installer/StableALM.iss     # -> rs/dist/StableALM-Setup-0.6.4.exe
+ISCC /DAppVersion=0.6.5 installer/StableALM.iss     # -> rs/dist/StableALM-Setup-0.6.5.exe
 ```
 
 To sign a release (writes `SHA256SUMS.txt` and `SHA256SUMS.txt.sig` next to the files; upload both):
 
 ```bash
-pwsh release/sign.ps1 -Files dist/StableALM-Setup-0.6.4.exe, dist/StableALM.exe
+pwsh release/sign.ps1 -Files dist/StableALM-Setup-0.6.5.exe, dist/StableALM.exe
 ```
 
 Signers are listed in `rs/release/allowed_signers` (OpenSSH format). To let someone else sign
