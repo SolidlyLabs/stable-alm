@@ -118,9 +118,11 @@ fn tag(cid: u64) -> String {
     with_pin(cid, |p| format!("0x{:x}", p.head.max(p.floor)))
 }
 
+/// A node behind the block the read is pinned to (a load-balanced RPC can route to one): wait and ask
+/// again, it is not the call failing. Nodes word it differently.
 fn unknown_block(e: &Value) -> bool {
     let m = e.get("message").and_then(|m| m.as_str()).unwrap_or("").to_lowercase();
-    m.contains("unknown block") || m.contains("header not found")
+    m.contains("unknown block") || m.contains("header not found") || m.contains("unsupported block number")
 }
 
 fn read(cid: u64, method: &str, params: impl Fn(&str) -> Value) -> Result<rpc::R, String> {
@@ -633,6 +635,14 @@ pub fn int(v: i64) -> Tok {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_node_behind_the_pinned_block_is_waited_for() {
+        for m in ["unknown block", "header not found", "execution reverted: unsupported block number", "Unsupported block number 52954619"] {
+            assert!(unknown_block(&json!({"code": -32000, "message": m})), "{m}");
+        }
+        assert!(!unknown_block(&json!({"code": 3, "message": "execution reverted: AL"})));
+    }
 
     #[test]
     fn short_revert_codes_match_only_themselves() {

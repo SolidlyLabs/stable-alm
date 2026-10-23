@@ -106,6 +106,28 @@ static WORKER: OnceLock<Arc<Worker>> = OnceLock::new();
 /// The server answering now and its port (a port change starts a new one, see `rebind`).
 static CURRENT: std::sync::Mutex<Option<(Arc<Server>, u16)>> = std::sync::Mutex::new(None);
 
+/// `pools` with the lab's limits (`max_actions_per_day`, `max_swap_cost_bps`, `max_spot_dev_ticks`, each
+/// only when given) set on the pool `body` names ({chain_id, pool}), checked as a saved pool is; and
+/// how many pools matched.
+fn set_limits(mut pools: Vec<Value>, body: &Value) -> Result<(Vec<Value>, usize), String> {
+    let cid = body["chain_id"].as_u64().ok_or("expected {chain_id, pool, ...limits}")?;
+    let addr = body["pool"].as_str().ok_or("expected {chain_id, pool, ...limits}")?.to_lowercase();
+    let mut n = 0;
+    for p in pools.iter_mut().filter(|p| pool_chain(p) == cid && p["pool"].as_str().map(|a| a.eq_ignore_ascii_case(&addr)).unwrap_or(false)) {
+        if let Some(v) = body["max_actions_per_day"].as_f64() {
+            p["max_actions_per_day"] = json!(v.round() as i64);
+        }
+        for k in ["max_swap_cost_bps", "max_spot_dev_ticks"] {
+            if let Some(v) = body[k].as_f64() {
+                p[k] = json!(v);
+            }
+        }
+        settings::validate_pool(p)?;
+        n += 1;
+    }
+    Ok((pools, n))
+}
+
 /// The port the settings ask for (8080 unless changed).
 pub fn wanted_port() -> u16 {
     load_settings()["ui_port"].as_u64().filter(|p| (1024..=65535).contains(p)).unwrap_or(8080) as u16
@@ -702,6 +724,16 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
             w.request(false);
             Ok(json!({"ok": true}))
         }
+        // the Strategy lab's limits saved to the pool they were tested on (only the keys given)
+        "/api/pools/limits" => {
+            let (pools, n) = set_limits(load_pools(), &body)?;
+            if n == 0 {
+                return Err("no such pool in this wallet".into());
+            }
+            save_pools(&pools)?;
+            w.request(false);
+            Ok(json!({"ok": true}))
+        }
         "/api/update" => match body["action"].as_str().unwrap_or("") {
             "check" => crate::update::check(),
             "install" => crate::update::install(),
@@ -934,6 +966,26 @@ fn set_ui_prefs(body: &Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_labs_limits_land_on_the_pool_they_name_and_are_checked() {
+        let g = crate::ladder::as_graph(&crate::ladder::Params::from(&crate::ladder::plain_defaults()).unwrap());
+        let pools = vec![
+            json!({"name": "a", "pool": "0x00000000000000000000000000000000000000a1", "chain_id": 8453, "max_actions_per_day": 5, "max_swap_cost_bps": 3.0, "strategy": g}),
+            json!({"name": "b", "pool": "0x00000000000000000000000000000000000000b1", "chain_id": 8453, "max_actions_per_day": 5, "strategy": g}),
+        ];
+        let body = json!({"chain_id": 8453, "pool": "0x00000000000000000000000000000000000000A1", "max_actions_per_day": 12.0, "max_swap_cost_bps": 4.5});
+        let (out, n) = super::set_limits(pools.clone(), &body).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!((out[0]["max_actions_per_day"].clone(), out[0]["max_swap_cost_bps"].clone()), (json!(12), json!(4.5)));
+        assert_eq!(out[1], pools[1]);
+        // a key left out keeps the pool's own; another chain or address matches nothing
+        let (out, _) = super::set_limits(pools.clone(), &json!({"chain_id": 8453, "pool": "0x00000000000000000000000000000000000000a1", "max_swap_cost_bps": 2.0})).unwrap();
+        assert_eq!(out[0]["max_actions_per_day"], json!(5));
+        assert_eq!(super::set_limits(pools.clone(), &json!({"chain_id": 10, "pool": "0x00000000000000000000000000000000000000a1"})).unwrap().1, 0);
+        // out of range is refused as the Pools card would
+        assert!(super::set_limits(pools, &json!({"chain_id": 8453, "pool": "0x00000000000000000000000000000000000000a1", "max_actions_per_day": 5000.0})).is_err());
+    }
 
     #[test]
     fn the_value_history_leaves_out_mis_measured_cycles_and_keeps_real_moves() {

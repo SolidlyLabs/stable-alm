@@ -844,12 +844,46 @@
     return `<div class="full" data-help="lab-park"><label class="sw"><input type="checkbox" data-r="park" ${v ? "checked" : ""}><span class="t"></span>Park the waiting token in its pegged pool (Settings › Parking whitelist)</label>
       ${live ? "" : `<div class="small" style="color:var(--warn);margin:4px 0 0 46px">⚠ Parking is switched off in Settings › Options: backtests count it, but the worker will not park until it is on.</div>`}</div>`;
   }
-  function costsBox() {
-    return `<details class="grp" data-help="lab-costs"><summary class="mute small">Costs &amp; haircuts: swap ${fmt(L.costs.swap_bps, 2)} bp (USDC ${fmt(L.costs.stable_swap_bps ?? 1, 1)} bp) · gas $${fmt(L.costs.gas_usd, 3)} · fees ×${fmt(L.costs.fee_haircut, 2)} · emissions ×${fmt(L.costs.emission_haircut, 2)} · spot check ${L.costs.max_spot_dev_ticks > 0 ? fmt(L.costs.max_spot_dev_ticks, 0) + " ticks" : "off"}</summary>
-      <div class="lf" style="margin-top:10px">${[["swap_bps", "Swap cost (bp)"], ["stable_swap_bps", "Swap to/from USDC (bp)"], ["gas_usd", "Gas per tx ($)"], ["fee_haircut", "Fees received (×)"], ["emission_haircut", "Emissions value (×)"], ["max_spot_dev_ticks", "Spot check: max ticks from 1h median (0 = off)"]]
-        .map(([k, l]) => `<div><label class="f">${l}</label><input type="number" step="any" min="0" data-c="${k}" value="${L.costs[k] ?? 0}"></div>`).join("")}</div></details>`;
+  // the live limits the backtest applies (the pool's own, from Pools › ⚙, until changed here): a
+  // negative daily cap is sent as "no cap"
+  const capOn = () => L.costs.max_actions_per_day != null && L.costs.max_actions_per_day >= 0;
+  const LIMITS = ["max_actions_per_day", "max_swap_cost_bps", "max_spot_dev_ticks"];
+  // the limits that differ from the pool's saved ones (only a number can be saved: live always has a cap)
+  function limitsChanged() {
+    const cfg = cfgOf();
+    if (!cfg) return [];
+    return LIMITS.filter(k => L.costs[k] != null && L.costs[k] >= 0 && !(cfg[k] != null && Math.abs(+cfg[k] - L.costs[k]) < 1e-9));
   }
-  function onCost(el) { const v = parseFloat(el.value); if (v >= 0) { L.costs[el.dataset.c] = v; schedule(); } }
+  function costsBox() {
+    const ch = limitsChanged(), cfg = cfgOf();
+    return `<details class="grp" data-help="lab-costs"><summary class="mute small">Costs &amp; limits: swap ${fmt(L.costs.swap_bps, 2)} bp (USDC ${fmt(L.costs.stable_swap_bps ?? 1, 1)} bp) · gas $${fmt(L.costs.gas_usd, 3)} · fees ×${fmt(L.costs.fee_haircut, 2)} · emissions ×${fmt(L.costs.emission_haircut, 2)} · spot check ${L.costs.max_spot_dev_ticks > 0 ? fmt(L.costs.max_spot_dev_ticks, 0) + " ticks" : "off"} · <b>${capOn() ? fmt(L.costs.max_actions_per_day, 0) + " moves/day" : "no daily cap"}</b> · max swap ${fmt(L.costs.max_swap_cost_bps ?? 3, 1)} bp${ch.length ? ` <span class="warn">(not the pool's)</span>` : ""}</summary>
+      <div class="lf" style="margin-top:10px">${[["swap_bps", "Swap cost (bp)"], ["stable_swap_bps", "Swap to/from USDC (bp)"], ["gas_usd", "Gas per tx ($)"], ["fee_haircut", "Fees received (×)"], ["emission_haircut", "Emissions value (×)"], ["max_spot_dev_ticks", "Spot check: max ticks from 1h median (0 = off)"]]
+        .map(([k, l]) => `<div><label class="f">${l}</label><input type="number" step="any" min="0" data-c="${k}" value="${L.costs[k] ?? 0}"></div>`).join("")}
+        <div data-help="param-max_actions_per_day"><label class="f">Rebalances per UTC day (empty = no cap)</label><input type="number" step="1" min="0" data-c="max_actions_per_day" value="${capOn() ? L.costs.max_actions_per_day : ""}" placeholder="no cap"></div>
+        <div data-help="param-max_swap_cost_bps"><label class="f">Max swap cost (bp; dearer swaps are counted)</label><input type="number" step="any" min="0" data-c="max_swap_cost_bps" value="${L.costs.max_swap_cost_bps ?? 3}"></div></div>
+      ${cfg ? `<div class="row limrow" style="gap:8px;margin-top:8px;align-items:center">${limitsRow()}</div>` : ""}</details>`;
+  }
+  function limitsRow() {
+    const cfg = cfgOf(), ch = limitsChanged();
+    return `<button class="sec sm" data-act="lab-save-limits" ${ch.length ? "" : "disabled"} title="set this pool's live limits (Pools › ⚙) to the ones above">Save limits to ${esc(cfg.name)}</button>
+        <span class="mute small">${ch.length ? `changes ${ch.map(k => `${k} ${cfg[k] ?? "–"} → ${L.costs[k]}`).join(", ")}` : capOn() ? "the pool's live limits" : "live always has a daily cap: set a number to save it"}</span>`;
+  }
+  // the save row follows the fields as they are typed in (the box itself is not redrawn mid-edit)
+  function limitsTouched() { const r = document.querySelector(".limrow"); if (r && cfgOf()) r.innerHTML = limitsRow(); }
+  document.addEventListener("click", e => { if (e.target.closest('[data-act="lab-save-limits"]')) saveLimits(); });
+  function onCost(el) {
+    const k = el.dataset.c, v = parseFloat(el.value);
+    if (k === "max_actions_per_day" && el.value.trim() === "") { L.costs[k] = -1; limitsTouched(); schedule(); return; }
+    if (v >= 0) { L.costs[k] = k === "max_actions_per_day" ? Math.round(v) : v; limitsTouched(); schedule(); }
+  }
+  async function saveLimits() {
+    const cfg = cfgOf(), ch = limitsChanged();
+    if (!cfg || !ch.length) return;
+    const body = {chain_id: L.chain, pool: L.pool};
+    for (const k of ch) body[k] = L.costs[k];
+    try { await api("/api/pools/limits", body); toast(`${cfg.name}: live limits saved (${ch.join(", ")}). Applied on the next cycle.`); await refresh(); renderEd(); }
+    catch (e) { toast(e.message, true); }
+  }
   function onRules(e) {
     const el = e.target, r = L.cur.strategy;
     if (el.dataset.c) return onCost(el);
@@ -2410,12 +2444,12 @@
           ${c.main ? "" : `<span class="cx" ${c.hold ? "data-unhold" : `data-unpick="${esc(c.r.id)}"`} title="remove from the comparison">×</span>`}
           <span data-help="lab-r-pnl"><div class="big ${c.r.pnl === B.pnl ? "best" : ""}">${sg(c.r.pnl)}</div><div class="apr">${fmt(c.r.pnl / res.capital * 100 * 365 / (res.span_days || res.days), 2)}% a year</div></span></div>
         <div class="g">${cell("vs hold", c.hold ? null : c.r.vs_hodl, "hodl", "lab-r-hodl")}${cell("fees", c.r.fees, "fees", "lab-r-fees", c.r.park_yield > 0 ? `${sg(c.r.fees)} <span class="mute small" data-help="lab-r-park">+ ${sg(c.r.park_yield)} parked</span>` : undefined)}${cell("emissions", c.r.emissions, "emis", "lab-r-emis")}${cell("costs", -(c.r.swap_costs + c.r.gas), "costs", "lab-r-costs")}
-          ${cell("IL", c.hold ? null : c.r.il, "il", "lab-r-il")}${c.r.hedge ? cell("hedge", c.r.hedge_net, null, "lab-r-hedge", `${sg(c.r.hedge_net)} <span class="mute small">price ${sg(c.r.hedge_pnl)} · funding ${sg(c.r.funding)} · fees ${sg(-c.r.hedge_fees)}</span>`) : ""}${cell("moves", null, null, "lab-r-moves", String(c.r.actions))}${cell("in range", null, null, "lab-r-tir", c.hold ? "–" : fmt(c.r.time_in_range * 100, 1) + "%")}${cell("end value", null, null, "lab-r-value", "$" + fmt(c.r.value * U, dec))}</div>
+          ${cell("IL", c.hold ? null : c.r.il, "il", "lab-r-il")}${c.r.hedge ? cell("hedge", c.r.hedge_net, null, "lab-r-hedge", `${sg(c.r.hedge_net)} <span class="mute small">price ${sg(c.r.hedge_pnl)} · funding ${sg(c.r.funding)} · fees ${sg(-c.r.hedge_fees)}</span>`) : ""}${cell("moves", null, null, "lab-r-moves", String(c.r.actions) + (c.hold ? "" : capOn() || c.r.cap_blocked ? ` <span class="${c.r.cap_blocked ? "warn" : "mute"} small" title="moves the strategy wanted that the daily cap of ${capOn() ? fmt(L.costs.max_actions_per_day, 0) : "–"} blocked">· ${c.r.cap_blocked || 0} capped</span>` : ""))}${cell("in range", null, null, "lab-r-tir", c.hold ? "–" : fmt(c.r.time_in_range * 100, 1) + "%")}${cell("end value", null, null, "lab-r-value", "$" + fmt(c.r.value * U, dec))}</div>
         ${c.main ? `<div class="of" id="labOf">${overfitHtml()}</div>` : ""}</div>`).join("") +
       `<div class="mute small" style="margin:-2px 0 8px">Amounts in USD${sym && !/^(USDC|USDT|USDC\.E|USDBC|DAI)$/i.test(sym) ? ` (counted in ${esc(sym)} at $${fmt(U, U > 100 ? 0 : 4)})` : ""}. Green is the best of the runs.</div>`;
     $("labMeta").innerHTML = `${new Date(res.from * 1000).toLocaleDateString()} – ${new Date(res.to * 1000).toLocaleDateString()}${res.span_days != null && res.span_days < res.days - 1 ? ` <span class="warn" title="the pool has no swaps before this: the period starts at its history">(all the pool's history: ${fmt(res.span_days, 0)} of ${res.days} days)</span>` : ""} · ${res.swaps.toLocaleString()} swaps · capital $${fmt(res.capital_usd ?? res.capital * U, 0)}${res.entry_cost > 0 ? ` (buying ${esc(sym)} with it cost $${fmt(res.entry_cost * U, 2)})` : ""}`;
     const short = res.span_days && res.span_days < res.days - 1;
-    $("labNotes").textContent = (short ? `The pool's history covers only ${fmt(res.span_days, 0)} of the ${res.days} days asked for; yearly rates use the days covered. ` : "") + res.notes.join(" ") + (res.runs.main.guard_bars ? ` The strategy held still (guard or hold) for ${fmt(res.runs.main.guard_bars * 5 / 60, 1)} hours.` : "") + (res.runs.main.spot_blocked_bars ? ` The spot check blocked ${fmt(res.runs.main.spot_blocked_bars, 0)} moves (price too far from its 1h median; the worker would have waited too).` : "")
+    $("labNotes").textContent = (short ? `The pool's history covers only ${fmt(res.span_days, 0)} of the ${res.days} days asked for; yearly rates use the days covered. ` : "") + res.notes.join(" ") + (res.runs.main.guard_bars ? ` The strategy held still (guard or hold) for ${fmt(res.runs.main.guard_bars * 5 / 60, 1)} hours.` : "") + (res.runs.main.swaps_over_limit ? ` ${res.runs.main.swaps_over_limit} swaps cost more than the ${fmt(L.costs.max_swap_cost_bps ?? 3, 1)} bp limit: live would have skipped them.` : "") + (res.runs.main.spot_blocked_bars ? ` The spot check blocked ${fmt(res.runs.main.spot_blocked_bars, 0)} moves (price too far from its 1h median; the worker would have waited too).` : "")
       + elasticityNote(res.elasticity)
       + (res.runs.main.flow_capped > 0.005 * Math.max(res.runs.main.fees, 1e-9) ? ` This capital is large for the pool: it would draw more than twice the real flow, and the cap held back $${fmt(res.runs.main.flow_capped * (res.numeraire_usd || 1), 2)} of fees.` : "");
     chartEq(cols);
