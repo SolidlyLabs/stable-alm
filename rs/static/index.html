@@ -213,7 +213,7 @@ dialog.agset{width:min(980px,calc(100vw - 32px));max-height:calc(100vh - 48px)}d
 dialog.cap form{padding:18px 18px 16px;display:grid;gap:12px}dialog.cap h3{margin:0;font-size:16px}
 dialog.cap .pick{display:grid;gap:2px;max-height:240px;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:6px}
 dialog.cap .pick label{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:7px;cursor:pointer;font-size:13px}
-dialog.cap .pick label:hover{background:var(--card2)}dialog.cap .pick label span{flex:1}dialog.cap .pick label.all{border-bottom:1px solid var(--line);border-radius:7px 7px 0 0;margin-bottom:2px}
+dialog.cap .pick label:hover{background:var(--card2)}dialog.cap .pick label.stopopt{align-items:flex-start}dialog.cap .pick label.stopopt select{margin-top:6px;width:100%}dialog.cap .pick label span{flex:1}dialog.cap .pick label.all{border-bottom:1px solid var(--line);border-radius:7px 7px 0 0;margin-bottom:2px}
 dialog.cap .amt{display:flex;gap:8px;align-items:center}dialog.cap .amt input{flex:1;font:600 15px var(--mono)}
 dialog.cap .prev{font-size:12px;color:var(--mute);display:grid;gap:3px}dialog.cap .prev div{display:flex;justify-content:space-between}
 dialog.cap .btns{display:flex;justify-content:flex-end;gap:8px}
@@ -968,7 +968,7 @@ function renderPools() {
     if (p) {
       const i = r.i, dep = ((acct.pools || {})[p.name] || {}).deployed_usd, c = poolCap(p), cs = capOf(id);
       const share = c && cs && cs.pools_usd > 0 ? c.capital_usd / cs.pools_usd * 100 : null;
-      alloc = `<div class="alloc"><label class="sw" title="${p.enabled ? "enabled: click to disable" : "disabled: click to enable (a pool switched off gives its money back to Unallocated)"}"><input type=checkbox ${p.enabled ? "checked" : ""} onchange="editPool(${i},'enabled',this.checked)"><span class="t"></span></label>
+      alloc = `<div class="alloc"><label class="sw" title="${p.enabled ? "enabled: click to disable (if it holds money, you choose where the money goes)" : "disabled: click to enable"}"><input type=checkbox ${p.enabled ? "checked" : ""} onchange="editPool(${i},'enabled',this.checked)"><span class="t"></span></label>
         <b class="mono" title="${c ? esc(capTip(c)) : ""}">${c ? usd(c.capital_usd, 0) : "–"}</b></div>
         <div class="mute small">${c ? (share == null ? "" : fmt(share, 0) + "% · ") + usd(c.positions_usd, 0) + " in positions" : dep ? usd(dep, 0) + " deployed" : "nothing deployed"}</div>
         ${cs ? `<div class="capbtns"><button class="sec" onclick="capDlg('add',${+id},'${esc(p.pool.toLowerCase())}')" title="move money from Unallocated into this pool">Add</button><button class="sec" onclick="capDlg('withdraw',${+id},'${esc(p.pool.toLowerCase())}')" title="take money out of this pool to Unallocated, as USDC">Withdraw</button></div>` : ""}`;
@@ -1018,6 +1018,7 @@ function pendText(id, r) {
   if (r.kind === "add") return `Add ${amt} to <b>${esc(pnameOf(id, r.pool))}</b> from Unallocated · next cycle`;
   if (r.kind === "reset") return `Reset every pool's capital to its allocation % · next cycle`;
   if (r.kind === "withdraw") return `${r.to ? "Move" : "Withdraw"} ${amt} from ${r.pools.map(a => `<b>${esc(pnameOf(id, a))}</b>`).join(", ")} → ${esc(pnameOf(id, r.to))} · being split`;
+  if (r.kind === "failed_release") return `<b>${esc(pnameOf(id, r.pool))}</b> could not release ${amt} after ${r.attempts} attempts${r.error ? ` (${esc(r.error)})` : ""} · cancel it to clear`;
   if (r.kind === "release") return `<b>${esc(pnameOf(id, r.pool))}</b> releases ${amt} as USDC → ${esc(pnameOf(id, r.to))} · when it runs next`;
   return esc(r.kind);
 }
@@ -1157,7 +1158,58 @@ async function capGo() {
   } catch (e) { toast(e.message, true); }
 }
 async function capCancel(id, rid) { try { await api("/api/capital", {action: "cancel", chain_id: id, id: rid}); refresh(); } catch (e) { toast(e.message, true); } }
-function editPool(i, k, v) { poolsEdit[i][k] = v; dirtyPools = true; if (k === "enabled") renderPools(); else { updateSum(); markOverrides(i); } }
+function editPool(i, k, v) {
+  if (k === "enabled" && v === false && stopAsk(i)) return;
+  poolsEdit[i][k] = v; dirtyPools = true; if (k === "enabled") renderPools(); else { updateSum(); markOverrides(i); }
+}
+
+// ---- switching off a pool that holds money: ask where the money goes ----
+let STOPDLG = null;
+function stopAsk(i) {
+  const p = poolsEdit[i], c = poolCap(p);
+  if (!c || !((c.capital_usd || 0) >= 1)) return false;
+  const id = pchain(p), cs = capOf(id) || {pools: {}};
+  const others = poolsEdit.filter(q => pchain(q) === id && q.name !== p.name);
+  STOPDLG = {i, id, pool: p.pool.toLowerCase(), name: p.name, cap: c.capital_usd};
+  renderPools(); // the switch stays on until this is answered
+  const opt = (v, title, sub, extra) => `<label class="stopopt"><input type=radio name="stopWhat" value="${v}" ${v === "keep" ? "checked" : ""}><span><b>${title}</b><br><span class="small mute">${sub}</span>${extra || ""}</span></label>`;
+  const move = others.length ? opt("move", "Move it to another pool", "Sold to USDC when this pool next runs; the other pool swaps it into its own tokens when it deploys.",
+    `<div><select id="stopTo">${others.map(q => `<option value="${esc(q.pool.toLowerCase())}">${esc(q.name)}${q.enabled ? "" : " (off)"} · ${usd((cs.pools[q.name] || {}).capital_usd || 0, 0)}</option>`).join("")}</select></div>`) : "";
+  $("capDlg").innerHTML = `<form method=dialog onsubmit="event.preventDefault();stopGo()">
+    <h3>Switch off ${esc(p.name)}</h3>
+    <div class="small mute">It holds <b>${usd(c.capital_usd, 2)}</b> (${usd(c.positions_usd || 0, 0)} in positions). Its positions are withdrawn and what it parked comes back when it next runs. What should happen to the money?</div>
+    <div class="pick">
+      ${opt("keep", "Keep the tokens as they are, in Unallocated", "Nothing is sold: you get back the tokens the positions held.")}
+      ${opt("sell", "Sell to USDC, into Unallocated", "Sold within this pool's swap cost limit when it next runs.")}
+      ${move}
+    </div>
+    <div class="btns"><button type=button class="sec" onclick="$('capDlg').close()">Cancel</button><button type=submit>Switch off</button></div></form>`;
+  $("capDlg").showModal();
+  return true;
+}
+async function stopGo() {
+  const d = STOPDLG; if (!d) return;
+  const what = (document.querySelector('input[name="stopWhat"]:checked') || {}).value || "keep";
+  // an upper bound: "all" takes everything the pool has, whatever the price did since
+  const usdv = Math.ceil(d.cap * 1.05 + 1);
+  let rid = null;
+  try {
+    if (what === "sell") rid = (await api("/api/capital", {action: "withdraw", chain_id: d.id, pools: [d.pool], usd: usdv, all: true, sell: true})).id;
+    if (what === "move") rid = (await api("/api/capital", {action: "move", chain_id: d.id, pools: [d.pool], to: $("stopTo").value, usd: usdv, all: true})).id;
+    // switched off on its own, as saved (other unsaved edits stay unsaved)
+    const list = JSON.parse(JSON.stringify(S.pools));
+    const q = list.find(x => x.name === d.name && pchain(x) === d.id); if (q) q.enabled = false;
+    await api("/api/pools", {pools: list});
+    poolsEdit[d.i].enabled = false; if (q) S.pools = list;
+    $("capDlg").close(); STOPDLG = null;
+    toast(`${d.name} switched off: ${{keep: "its tokens go to Unallocated as they are", sell: "it sells to USDC into Unallocated", move: "its money moves to the pool you chose"}[what]} when it next runs.`);
+    refresh();
+  } catch (e) {
+    // not switched off: a queued withdrawal must not run on a pool that stays on
+    if (rid) { try { await api("/api/capital", {action: "cancel", chain_id: d.id, id: rid}); } catch (_) {} }
+    toast(e.message, true);
+  }
+}
 function editStrat(i, k, v) { poolsEdit[i].strategy[k] = parseFloat(v); dirtyPools = true; updateSum(); markOverrides(i); }
 
 // ---- settings that differ from the strategy's defaults ----
@@ -1324,7 +1376,12 @@ function stratFields(i, sp) {
 }
 function resetPools() { dirtyPools = false; poolsEdit = JSON.parse(JSON.stringify(S.pools)); renderPools(); }
 async function savePools() {
-  try { await api("/api/pools", {pools: poolsEdit}); dirtyPools = false; toast("Saved. Applied on the next cycle (started now)."); refresh(); }
+  try {
+    const r = await api("/api/pools", {pools: poolsEdit}); dirtyPools = false;
+    const off = (r && r.kept_off) || [];
+    toast(off.length ? `Saved, but ${off.join(", ")} stays off: the risk controller switched it off after this page loaded. Switch it on again if you mean to.` : "Saved. Applied on the next cycle (started now).");
+    refresh();
+  }
   catch (e) { toast(e.message, true); }
 }
 async function removePool(name) {

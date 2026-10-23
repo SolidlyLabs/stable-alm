@@ -34,8 +34,8 @@
 //!
 //! Timeframes: any node that is not a position condition or a sink may run on candles of 15 or 30
 //! minutes, 1 or 4 hours or a day ("tf", in minutes), built in memory from the 5-minute bars: its
-//! inputs are taken at each candle's close (highs and lows over the candle), its periods count in
-//! hours as everywhere, and its value holds from that close until the next one. A candle counts
+//! inputs are taken at each candle's close (highs and lows over the candle), lookbacks count in
+//! hours (explicit `*_periods` smoothing parameters count candles), and its value holds from that close until the next one. A candle counts
 //! once it has closed, so a decision never sees the candle still forming.
 //! 1-minute candles are finer than the replay: they are built from the swaps themselves (the last
 //! swap at or before each minute's end, highs, lows and fees over the minute), 5-minute inputs reach
@@ -70,6 +70,14 @@ pub const KINDS: &[Spec] = &[
     ("ema", &["in"], &["out"], &[H]),
     ("median", &["in"], &["out"], &[H]),
     ("stdev", &["in"], &["out"], &[H]),
+    // Parkinson sigma in ticks per candle (not annualized); invariant to the pool's quote direction.
+    ("parkinson", &[], &["out"], &[H]),
+    ("efficiency_ratio", &["in"], &["out"], &[H]),
+    // KAMA's fast/slow are smoothing lengths in candles; only the efficiency window is in hours.
+    ("kama", &["in"], &["out"], &[H, ("fast_periods", 2.0, 1.0, 1000.0), ("slow_periods", 30.0, 1.0, 1000.0)]),
+    // slope is input units per hour, so its scale is consistent across candle timeframes.
+    ("linreg", &["in"], &["slope", "r2"], &[H]),
+    ("drawdown", &["in"], &["out"], &[H]),
     ("bollinger", &["in"], &["upper", "mid", "lower"], &[H, ("k", 2.0, 0.0, 20.0)]),
     ("atr", &[], &["out"], &[H]),
     ("keltner", &[], &["upper", "mid", "lower"], &[H, ("k", 2.0, 0.0, 20.0)]),
@@ -153,7 +161,7 @@ const TICK_PARAMS: &[(&str, &str)] =
     &[("const", "value"), ("offset", "value"), ("distance_gt", "value"), ("out_of_range", "below"), ("out_of_range", "above"), ("range_shift", "value"), ("ladder", "span"), ("ladder", "guard"), ("ladder", "width")];
 /// Outputs that are prices (ticks): drawn on the chart.
 const PRICE_LIKE: &[&str] = &["price", "high_low", "sma", "ema", "median", "bollinger", "keltner", "donchian", "around", "offset", "add", "sub", "min", "max", "switch",
-    "lag", "highest", "lowest", "percentile", "psar", "ichimoku", "heikin_ashi", "gaussian"];
+    "lag", "highest", "lowest", "percentile", "psar", "ichimoku", "heikin_ashi", "gaussian", "kama"];
 /// Kinds a decision can compute at one bar from other values: the only ones a node fed by a
 /// position condition may be.
 const POINTWISE: &[&str] = &["and", "or", "not", "switch", "gt", "lt", "add", "sub", "mul", "div", "scale", "offset", "min", "max", "abs", "to_price", "to_tick", "between", "distance_gt",
@@ -241,6 +249,9 @@ impl Graph {
                 }
                 let v = if TICK_PARAMS.contains(&(sp.0, *k)) { unit_ticks(unit, v, spacing) } else { v };
                 p.insert(k.to_string(), v);
+            }
+            if sp.0 == "kama" && p["fast_periods"] > p["slow_periods"] {
+                return Err(format!("node {id}: fast_periods must be at most slow_periods"));
             }
             let mut inputs = HashMap::new();
             for port in sp.1 {
@@ -433,6 +444,13 @@ fn own_lookback(n: &Node) -> f64 {
     let p = |k: &str| n.p.get(k).copied().unwrap_or(0.0);
     let bar = 1.0 / BARS_PER_HOUR;
     match n.kind {
+        "parkinson" | "efficiency_ratio" | "kama" | "linreg" | "drawdown" => {
+            // Account for rounding hours to candles, especially a sub-day window on daily candles.
+            // ER/KAMA need n changes (n+1 closes); the other windows are conservatively one close extra.
+            let step = n.tf_s as f64 / 3600.0;
+            let min_periods = if n.kind == "linreg" { 2.0 } else { 1.0 };
+            (p("hours") / step).round().max(min_periods) * step + bar
+        }
         "sma" | "ema" | "median" | "stdev" | "bollinger" | "keltner" | "highest" | "lowest" | "percentile" | "zscore" | "cci" | "lag" | "change" | "ladder" => p("hours") + bar,
         "atr" | "rsi" | "donchian" | "stochastic" => p("hours") + p("d_hours") + bar,
         "adx" => 2.0 * p("hours") + bar,
@@ -743,6 +761,15 @@ pub fn evaluate_ext(g: &Graph, m: &Market, ext: &Externals) -> Eval {
             "ema" => put("out", ta::ema(&inp("in"), bars(hours))),
             "median" => put("out", median(&inp("in"), bars(hours))),
             "stdev" => put("out", ta::stdev(&inp("in"), bars(hours))),
+            "parkinson" => put("out", ta::parkinson(hi, lo, bars(hours))),
+            "efficiency_ratio" => put("out", ta::efficiency_ratio(&inp("in"), bars(hours))),
+            "kama" => put("out", ta::kama(&inp("in"), bars(hours), par("fast_periods").round() as usize, par("slow_periods").round() as usize)),
+            "linreg" => {
+                let (slope, r2) = ta::linreg(&inp("in"), bars(hours).max(2));
+                put("slope", slope.into_iter().map(|v| v * bph).collect());
+                put("r2", r2);
+            }
+            "drawdown" => put("out", ta::drawdown(&inp("in"), bars(hours))),
             "bollinger" => {
                 let x = inp("in");
                 let (mid, sd) = (ta::sma(&x, bars(hours)), ta::stdev(&x, bars(hours)));
@@ -1290,6 +1317,116 @@ mod tests {
             {"id": "r", "kind": "range", "in": {"lower": ["bb", "lower"], "upper": ["bb", "upper"]}},
             {"id": "m", "kind": "rebalance", "p": {"delay_min": 0, "cooldown_min": 0}}
         ]})
+    }
+
+    fn volatile_indicators(tf: i64, hours: f64) -> Value {
+        json!({"type": "graph", "nodes": [
+            {"id": "p", "kind": "price", "tf": tf},
+            {"id": "pk", "kind": "parkinson", "tf": tf, "p": {"hours": hours}},
+            {"id": "er", "kind": "efficiency_ratio", "tf": tf, "p": {"hours": hours}, "in": {"in": ["p", "tick"]}},
+            {"id": "ka", "kind": "kama", "tf": tf, "p": {"hours": hours}, "in": {"in": ["p", "tick"]}},
+            {"id": "lr", "kind": "linreg", "tf": tf, "p": {"hours": hours}, "in": {"in": ["p", "tick"]}},
+            {"id": "dd", "kind": "drawdown", "tf": tf, "p": {"hours": hours}, "in": {"in": ["p", "tick"]}},
+            {"id": "r", "kind": "range", "in": {"lower": ["p", "tick"], "upper": ["p", "tick"]}}
+        ]})
+    }
+
+    #[test]
+    fn volatile_indicator_blocks_match_the_ta_math() {
+        let ticks: Vec<i64> = (0..100).map(|i| 1000 + i * 2 + (i % 7) * 3).collect();
+        let mut m = market(&ticks);
+        m.bar_hi = ticks.iter().map(|t| t + 3).collect();
+        m.bar_lo = ticks.iter().map(|t| t - 2).collect();
+        let c: Vec<f64> = ticks.iter().map(|t| *t as f64).collect();
+        let h: Vec<f64> = m.bar_hi.iter().map(|t| *t as f64).collect();
+        let l: Vec<f64> = m.bar_lo.iter().map(|t| *t as f64).collect();
+        let g = graph(volatile_indicators(5, 0.5)).unwrap();
+        let ev = evaluate(&g, &m);
+        let (slope, r2) = ta::linreg(&c, 6);
+        let expected = [
+            ("pk", "out", ta::parkinson(&h, &l, 6), 5),
+            ("er", "out", ta::efficiency_ratio(&c, 6), 6),
+            ("ka", "out", ta::kama(&c, 6, 2, 30), 6),
+            ("lr", "slope", slope.into_iter().map(|v| v * 12.0).collect(), 5),
+            ("lr", "r2", r2, 5),
+            ("dd", "out", ta::drawdown(&c, 6), 5),
+        ];
+        for (id, port, want, first) in expected {
+            let ni = g.nodes.iter().position(|n| n.id == id).unwrap();
+            let got = &ev.series[&(ni, port.to_string())];
+            assert!(got[..first].iter().all(|v| v.is_nan()), "{id}:{port} warms up");
+            assert!(got[first].is_finite(), "{id}:{port} first value");
+            for (i, (a, b)) in got.iter().zip(&want).enumerate() {
+                assert!(a == b || (a.is_nan() && b.is_nan()), "{id}:{port} bar {i}: {a} vs {b}");
+            }
+        }
+        assert!(g.lookback >= 7.0 / 12.0, "ER and KAMA need six changes, seven closes");
+    }
+
+    #[test]
+    fn volatile_indicator_defaults_bounds_and_lookback_are_registered() {
+        let mut v = volatile_indicators(5, 24.0);
+        for n in v["nodes"].as_array_mut().unwrap() {
+            n.as_object_mut().unwrap().remove("p");
+        }
+        let g = graph(v.clone()).unwrap();
+        for kind in ["parkinson", "efficiency_ratio", "kama", "linreg", "drawdown"] {
+            let n = g.nodes.iter().find(|n| n.kind == kind).unwrap();
+            assert_eq!(n.p["hours"], 24.0);
+        }
+        let ki = v["nodes"].as_array().unwrap().iter().position(|n| n["kind"] == "kama").unwrap();
+        let k = g.nodes.iter().find(|n| n.kind == "kama").unwrap();
+        assert_eq!((k.p["fast_periods"], k.p["slow_periods"]), (2.0, 30.0));
+        v["nodes"][ki]["p"] = json!({"fast_periods": 31, "slow_periods": 30});
+        assert!(graph(v.clone()).unwrap_err().contains("fast_periods must be at most slow_periods"));
+        v["nodes"][ki]["p"] = json!({"fast_periods": 0});
+        assert!(graph(v).unwrap_err().contains("fast_periods must be 1 to 1000"));
+        let daily = graph(volatile_indicators(1440, 0.1)).unwrap();
+        let lr = daily.nodes.iter().find(|n| n.kind == "linreg").unwrap();
+        assert_eq!(own_lookback(lr), 48.0 + 1.0 / BARS_PER_HOUR, "regression needs at least two candles");
+        let long = graph(volatile_indicators(5, 8760.0)).unwrap();
+        assert!(long.lookback > 8760.0 && long.lookback <= MAX_LOOKBACK_HOURS);
+        assert!(long.replay_days() >= 366);
+        assert!(graph(volatile_indicators(5, 8761.0)).is_err());
+    }
+
+    #[test]
+    fn volatile_indicators_on_timeframes_do_not_see_future_candles() {
+        let ticks: Vec<i64> = (0..120).collect();
+        let make_market = |count: usize| {
+            let mut m = market(&ticks[..count]);
+            m.bar_end = (1..=count as i64).map(|k| 3600 * 1000 + k * 300).collect();
+            m.bar_hi = ticks[..count].iter().map(|t| t + 3).collect();
+            m.bar_lo = ticks[..count].iter().map(|t| t - 2).collect();
+            m
+        };
+        for tf in [5, 60] {
+            let g = graph(volatile_indicators(tf, 2.0)).unwrap();
+            let full = evaluate(&g, &make_market(120));
+            let prefix = evaluate(&g, &make_market(41)); // ends before the fourth hourly candle closes
+            for (key, short) in &prefix.series {
+                for (i, (a, b)) in full.series[key].iter().zip(short).enumerate() {
+                    assert!(a == b || (a.is_nan() && b.is_nan()), "tf {tf}, {key:?}, bar {i}");
+                }
+            }
+            if tf == 60 {
+                let at = |id: &str, port: &str, bar: usize| {
+                    full.series[&(g.nodes.iter().position(|n| n.id == id).unwrap(), port.to_string())][bar]
+                };
+                for (id, port) in [("pk", "out"), ("er", "out"), ("ka", "out"), ("lr", "slope"), ("lr", "r2"), ("dd", "out")] {
+                    assert!(at(id, port, 22).is_nan(), "{id}:{port} needs two closed candles");
+                }
+                let sigma = 16.0 / (4.0 * 2.0f64.ln()).sqrt();
+                assert!((at("pk", "out", 23) - sigma).abs() < 1e-12);
+                assert!((at("lr", "slope", 23) - 12.0).abs() < 1e-12, "ticks per hour");
+                assert!((at("lr", "r2", 23) - 1.0).abs() < 1e-12);
+                assert_eq!(at("dd", "out", 23), 0.0);
+                assert!(at("er", "out", 34).is_nan() && at("ka", "out", 34).is_nan());
+                assert_eq!(at("er", "out", 35), 1.0);
+                assert!(at("ka", "out", 35).is_finite());
+                assert_eq!(at("pk", "out", 34), at("pk", "out", 23), "hold until next candle closes");
+            }
+        }
     }
 
     #[test]

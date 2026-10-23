@@ -28,6 +28,13 @@ pub struct Book {
     pub initialized: std::collections::BTreeSet<u64>,
     /// chain -> pool address (lowercase) -> its idle tokens
     pub chains: BTreeMap<u64, BTreeMap<String, Tokens>>,
+    /// Pools whose balances after a run could not be read ("<chain>:<pool>"), with the Unallocated
+    /// tokens at that run: their book still shows what they held before it, and the next cycle sets
+    /// it to what the wallet has beyond the other pools and that Unallocated (`settle_dirty`).
+    pub dirty: BTreeMap<String, Tokens>,
+    /// Claim transfers already made in the book ("book:<lot>", "repay:<lot>"), saved before the
+    /// parking ledger is changed: a stop between the two does not make or skip a transfer twice.
+    pub applied: std::collections::BTreeSet<String>,
 }
 
 fn path(live: bool) -> std::path::PathBuf {
@@ -41,7 +48,10 @@ fn req_path() -> std::path::PathBuf {
 impl Book {
     pub fn from_json(v: &Value) -> Book {
         let initialized = v["initialized"].as_array().map(|a| a.iter().filter_map(|x| x.as_u64()).collect()).unwrap_or_default();
-        let mut b = Book { initialized, chains: BTreeMap::new() };
+        let dirty = v["dirty"].as_object().map(|o| o.iter().map(|(k, t)| (k.to_lowercase(), t.as_object().map(|m| m.iter()
+            .filter_map(|(a, n)| Some((a.to_lowercase(), n.as_str()?.parse::<i128>().ok()?))).collect()).unwrap_or_default())).collect()).unwrap_or_default();
+        let applied = v["applied"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+        let mut b = Book { initialized, chains: BTreeMap::new(), dirty, applied };
         for (cid, pools) in v["chains"].as_object().cloned().unwrap_or_default() {
             let Ok(cid) = cid.parse::<u64>() else { continue };
             let c = b.chains.entry(cid).or_default();
@@ -66,7 +76,25 @@ impl Book {
             }
             chains.insert(cid.to_string(), Value::Object(pm));
         }
-        json!({"initialized": self.initialized, "chains": chains})
+        let dirty: Map<String, Value> = self.dirty.iter()
+            .map(|(k, t)| (k.clone(), Value::Object(t.iter().map(|(a, n)| (a.clone(), json!(n.to_string()))).collect()))).collect();
+        json!({"initialized": self.initialized, "chains": chains, "dirty": dirty, "applied": self.applied})
+    }
+
+    /// Mark a pool's book as not final after its run: its balances could not be read, or one of its
+    /// transactions is still unresolved (it may be mined later). `reserve` is the run's as it ended
+    /// (the wallet before it, less the pool's own, less what a claim paid back to it): less the other
+    /// pools' tokens it is what was Unallocated (kept as it is, even below zero: it is an offset).
+    pub fn mark_dirty(&mut self, cid: u64, pool: &str, reserve: &Tokens) {
+        let pool = pool.to_lowercase();
+        let others = self.chains.get(&cid).map(|c| c.iter().filter(|(p, _)| **p != pool).map(|(_, t)| t.clone()).collect::<Vec<_>>()).unwrap_or_default();
+        let unalloc: Tokens = reserve.iter().map(|(t, r)| (t.clone(), r - others.iter().map(|o| o.get(t).copied().unwrap_or(0)).sum::<i128>())).collect();
+        self.dirty.insert(format!("{cid}:{pool}"), unalloc);
+    }
+
+    /// Whether a pool's book is waiting to be settled (`settle_dirty_chain`).
+    pub fn is_dirty(&self, cid: u64, pool: &str) -> bool {
+        self.dirty.contains_key(&format!("{cid}:{}", pool.to_lowercase()))
     }
 
     pub fn pool(&self, cid: u64, pool: &str) -> Tokens {
@@ -74,6 +102,7 @@ impl Book {
     }
 
     pub fn set_pool(&mut self, cid: u64, pool: &str, t: Tokens) {
+        self.dirty.remove(&format!("{cid}:{}", pool.to_lowercase()));
         let t: Tokens = t.into_iter().filter(|(_, a)| *a > 0).collect();
         self.chains.entry(cid).or_default().insert(pool.to_lowercase(), t);
     }
@@ -95,11 +124,16 @@ pub fn load(live: bool) -> Book {
     std::fs::read_to_string(path(live)).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()).map(|v| Book::from_json(&v)).unwrap_or_default()
 }
 
-pub fn save(live: bool, b: &Book) {
+/// Whether it was saved (an error is logged).
+pub fn save(live: bool, b: &Book) -> bool {
     let _g = LOCK.lock().unwrap();
     let _ = std::fs::create_dir_all(crate::paths::logs());
-    if let Err(e) = crate::settings::write_atomic(&path(live), &b.to_json()) {
-        crate::error!("capital", "capital book not saved: {e}");
+    match crate::settings::write_atomic(&path(live), &b.to_json()) {
+        Ok(()) => true,
+        Err(e) => {
+            crate::error!("capital", "capital book not saved: {e}");
+            false
+        }
     }
 }
 
@@ -116,6 +150,26 @@ pub fn after_run(reserve: &Tokens, wallet: &Tokens) -> Tokens {
 /// Free tokens that no pool holds.
 pub fn unallocated(held: &Tokens, wallet: &Tokens) -> Tokens {
     wallet.iter().map(|(t, w)| (t.clone(), (w - held.get(t).copied().unwrap_or(0)).max(0))).filter(|(_, a)| *a > 0).collect()
+}
+
+/// A pool whose balances after its run were not read: its tokens are what the wallet has beyond the
+/// other pools' and what was Unallocated at that run (`unalloc`). Tokens the wallet was not read for
+/// are left as they were. Whether anything changed.
+pub fn settle_dirty(pools: &mut BTreeMap<String, Tokens>, pool: &str, unalloc: &Tokens, wallet: &Tokens) -> bool {
+    let mut mine = pools.get(pool).cloned().unwrap_or_default();
+    let before = mine.clone();
+    for (t, w) in wallet {
+        let others: i128 = pools.iter().filter(|(p, _)| p.as_str() != pool).map(|(_, x)| x.get(t).copied().unwrap_or(0)).sum();
+        let a = (w - others - unalloc.get(t).copied().unwrap_or(0)).max(0);
+        if a > 0 {
+            mine.insert(t.clone(), a);
+        } else {
+            mine.remove(t);
+        }
+    }
+    let changed = mine != before;
+    pools.insert(pool.to_string(), mine);
+    changed
 }
 
 /// No pool holds more than the wallet has: a token the wallet has less of than the pools hold (sent
@@ -203,6 +257,12 @@ pub fn split_by(amount: i128, weights: &[(String, f64)]) -> Vec<(String, i128)> 
 
 pub fn requests() -> Vec<Value> {
     let _g = LOCK.lock().unwrap();
+    read_requests()
+}
+
+/// The queue as saved; the caller holds LOCK, across its write too, or a change made in between
+/// (the dashboard queuing, the worker carrying one out) is lost or a done request comes back.
+fn read_requests() -> Vec<Value> {
     std::fs::read_to_string(req_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
 
@@ -218,8 +278,8 @@ pub fn push(mut req: Value) -> String {
     let id = format!("{:x}{:04x}", crate::engine::now(), rand_u16());
     req["id"] = json!(id);
     req["ts"] = json!(crate::engine::now());
-    let mut r = requests();
     let _g = LOCK.lock().unwrap();
+    let mut r = read_requests();
     r.push(req);
     write_requests(&r);
     id
@@ -232,18 +292,151 @@ fn rand_u16() -> u16 {
 
 /// Removes a request (cancelled, or carried out). Whether it was there.
 pub fn remove(id: &str) -> bool {
-    let mut r = requests();
     let _g = LOCK.lock().unwrap();
+    let mut r = read_requests();
     let n = r.len();
     r.retain(|x| x["id"].as_str() != Some(id));
     write_requests(&r);
     r.len() != n
 }
 
+/// `amount` (raw) of `token` moved in the book from `origin` to `host`, at most what the origin holds;
+/// the amount moved.
+fn move_claim(book: &mut Book, cid: u64, origin: &str, host: &str, token: &str, amount: i128) -> i128 {
+    let mut o = book.pool(cid, origin);
+    let have = o.get(token).copied().unwrap_or(0);
+    let moved = amount.clamp(0, have.max(0));
+    if moved == 0 {
+        return 0;
+    }
+    *o.entry(token.to_string()).or_default() -= moved;
+    o.retain(|_, v| *v > 0);
+    book.set_pool(cid, origin, o);
+    let mut h = book.pool(cid, host);
+    *h.entry(token.to_string()).or_default() += moved;
+    book.set_pool(cid, host, h);
+    moved
+}
+
+/// The claims `origin` made this run (marked `booked: false` when made; older claims carry no mark
+/// and are left as they are, their tokens may have moved since) (parking.rs: tokens parked with a pool that runs a strategy of
+/// its own) put in the book: the tokens are the host's to place from now on, and the claim is what
+/// it owes back. Before this the tokens stayed the origin's in the book, so the host could not
+/// deploy them, and an unpark had the host pay back from its positions what it never received.
+pub fn book_claims(book: &mut Book, live: bool, cid: u64, origin: &str) {
+    let todo: Vec<Value> = crate::parking::lots(live).into_iter().filter(|x| claim_of(x, cid, origin) && x["booked"] == false).collect();
+    if todo.is_empty() {
+        return;
+    }
+    for lot in &todo {
+        let key = format!("book:{}", lot["id"].as_str().unwrap_or(""));
+        if book.applied.contains(&key) {
+            continue; // moved before a stop, its mark not yet in the ledger
+        }
+        let token = lot["token"].as_str().unwrap_or("").to_lowercase();
+        let host = lot["pool"].as_str().unwrap_or("").to_lowercase();
+        let amount: i128 = lot["amount"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let moved = move_claim(book, cid, &origin.to_lowercase(), &host, &token, amount);
+        crate::info!("capital", "claim {}: {} raw {} moved in the book to the pool it is parked with", lot["id"], moved, lot["symbol"].as_str().unwrap_or("?"));
+        book.applied.insert(key);
+    }
+    // the book first, then the ledger: a stop or a failed write in between leaves the mark, not a
+    // second move; a mark goes only once the ledger has the claim booked
+    if !save(live, book) {
+        return;
+    }
+    for mut lot in todo {
+        let key = format!("book:{}", lot["id"].as_str().unwrap_or(""));
+        lot["booked"] = json!(true);
+        if crate::parking::update(live, lot) {
+            book.applied.remove(&key);
+        }
+    }
+    save(live, book);
+}
+
+fn claim_of(x: &Value, cid: u64, origin: &str) -> bool {
+    crate::parking::is_claim(x) && x["chain_id"].as_u64() == Some(cid) && x["origin"].as_str().map(|o| o.eq_ignore_ascii_case(origin)).unwrap_or(false)
+}
+
+/// What a host paid back from its idle tokens for a claim (`from_idle`, raw) leaves it in the book.
+fn debit_host(book: &mut Book, cid: u64, lot: &Value) {
+    let token = lot["token"].as_str().unwrap_or("").to_lowercase();
+    let host = lot["pool"].as_str().unwrap_or("").to_lowercase();
+    let paid: i128 = lot["from_idle"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let mut h = book.pool(cid, &host);
+    let have = h.get(&token).copied().unwrap_or(0);
+    h.insert(token, have - paid.clamp(0, have.max(0)));
+    book.set_pool(cid, &host, h);
+}
+
+/// Claims of `origin` its run paid back (parking.rs stage "repaid"): what the host paid from its idle
+/// tokens (`from_idle`) leaves the host in the book (the origin's run counted it as its own: the
+/// executor's reserve was lowered by it), then the claim is gone. What the host's positions paid
+/// came into the wallet during the run and is the origin's already.
+pub fn settle_repaid(book: &mut Book, live: bool, cid: u64, origin: &str) {
+    let done: Vec<Value> = crate::parking::lots(live).into_iter().filter(|x| claim_of(x, cid, origin) && x["stage"] == "repaid").collect();
+    if done.is_empty() {
+        return;
+    }
+    for lot in &done {
+        let key = format!("repay:{}", lot["id"].as_str().unwrap_or(""));
+        if book.applied.insert(key) {
+            debit_host(book, cid, lot);
+        }
+    }
+    if !save(live, book) {
+        return;
+    }
+    for lot in done {
+        let id = lot["id"].as_str().unwrap_or("").to_string();
+        if crate::parking::remove(live, &id) {
+            book.applied.remove(&format!("repay:{id}"));
+        }
+    }
+    save(live, book);
+}
+
+/// How many times a pool's release is tried before what it could not withdraw is given up.
+pub const RELEASE_ATTEMPTS: u64 = 3;
+
+/// After a pool's release of `asked` gave `moved` (USD; `failed`: it stopped on an error): the release
+/// that stays queued for the rest, or None when it is done or out of attempts. A release that stopped
+/// early (a swap over its cost bound, a revert) is not done: an emergency exit or a plan's withdraw step
+/// would otherwise count as carried out with the positions still open.
+pub fn after_release(r: &Value, asked: f64, moved: f64, failed: bool) -> Option<Value> {
+    if r["all"] == true && !failed {
+        return None; // everything it had (the amount asked is an upper bound)
+    }
+    let rest = asked - moved.max(0.0);
+    if !failed && rest < 1.0 {
+        return None;
+    }
+    let attempts = r["attempts"].as_u64().unwrap_or(0) + 1;
+    if attempts >= RELEASE_ATTEMPTS || rest < 1.0 {
+        return None;
+    }
+    let mut next = r.clone();
+    next["usd"] = json!(rest);
+    next["attempts"] = json!(attempts);
+    Some(next)
+}
+
+/// A release out of attempts with something left: kept in the queue, never carried out again, so a
+/// plan's withdraw step or an emergency exit is not taken as done (cancelled from the dashboard).
+pub fn failed_release(r: &Value, rest: f64, why: Option<&str>) -> Value {
+    let mut f = r.clone();
+    f["kind"] = json!("failed_release");
+    f["usd"] = json!(rest);
+    f["attempts"] = json!(RELEASE_ATTEMPTS);
+    f["error"] = json!(why);
+    f
+}
+
 /// Replaces a request by its id (a withdrawal split into one release per pool).
 pub fn replace(id: &str, with: Vec<Value>) {
-    let mut r = requests();
     let _g = LOCK.lock().unwrap();
+    let mut r = read_requests();
     if let Some(i) = r.iter().position(|x| x["id"].as_str() == Some(id)) {
         r.splice(i..i + 1, with);
         write_requests(&r);
@@ -295,6 +488,11 @@ pub fn universe(cid: u64, pools: &[&PoolConfig], s: &Value, acct: &Value, book: 
     }
     for t in book.held(cid).keys() {
         add(t);
+    }
+    // the asset a queued withdrawal sells to (an emergency's or a plan's safe asset): what it brings
+    // must be seen after the release, or it is counted as nothing withdrawn
+    for r in requests().iter().filter(|r| r["chain_id"].as_u64() == Some(cid)) {
+        add(r["safe"].as_str().unwrap_or(""));
     }
     out.retain(|t| crate::prices::meta(cid, t).is_ok());
     out.sort();
@@ -448,15 +646,38 @@ fn name_of(pools: &[&PoolConfig], addr: &str) -> String {
 /// At the start of a cycle, for one chain: the book kept within the wallet, started (once) from the
 /// allocation %, and the queued Add, Reset and Withdraw requests carried out (a withdrawal becomes one
 /// release per pool, carried out when that pool runs).
-pub fn prepare(book: &mut Book, cid: u64, pools: &[&PoolConfig], acct: &Value, wallet: &Tokens, live: bool) {
-    if clamp(book.chains.entry(cid).or_default(), wallet) {
+/// `take_requests`: carry out the queued requests (false while live trading cannot sign this cycle:
+/// they are the live book's and wait).
+/// The chain's pools whose book was not final after their run, settled from the wallet now
+/// (`settle_dirty`). Not while a transaction on the chain is unresolved (`pending`): it may still be
+/// mined, and the marks wait for it.
+pub fn settle_dirty_chain(book: &mut Book, cid: u64, wallet: &Tokens, pending: bool) {
+    if pending {
+        return;
+    }
+    let pre = format!("{cid}:");
+    let dirty: Vec<(String, Tokens)> = book.dirty.iter().filter_map(|(d, u)| Some((d.strip_prefix(&pre)?.to_string(), u.clone()))).collect();
+    for (pool, unalloc) in dirty {
+        if settle_dirty(book.chains.entry(cid).or_default(), &pool, &unalloc, wallet) {
+            crate::warn!("capital", "chain {cid}: pool {pool}'s tokens set from the wallet (its book was not final after its last run)");
+        }
+        book.dirty.remove(&format!("{pre}{pool}"));
+    }
+}
+
+pub fn prepare(book: &mut Book, cid: u64, pools: &[&PoolConfig], acct: &Value, wallet: &Tokens, live: bool, take_requests: bool, pending: bool) {
+    settle_dirty_chain(book, cid, wallet, pending);
+    // a pool's book waiting for a transaction that may still be mined: the wallet does not show it
+    // yet, so it is not clamped against now (that would take the shortfall from every pool)
+    let waiting = book.dirty.keys().any(|d| d.starts_with(&format!("{cid}:")));
+    if !waiting && clamp(book.chains.entry(cid).or_default(), wallet) {
         crate::warn!("capital", "chain {cid}: the wallet holds less of some tokens than the pools did (sent out?): every pool's share of them shrank in proportion");
     }
     if !book.initialized.contains(&cid) {
         fill_from_allocations(book, cid, pools, acct, wallet, live);
         book.initialized.insert(cid);
     }
-    for r in requests().into_iter().filter(|r| r["chain_id"].as_u64() == Some(cid)) {
+    for r in requests().into_iter().filter(|r| take_requests && r["chain_id"].as_u64() == Some(cid)) {
         let id = r["id"].as_str().unwrap_or("").to_string();
         let usd = r["usd"].as_f64().unwrap_or(0.0);
         match r["kind"].as_str().unwrap_or("") {
@@ -499,7 +720,7 @@ pub fn prepare(book: &mut Book, cid: u64, pools: &[&PoolConfig], acct: &Value, w
                 let rel: Vec<Value> = split.into_iter().filter(|x| x.1 >= 1.0).enumerate()
                     // a plan step or an emergency exit carries its target asset, its cost bound and its tag
                     .map(|(i, (p, u))| json!({"id": format!("{id}-{i}"), "ts": r["ts"], "kind": "release", "chain_id": cid, "pool": p, "usd": u, "to": to,
-                                             "safe": r["safe"], "max_cost_bp": r["max_cost_bp"], "plan": r["plan"], "emergency": r["emergency"]}))
+                                             "safe": r["safe"], "max_cost_bp": r["max_cost_bp"], "plan": r["plan"], "emergency": r["emergency"], "all": r["all"]}))
                     .collect();
                 crate::info!("capital", "withdrawal of ${} split over {} pools; each pool releases its part when it runs", crate::engine::commas(usd), rel.len());
                 replace(&id, rel);
@@ -563,6 +784,76 @@ pub fn status(book: &Book, cid: u64, pools: &[&PoolConfig], acct: &Value, wallet
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_claim_moves_its_tokens_to_the_host_in_the_book() {
+        let mut b = Book::default();
+        let (a, h, usdc) = ("0xaaa", "0xbbb", "0xusdc");
+        b.set_pool(8453, a, [(usdc.to_string(), 300i128), ("0xweth".to_string(), 5)].into_iter().collect());
+        assert_eq!(super::move_claim(&mut b, 8453, a, h, usdc, 200), 200);
+        assert_eq!(b.pool(8453, a).get(usdc), Some(&100));
+        assert_eq!(b.pool(8453, h).get(usdc), Some(&200));
+        // never more than the origin holds
+        assert_eq!(super::move_claim(&mut b, 8453, a, h, usdc, 500), 100);
+        assert!(b.pool(8453, a).get(usdc).is_none());
+        assert_eq!(b.pool(8453, h).get(usdc), Some(&300));
+    }
+
+    #[test]
+    fn claim_transfers_are_made_once_even_across_a_stop() {
+        let d = std::env::temp_dir().join(format!("alm-test-claims-{}-{}", std::process::id(), crate::engine::now()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        crate::paths::set_test_home(&d);
+        let (a, h, usdc) = ("0xaaa", "0xbbb", "0xusdc");
+        let claim = json!({"id": "c1", "kind": "claim", "chain_id": 8453, "origin": a, "pool": h, "token": usdc, "amount": "200", "booked": false});
+        crate::parking::add(true, claim.clone());
+        let mut b = Book::default();
+        b.set_pool(8453, a, [(usdc.to_string(), 300i128)].into_iter().collect());
+        // a stop after the book was saved, before the ledger: the mark keeps a second move out
+        b.applied.insert("book:c1".into());
+        b.set_pool(8453, a, [(usdc.to_string(), 100i128)].into_iter().collect());
+        b.set_pool(8453, h, [(usdc.to_string(), 200i128)].into_iter().collect());
+        book_claims(&mut b, true, 8453, a);
+        assert_eq!(b.pool(8453, a).get(usdc), Some(&100));
+        assert_eq!(b.pool(8453, h).get(usdc), Some(&200));
+        assert!(b.applied.is_empty());
+        assert_eq!(crate::parking::lots(true)[0]["booked"], true);
+        // the origin's run paid it back, 150 of it from the host's idle tokens
+        let mut l = crate::parking::lots(true)[0].clone();
+        l["stage"] = json!("repaid");
+        l["from_idle"] = json!("150");
+        crate::parking::update(true, l);
+        assert_eq!(crate::parking::claims_usd(true, 8453, a).1, 0.0);
+        settle_repaid(&mut b, true, 8453, a);
+        assert_eq!(b.pool(8453, h).get(usdc), Some(&50));
+        assert!(crate::parking::lots(true).is_empty());
+        assert!(b.applied.is_empty());
+        // settled again (a second run): nothing more is taken
+        settle_repaid(&mut b, true, 8453, a);
+        assert_eq!(b.pool(8453, h).get(usdc), Some(&50));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_release_that_stopped_early_stays_queued_for_the_rest() {
+        let r = json!({"id": "x-0", "kind": "release", "usd": 500.0, "emergency": true});
+        // done: nothing left
+        assert!(super::after_release(&r, 500.0, 499.5, false).is_none());
+        // stopped early (a swap over its bound): the rest is tried again, twice more at most
+        let next = super::after_release(&r, 500.0, 120.0, true).unwrap();
+        assert_eq!((next["usd"].as_f64().unwrap(), next["attempts"].as_u64().unwrap()), (380.0, 1));
+        assert_eq!(next["emergency"], true);
+        let last = super::after_release(&next, 380.0, 0.0, true).unwrap();
+        assert_eq!(last["attempts"], 2);
+        assert!(super::after_release(&last, 380.0, 0.0, true).is_none());
+        // short without an error (the pool had less): also retried, positions may still be open
+        assert!(super::after_release(&r, 500.0, 300.0, false).is_some());
+        // "everything" (a pool switched off): done once it ran without an error, retried if it stopped early
+        let all = json!({"id": "y-0", "kind": "release", "usd": 510.0, "all": true});
+        assert!(super::after_release(&all, 510.0, 495.0, false).is_none());
+        assert!(super::after_release(&all, 510.0, 100.0, true).is_some());
+    }
+
     fn toks(v: &[(&str, i128)]) -> Tokens {
         v.iter().map(|(k, a)| (k.to_string(), *a)).collect()
     }
@@ -596,6 +887,48 @@ mod tests {
         assert_eq!(pools["b"]["usdc"], 200);
         assert_eq!(pools["a"]["weth"], 5);
         assert!(!clamp(&mut pools, &toks(&[("usdc", 500)])));
+    }
+
+    #[test]
+    fn a_pool_whose_balances_were_not_read_is_settled_from_the_wallet() {
+        let mut b = Book::from_json(&json!({}));
+        b.set_pool(8453, "a", toks(&[("usdc", 100)]));
+        b.set_pool(8453, "b", toks(&[("usdc", 100)]));
+        // wallet 300 before a's run: a 100, b 100, Unallocated 100; a mints its 100, the read fails
+        b.mark_dirty(8453, "A", &reserve(&b.pool(8453, "a"), &toks(&[("usdc", 300)])));
+        let b2 = Book::from_json(&b.to_json());
+        assert_eq!(b2.dirty["8453:a"], toks(&[("usdc", 100)]));
+        let mut b = b2;
+        // the wallet now holds 200: a holds none of it, Unallocated keeps its 100
+        let (k, u) = b.dirty.iter().next().map(|(k, u)| (k.clone(), u.clone())).unwrap();
+        assert!(settle_dirty(b.chains.get_mut(&8453).unwrap(), "a", &u, &toks(&[("usdc", 200)])));
+        b.dirty.remove(&k);
+        assert!(b.pool(8453, "a").is_empty());
+        assert_eq!(b.pool(8453, "b"), toks(&[("usdc", 100)]));
+        // a token the wallet was not read for is left alone; a fresh book clears the mark
+        let mut pools: BTreeMap<String, Tokens> = BTreeMap::new();
+        pools.insert("a".into(), toks(&[("usdc", 50), ("weth", 7)]));
+        settle_dirty(&mut pools, "a", &Tokens::new(), &toks(&[("usdc", 20)]));
+        assert_eq!(pools["a"], toks(&[("usdc", 20), ("weth", 7)]));
+        b.mark_dirty(8453, "a", &Tokens::new());
+        b.set_pool(8453, "a", toks(&[("usdc", 1)]));
+        assert!(b.dirty.is_empty());
+        // a claim paid back to a from b's idle 100 (wallet 100, all b's): the run lowered a's reserve
+        // to 0, its balances were not read; the worker debits b first, then marks a
+        let mut b = Book::default();
+        b.set_pool(8453, "b", toks(&[("usdc", 100)]));
+        b.set_pool(8453, "b", Tokens::new());
+        b.mark_dirty(8453, "a", &toks(&[("usdc", 0)]));
+        assert_eq!(b.dirty["8453:a"]["usdc"], 0);
+        assert!(b.is_dirty(8453, "A"));
+        let u = b.dirty["8453:a"].clone();
+        settle_dirty(b.chains.get_mut(&8453).unwrap(), "a", &u, &toks(&[("usdc", 100)]));
+        assert_eq!(b.pool(8453, "a").get("usdc").copied(), Some(100));
+        // the offset is kept below zero (never clamped): Unallocated short of what the other pools hold
+        let mut b = Book::default();
+        b.set_pool(8453, "b", toks(&[("usdc", 100)]));
+        b.mark_dirty(8453, "a", &toks(&[("usdc", 40)]));
+        assert_eq!(b.dirty["8453:a"]["usdc"], -60);
     }
 
     #[test]

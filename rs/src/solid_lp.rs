@@ -34,12 +34,14 @@ pub fn position(cid: u64, pool: &str, wallet: &str) -> Result<Value, String> {
               "amounts": [x0, x1], "usd": usd}))
 }
 
-pub fn run(cid: u64, wallet: &str, settings: &Value, execute: bool) -> Value {
+/// `reserve`: the pools' tokens (capital.rs), which the auto-LP may not spend; the SOLID it deposits
+/// is left out of it (claimed rewards, there to be paired), so it pairs SOLID with Unallocated tokens.
+pub fn run(cid: u64, wallet: &str, settings: &Value, execute: bool, reserve: crate::capital::Tokens) -> Value {
     let sl = &settings["solid_lp"];
     let pool = sl["pool"].as_str().map(String::from).filter(|p| !p.is_empty()).unwrap_or_else(|| crate::chains::get(cid).solid_lp_pool).to_lowercase();
     let mut out = json!({"chain_id": cid, "pool": pool, "state": "idle"});
     let mut report = vec![];
-    match run_inner(cid, wallet, settings, execute, &pool, &mut out) {
+    match run_inner(cid, wallet, settings, execute, &pool, &mut out, reserve) {
         Ok(r) => report = r,
         Err(e) => {
             crate::error!("pool.solid-lp", "  failed: {e}");
@@ -53,7 +55,7 @@ pub fn run(cid: u64, wallet: &str, settings: &Value, execute: bool) -> Value {
     out
 }
 
-fn run_inner(cid: u64, wallet: &str, settings: &Value, execute: bool, pool: &str, out: &mut Value) -> Result<Vec<String>, String> {
+fn run_inner(cid: u64, wallet: &str, settings: &Value, execute: bool, pool: &str, out: &mut Value, mut reserve: crate::capital::Tokens) -> Result<Vec<String>, String> {
     let sl = &settings["solid_lp"];
     let solid = crate::chains::get(cid).solid;
     let num = |k: &str, d: f64| sl[k].as_f64().unwrap_or(d);
@@ -70,12 +72,15 @@ fn run_inner(cid: u64, wallet: &str, settings: &Value, execute: bool, pool: &str
         allocation_pct: 0.0,
         max_ranges: 1,
         enabled: true,
+        plan_bound_bps: None,
     };
     let mut ex = Executor::new(cfg, cid, wallet, settings, execute, None)?;
     if solid.is_empty() || (ex.t0 != solid && ex.t1 != solid) {
         return Err(format!("pool {pool} has no SOLID"));
     }
     let pair = if ex.t0 == solid { ex.t1.clone() } else { ex.t0.clone() };
+    reserve.remove(&solid);
+    ex.set_reserve(reserve);
     ex.is_solid_lp = true;
     ex.solid_pair = Some((solid.clone(), pair.clone()));
     let e = |x: crate::engine::StepErr| x.to_string();

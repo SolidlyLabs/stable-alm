@@ -59,6 +59,7 @@ pub fn bounded(cfg: &crate::settings::PoolConfig) -> crate::settings::PoolConfig
         if let Some(b) = super::read_json("bounds.json", json!({}))[cfg.pool.to_lowercase()].as_f64() {
             c.max_swap_cost_bps = c.max_swap_cost_bps.min(b);
             c.slippage_bps = c.slippage_bps.min(b);
+            c.plan_bound_bps = Some(b);
         }
     }
     c
@@ -136,11 +137,11 @@ pub fn reset_strategy_state(cid: u64, pool: &str, live: bool) {
 
 /// Write a pool's strategy (and switch it on), keeping everything else.
 pub fn apply_strategy(pool: &str, strategy: &Value) -> Result<(), String> {
-    let mut pools = crate::settings::load_pools();
-    let p = pools.iter_mut().find(|p| p["pool"].as_str().map(|a| a.eq_ignore_ascii_case(pool)).unwrap_or(false)).ok_or("pool not configured")?;
-    p["strategy"] = crate::ladder::normalized(strategy);
-    crate::settings::validate_pool(p)?;
-    crate::settings::save_pools(&pools)
+    crate::settings::update_pools(|pools| {
+        let p = pools.iter_mut().find(|p| p["pool"].as_str().map(|a| a.eq_ignore_ascii_case(pool)).unwrap_or(false)).ok_or("pool not configured")?;
+        p["strategy"] = crate::ladder::normalized(strategy);
+        crate::settings::validate_pool(p)
+    })
 }
 
 fn add_pool(cid: u64, pool: &str, strategy: &Value, name: Option<&str>) -> Result<(), String> {
@@ -156,9 +157,10 @@ fn add_pool(cid: u64, pool: &str, strategy: &Value, name: Option<&str>) -> Resul
     e["strategy"] = crate::ladder::normalized(strategy);
     e["enabled"] = json!(true);
     crate::settings::validate_pool(&e)?;
-    let mut pools = crate::settings::load_pools();
-    pools.push(e);
-    crate::settings::save_pools(&pools)
+    crate::settings::update_pools(|pools| {
+        pools.push(e);
+        Ok(())
+    })
 }
 
 /// Queue a step's work (once); returns the capital request id it queued, if any.
@@ -179,11 +181,14 @@ fn start_step(p: &Value, s: &Value, bounds: &Value, live: bool) -> Result<Option
                                                 "safe": safe, "max_cost_bp": bp, "plan": id}))))
         }
         "strategy" => {
+            // the move the new strategy makes is the plan's: under its cost bound
+            set_bound(pool, Some(bp));
             apply_strategy(pool, &s["strategy"])?;
             reset_strategy_state(cid, pool, live);
             Ok(None)
         }
         "add_pool" => {
+            set_bound(pool, Some(bp));
             add_pool(cid, pool, &s["strategy"], s["name"].as_str())?;
             reset_strategy_state(cid, pool, live);
             Ok(None)
@@ -196,14 +201,73 @@ fn start_step(p: &Value, s: &Value, bounds: &Value, live: bool) -> Result<Option
     }
 }
 
-/// Is the step's work done?
-fn step_done(s: &Value, worker: &crate::worker::Worker) -> bool {
+/// Whether the capital request `rid` (or a part it was split into) is still queued.
+fn request_pending(rid: &str) -> bool {
+    crate::capital::requests().iter().any(|r| r["id"].as_str().map(|x| x == rid || x.starts_with(&format!("{rid}-"))).unwrap_or(false))
+}
+
+/// What of the capital request `rid` is still to do (USD): its parts still queued (a withdrawal's
+/// per-pool releases keep only their remainder), or None when none is.
+fn outstanding(rid: &str) -> Option<f64> {
+    let parts: Vec<f64> = crate::capital::requests().iter()
+        .filter(|r| r["id"].as_str().map(|x| x == rid || x.starts_with(&format!("{rid}-"))).unwrap_or(false))
+        .map(|r| r["usd"].as_f64().unwrap_or(0.0)).collect();
+    if parts.is_empty() { None } else { Some(parts.iter().sum()) }
+}
+
+/// When the worker last finished a cycle (unix seconds).
+fn last_cycle(worker: &crate::worker::Worker) -> i64 {
+    worker.status.lock().unwrap()["last_cycle"].as_i64().unwrap_or(0)
+}
+
+/// When the last finished cycle began (unix seconds).
+fn last_cycle_started(worker: &crate::worker::Worker) -> i64 {
+    worker.status.lock().unwrap()["last_cycle_started"].as_i64().unwrap_or(0)
+}
+
+/// Is the step's work done? A withdraw or add step always queues a request: one without its request
+/// (a restart between saving the step and queuing it, a re-queue that failed) is not done, and times
+/// out into a retry. An add's request is gone once its tokens are assigned, before the pool deploys
+/// them with the plan's cost bound: it is done only when a cycle has finished after that
+/// (`gone_at`, set by the coordinator), or the bound would be cleared before the deploy.
+/// Whether the pool has acted on the strategy a step applied (`submitted`) under the plan's bound:
+/// a cycle that began after it ran the pool, and either its move cleared the forced re-solve or the
+/// strategy chose not to move. A run that was blocked, failed or skipped is not it.
+fn acted_on_strategy(s: &Value, worker: &crate::worker::Worker, live: bool) -> bool {
+    let sub = s["submitted"].as_i64().unwrap_or(i64::MAX);
+    if last_cycle_started(worker) <= sub {
+        return false;
+    }
+    let (cid, pool) = (s["chain_id"].as_u64().unwrap_or(crate::chains::BASE), s["pool"].as_str().unwrap_or(""));
+    if !crate::custom::load_state(cid, pool, live).force_solve {
+        return true;
+    }
+    let Some(name) = pool_cfg(pool).and_then(|p| p["name"].as_str().map(String::from)) else { return false };
+    let st = worker.status.lock().unwrap()["pools"][&name].clone();
+    ran_clean_since(worker, s, sub) && ["keep", "wait", "exited"].contains(&st["mode"].as_str().unwrap_or(""))
+}
+
+/// Whether the step's pool has run since `since` without its move being blocked or failing (its
+/// deploy happened, or its strategy chose not to make one).
+fn ran_clean_since(worker: &crate::worker::Worker, s: &Value, since: i64) -> bool {
+    let Some(name) = pool_cfg(s["pool"].as_str().unwrap_or("")).and_then(|p| p["name"].as_str().map(String::from)) else { return false };
+    let st = worker.status.lock().unwrap()["pools"][&name].clone();
+    st["ran_at"].as_i64().map(|t| t > since).unwrap_or(false) && st["blocked"] != true && !["error", "hold", "disabled"].contains(&st["mode"].as_str().unwrap_or(""))
+}
+
+fn step_done(s: &Value, worker: &crate::worker::Worker, live: bool) -> bool {
     let req = s["request"].as_str();
-    let pending = |rid: &str| crate::capital::requests().iter().any(|r| r["id"].as_str().map(|x| x == rid || x.starts_with(&format!("{rid}-"))).unwrap_or(false));
     match s["kind"].as_str().unwrap_or("") {
         "exit_pool" => !has_positions(worker, s["pool"].as_str().unwrap_or("")),
-        "strategy" | "add_pool" => true,
-        _ => req.map(|r| !pending(r)).unwrap_or(true),
+        // the worker acts on the new strategy in its next cycle: done once a cycle that began after
+        // it was applied has finished (the plan's bound holds until then)
+        "strategy" | "add_pool" => acted_on_strategy(s, worker, live),
+        "withdraw" => req.map(|r| !request_pending(r)).unwrap_or(false),
+        "add" => match req {
+            Some(r) if !request_pending(r) => s["gone_at"].as_i64().map(|g| last_cycle(worker) > g && ran_clean_since(worker, s, g)).unwrap_or(false),
+            _ => false,
+        },
+        _ => req.map(|r| !request_pending(r)).unwrap_or(true),
     }
 }
 
@@ -279,6 +343,15 @@ pub fn pass(worker: &crate::worker::Worker) {
         match s["state"].as_str().unwrap_or("") {
             "done" => continue,
             "pending" => {
+                // a strategy is applied between runs: one in flight would save its old state over it
+                let _idle = if ["strategy", "add_pool"].contains(&s["kind"].as_str().unwrap_or("")) {
+                    match worker.idle_guard() {
+                        Some(g) => Some(g),
+                        None => return, // the next pass, once the worker is between runs
+                    }
+                } else {
+                    None
+                };
                 // stored as submitted before the work is queued: a restart never queues it twice
                 let _ = plan::update(&id, |pp| {
                     pp["steps"][k]["state"] = json!("submitted");
@@ -299,7 +372,12 @@ pub fn pass(worker: &crate::worker::Worker) {
                 return;
             }
             "submitted" => {
-                if step_done(s, worker) {
+                if s["kind"] == "add" && s["gone_at"].is_null() && s["request"].as_str().map(|r| !request_pending(r)).unwrap_or(false) {
+                    // its tokens are assigned: the deploy follows in this cycle or the next
+                    let _ = plan::update(&id, |pp| pp["steps"][k]["gone_at"] = json!(super::now()));
+                    return;
+                }
+                if step_done(s, worker, live) {
                     let _ = plan::update(&id, |pp| { pp["steps"][k]["state"] = json!("done"); pp["steps"][k]["done"] = json!(super::now()); });
                     continue;
                 }
@@ -313,14 +391,45 @@ pub fn pass(worker: &crate::worker::Worker) {
                         let _ = plan::update(&id, |pp| pp["steps"][k]["state"] = json!("failed"));
                         finish(&id, &p, "partially_completed", &format!("step {} not done after {attempts} attempts; what was released stays Unallocated", k + 1));
                     } else {
-                        if let Some(r) = s["request"].as_str() {
+                        let _idle = if ["strategy", "add_pool"].contains(&s["kind"].as_str().unwrap_or("")) {
+                            match worker.idle_guard() {
+                                Some(g) => Some(g),
+                                None => return,
+                            }
+                        } else {
+                            None
+                        };
+                        let old = s["request"].as_str().map(String::from);
+                        // an add whose tokens were assigned is not added again: it waits for its deploy
+                        if s["kind"] == "add" && old.as_deref().map(|r| !request_pending(r)).unwrap_or(false) {
+                            let _ = plan::update(&id, |pp| {
+                                pp["steps"][k]["attempts"] = json!(attempts + 1);
+                                pp["steps"][k]["submitted"] = json!(super::now());
+                            });
+                            worker.request(false);
+                            return;
+                        }
+                        // a withdrawal that was partly done is queued again for the rest only
+                        let mut s = s.clone();
+                        if let Some(left) = old.as_deref().and_then(outstanding) {
+                            s["usd"] = json!(left);
+                        }
+                        if let Some(r) = &old {
                             remove_request(r);
                         }
-                        let req = start_step(&p, s, &bounds, live).ok().flatten();
+                        let s = &s;
+                        let req = match start_step(&p, s, &bounds, live) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                crate::warn!("agent", "plan {id} step {}: re-queue failed ({e}); tried again on the next timeout", k + 1);
+                                None
+                            }
+                        };
                         let _ = plan::update(&id, |pp| {
                             pp["steps"][k]["attempts"] = json!(attempts + 1);
                             pp["steps"][k]["submitted"] = json!(super::now());
                             pp["steps"][k]["request"] = json!(req);
+                            pp["steps"][k]["gone_at"] = Value::Null;
                         });
                         worker.request(false);
                     }

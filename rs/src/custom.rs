@@ -179,7 +179,7 @@ pub struct State {
     /// the token an exit waits in (graph.rs side_code: 1 token0, -1 token1, 0 as it was)
     #[serde(default)]
     pub exit_side: i8,
-    /// re-solve on the next decision whatever the turnover (a parked lot was handed over)
+    /// re-solve on the next decision whatever the turnover (an agent plan applied a new strategy)
     #[serde(default)]
     pub force_solve: bool,
     /// when the strategy was first out after its exit (graph exits' min_out_hours)

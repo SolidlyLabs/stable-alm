@@ -3,7 +3,7 @@
 //! the registry so the page can filter by chain.
 
 use crate::engine::{self, wallet_positions};
-use crate::settings::{self, load_pools, load_settings, save_pools, save_settings};
+use crate::settings::{self, load_pools, load_settings, save_settings};
 use crate::worker::{pool_chain, Worker};
 use serde_json::{json, Value};
 use std::io::Read;
@@ -580,8 +580,8 @@ fn add_pool(addr: &str, name: Option<&str>, cid: u64) -> Result<Value, String> {
     if !is_addr(&addr) {
         return Err("not a pool address".into());
     }
-    let mut pools = load_pools();
-    if pools.iter().any(|p| p["pool"].as_str().unwrap_or("").eq_ignore_ascii_case(&addr) && pool_chain(p) == cid) {
+    let configured = |pools: &[Value]| pools.iter().any(|p| p["pool"].as_str().unwrap_or("").eq_ignore_ascii_case(&addr) && pool_chain(p) == cid);
+    if configured(&load_pools()) {
         return Err("pool already configured".into());
     }
     let (t0, t1) = crate::chain::pool_tokens(cid, &addr)?;
@@ -616,8 +616,14 @@ fn add_pool(addr: &str, name: Option<&str>, cid: u64) -> Result<Value, String> {
         e["slippage_bps"] = json!(10.0);
         e["max_swap_cost_bps"] = json!(15.0);
     }
-    pools.push(e.clone());
-    save_pools(&pools)?;
+    // added to the pools as they are now (the reads above take a while): nothing changed meanwhile is undone
+    settings::update_pools(|pools| {
+        if configured(pools) {
+            return Err("pool already configured".into());
+        }
+        pools.push(e.clone());
+        Ok(())
+    })?;
     Ok(e)
 }
 
@@ -720,17 +726,24 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
                 settings::validate_pool(&p)?;
                 out.push(p);
             }
-            save_pools(&out)?;
+            let kept = settings::update_pools(|pools| {
+                let kept = settings::keep_switched_off(pools, &mut out);
+                *pools = std::mem::take(&mut out);
+                Ok(kept)
+            })?;
             w.request(false);
-            Ok(json!({"ok": true}))
+            Ok(json!({"ok": true, "kept_off": kept}))
         }
         // the Strategy lab's limits saved to the pool they were tested on (only the keys given)
         "/api/pools/limits" => {
-            let (pools, n) = set_limits(load_pools(), &body)?;
-            if n == 0 {
-                return Err("no such pool in this wallet".into());
-            }
-            save_pools(&pools)?;
+            settings::update_pools(|pools| {
+                let (p2, n) = set_limits(std::mem::take(pools), &body)?;
+                if n == 0 {
+                    return Err("no such pool in this wallet".into());
+                }
+                *pools = p2;
+                Ok(())
+            })?;
             w.request(false);
             Ok(json!({"ok": true}))
         }
@@ -793,8 +806,10 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
             if !wallet_positions(pool_chain(p), p["pool"].as_str().unwrap_or(""), &wallet)?.is_empty() {
                 return Err("pool still holds positions: switch it off and let the worker withdraw first".into());
             }
-            let rest: Vec<Value> = pools.iter().filter(|x| x["name"] != name).cloned().collect();
-            save_pools(&rest)?;
+            settings::update_pools(|pools| {
+                pools.retain(|x| x["name"] != name);
+                Ok(())
+            })?;
             Ok(json!({"ok": true}))
         }
         // Per-pool capital (capital.rs): queued, carried out by the worker on its next pass
@@ -821,7 +836,10 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
                         Some(_) => return Err("unknown pool to move it to".into()),
                         None => None,
                     };
-                    json!({"kind": "withdraw", "chain_id": cid, "pools": from, "usd": usd, "to": to})
+                    // `all`: everything the pools hold (a pool being switched off), done once they are empty;
+                    // `sell`: sold to the chain's USDC even where the tokens would otherwise move as they are
+                    let safe = if body["sell"] == true { Some(crate::chains::get(cid).usd.to_lowercase()) } else { None };
+                    json!({"kind": "withdraw", "chain_id": cid, "pools": from, "usd": usd, "to": to, "all": body["all"] == true, "safe": safe})
                 }
                 "reset" => json!({"kind": "reset", "chain_id": cid}),
                 "cancel" => {

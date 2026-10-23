@@ -63,7 +63,15 @@ pub fn costs(cid: u64, pool: &str, swap_mult: f64) -> Value {
     let cfg = crate::settings::load_pools().into_iter().find(|p| p["pool"].as_str().map(|a| a.eq_ignore_ascii_case(pool)).unwrap_or(false));
     let spot = cfg.as_ref().and_then(|c| c["max_spot_dev_ticks"].as_f64()).unwrap_or(10.0);
     let gas = super::refdata::gas(cid, crate::settings::load_settings()["wallet"].as_str().unwrap_or(""))["rebalance_usd"].as_f64().unwrap_or(0.02);
-    json!({"swap_bps": 0.3 * swap_mult, "stable_swap_bps": 1.0 * swap_mult, "gas_usd": gas, "max_spot_dev_ticks": spot})
+    let mut c = json!({"swap_bps": 0.3 * swap_mult, "stable_swap_bps": 1.0 * swap_mult, "gas_usd": gas, "max_spot_dev_ticks": spot});
+    // the pool's own live limits, as the worker will apply them (the backtest's defaults otherwise: a
+    // pool limited to one move a day was judged on a strategy allowed five)
+    for k in ["max_actions_per_day", "max_swap_cost_bps"] {
+        if let Some(v) = cfg.as_ref().and_then(|c| c[k].as_f64()) {
+            c[k] = json!(v);
+        }
+    }
+    c
 }
 
 /// The estimated cost of switching a pool's strategy, as a share of its capital: the new strategy
@@ -117,12 +125,20 @@ pub fn check(cid: u64, pool: &str, strategy: &Value, current: Option<Value>, cap
         None => json!(false),
     };
     let base = |days: i64, mult: f64| json!({"chain_id": cid, "pool": pool, "days": days, "capital_usd": capital_usd, "strategy": strategy,
-                                              "compare": compare, "hold": true, "costs": costs(cid, pool, mult)});
+                                              "compare": compare, "hold": true, "costs": costs(cid, pool, mult), "live_parking": true});
     let long = run(base(LONG_DAYS, 1.0))?;
     let recent = run(base(RECENT_DAYS, 1.0))?;
     let thin = run(base(LONG_DAYS, 2.0))?;
     let hurdle = if current.is_some() { switch_cost(cid, pool, capital_usd) } else { 0.0 };
-    let (pass, why) = decide(shares(&long), shares(&recent), shares(&thin), current.is_some(), hurdle);
+    let (mut pass, mut why) = decide(shares(&long), shares(&recent), shares(&thin), current.is_some(), hurdle);
+    // the backtest makes a swap over the pool's cost limit and counts it; live refuses it, so a result
+    // that needs such swaps is not one the pool can have
+    let over = long["runs"]["main"]["swaps_over_limit"].as_u64().unwrap_or(0) + recent["runs"]["main"]["swaps_over_limit"].as_u64().unwrap_or(0);
+    if pass && over > 0 {
+        pass = false;
+        why = format!("{over} of its backtest swaps cost more than the pool's limit ({} bp), which live trading refuses: its result is not one the pool can have",
+                      costs(cid, pool, 1.0)["max_swap_cost_bps"]);
+    }
     super::search::record(cid, pool, "gate", strategy, 1);
     let search = super::search::stats(pool);
     let mut advisory = vec![];
@@ -145,6 +161,7 @@ pub fn check(cid: u64, pool: &str, strategy: &Value, current: Option<Value>, cap
         }
     }
     let brief = |r: &Value| json!({"new": shares(r).0, "current": shares(r).1, "hold": shares(r).2, "actions": r["runs"]["main"]["actions"],
+                                   "swaps_over_limit": r["runs"]["main"]["swaps_over_limit"],
                                    "costs": r["runs"]["main"]["costs"], "spot_blocked_bars": r["runs"]["main"]["spot_blocked_bars"], "span_days": r["span_days"]});
     let out = json!({"pass": pass, "why": why, "advisory": advisory, "switch_cost": hurdle, "search": search,
                      "long": brief(&long), "recent": brief(&recent), "thin": brief(&thin),

@@ -96,23 +96,47 @@ pub fn emergency_exit(cid: u64, pool: &str, name: &str, safe: Option<&str>, reas
 
 /// Switch a pool off in pools.json (its positions are withdrawn on the next cycle).
 pub fn switch_off(pool: &str, reason: &str) {
-    let mut pools = crate::settings::load_pools();
-    let mut changed = false;
-    for p in pools.iter_mut() {
-        if p["pool"].as_str().map(|a| a.eq_ignore_ascii_case(pool)).unwrap_or(false) && p["enabled"] == true {
-            p["enabled"] = json!(false);
-            changed = true;
+    let r = crate::settings::update_pools(|pools| {
+        let mut changed = false;
+        for p in pools.iter_mut() {
+            if p["pool"].as_str().map(|a| a.eq_ignore_ascii_case(pool)).unwrap_or(false) && p["enabled"] == true {
+                p["enabled"] = json!(false);
+                // a dashboard save made before this does not switch it on again (settings::keep_switched_off)
+                p["switched_off"] = json!({"at": super::now(), "reason": reason});
+                changed = true;
+            }
         }
-    }
-    if changed {
-        match crate::settings::save_pools(&pools) {
-            Ok(()) => crate::warn!("risk", "pool {pool} switched off: {reason}"),
-            Err(e) => crate::error!("risk", "pool {pool} could not be switched off: {e}"),
-        }
+        Ok(changed)
+    });
+    match r {
+        Ok(true) => crate::warn!("risk", "pool {pool} switched off: {reason}"),
+        Ok(false) => {}
+        Err(e) => crate::error!("risk", "pool {pool} could not be switched off: {e}"),
     }
 }
 
-/// One evaluation of every condition. Returns what it found.
+/// Every wallet's pools, the main wallet's first, each pool once: the market conditions (stale,
+/// disagreement, a token off its peg) lock a pool for every wallet that holds it, so a pool only
+/// another wallet holds is watched too.
+fn watched_pools() -> Vec<(String, Value)> {
+    let mut out: Vec<(String, Value)> = vec![];
+    let mut ids = crate::wallets::ids();
+    ids.sort_by_key(|id| id != crate::paths::MAIN);
+    for id in ids {
+        for p in crate::paths::scope(&id, crate::settings::load_pools) {
+            let key = |q: &Value| (crate::worker::pool_chain(q), q["pool"].as_str().unwrap_or("").to_lowercase());
+            match out.iter_mut().find(|(_, q)| key(q) == key(&p)) {
+                Some((_, q)) if p["enabled"] == true => q["enabled_elsewhere"] = json!(true),
+                Some(_) => {}
+                None => out.push((id.clone(), p)),
+            }
+        }
+    }
+    out
+}
+
+/// One evaluation of every condition. Returns what it found. Exits (an emergency's, a loss limit's)
+/// are the main wallet's: the agent's capital and performance records are its own.
 pub fn evaluate(worker: &crate::worker::Worker) -> Vec<Value> {
     let x = super::settings();
     let mode = x["risk"]["mode"].as_str().unwrap_or("off").to_string();
@@ -123,7 +147,8 @@ pub fn evaluate(worker: &crate::worker::Worker) -> Vec<Value> {
     let stale_s = (r["stale_min"].as_f64().unwrap_or(10.0) * 60.0) as i64;
     let mut out = vec![];
     let mut chains: Vec<u64> = vec![];
-    for p in crate::settings::load_pools() {
+    for (owner, p) in watched_pools() {
+        let main = owner == crate::paths::MAIN;
         let cid = crate::worker::pool_chain(&p);
         let addr = p["pool"].as_str().unwrap_or("").to_lowercase();
         let name = p["name"].as_str().unwrap_or(&addr).to_string();
@@ -134,7 +159,9 @@ pub fn evaluate(worker: &crate::worker::Worker) -> Vec<Value> {
             found(&mut out, cid, Some(&addr), "pool_unreadable", "normal", format!("{name}: the pool's price could not be read"));
             continue;
         };
-        let held = p["enabled"] == true || super::perf::samples(&addr).last().map(|s| s.capital_usd > 1.0).unwrap_or(false);
+        // held by its own wallet (what an exit needs), or by any (what a lock needs)
+        let own = p["enabled"] == true || (main && super::perf::samples(&addr).last().map(|s| s.capital_usd > 1.0).unwrap_or(false));
+        let held = own || p["enabled_elsewhere"] == true;
         // 1. stale reference data, and 2. disagreement
         let m0 = refdata::mids(&s0);
         let m1 = refdata::mids(&s1);
@@ -190,7 +217,7 @@ pub fn evaluate(worker: &crate::worker::Worker) -> Vec<Value> {
                 let why = format!("{name}: {sym} is {:.2}% off its peg (limit {}%)", h["peg_dev_pct"].as_f64().unwrap_or(0.0), r["peg_pct"]);
                 found(&mut out, cid, Some(&addr), "token_health", "severe", why.clone());
                 let new = locks::set(cid, Some(&addr), "token_health", &why);
-                if act && held {
+                if act && own && main {
                     let safe = super::exposure::safe_assets(cid).into_iter().find(|t| {
                         let s = crate::prices::meta(cid, t).map(|m| m.symbol).unwrap_or_default();
                         !s.eq_ignore_ascii_case(sym) && refdata::health(&s, &x)["healthy"] == true
@@ -204,7 +231,7 @@ pub fn evaluate(worker: &crate::worker::Worker) -> Vec<Value> {
             }
         }
         // 4. loss against holding
-        if held {
+        if own && main {
             for (secs, key, label) in [(86_400i64, "loss_24h_pct", "24 h"), (7 * 86_400, "loss_7d_pct", "7 days")] {
                 let w = super::perf::pool(&addr, secs);
                 let lim = r[key].as_f64().unwrap_or(3.0) / 100.0;
@@ -236,6 +263,8 @@ pub fn evaluate(worker: &crate::worker::Worker) -> Vec<Value> {
         }
     }
     // 5. gas, and 6. stuck transactions of an emergency
+    // the main wallet's gas (a chain lock holds for every wallet; each wallet's own run also checks
+    // its own gas before it trades)
     for cid in chains {
         if wallet.is_empty() {
             break;

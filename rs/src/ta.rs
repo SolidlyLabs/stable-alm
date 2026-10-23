@@ -400,12 +400,324 @@ pub fn momentum(c: &[f64], h: &[f64], l: &[f64], look: usize, window: usize, avg
     sma(&z, avg)
 }
 
+/// Parkinson range volatility per bar, in ticks: sqrt(mean((high-low)^2) / (4 ln 2)).
+/// Tick differences already are log-price differences (up to the constant ln(1.0001)), so the
+/// output is a log-price standard deviation in ticks, not a percentage or an annualized value.
+/// Requires `n` finite, ordered high/low pairs. It does not measure gaps between bars.
+pub fn parkinson(h: &[f64], l: &[f64], n: usize) -> S {
+    if n == 0 || n > h.len() || h.len() != l.len() {
+        return nan(h.len());
+    }
+    let ranges: S = h.iter().zip(l).map(|(&hi, &lo)| {
+        if hi.is_finite() && lo.is_finite() && hi >= lo {
+            let range = hi - lo;
+            let square = range * range;
+            if square.is_finite() { square } else { f64::NAN }
+        } else {
+            f64::NAN
+        }
+    }).collect();
+    sma(&ranges, n).into_iter().map(|v| {
+        if v.is_finite() { (v.max(0.0) / (4.0 * std::f64::consts::LN_2)).sqrt() } else { f64::NAN }
+    }).collect()
+}
+
+/// Kaufman's efficiency ratio: absolute net move divided by the sum of absolute moves over
+/// `n` changes (`n+1` consecutive finite values). 0 for a flat window, 1 for a monotone move.
+pub fn efficiency_ratio(x: &[f64], n: usize) -> S {
+    let mut out = nan(x.len());
+    if n == 0 || n >= x.len() {
+        return out;
+    }
+    let changes: S = (0..x.len()).map(|i| {
+        if i > 0 && x[i].is_finite() && x[i - 1].is_finite() {
+            (x[i] - x[i - 1]).abs()
+        } else {
+            f64::NAN
+        }
+    }).collect();
+    let path = rolling(&changes, n, false).0;
+    for i in n..x.len() {
+        if path[i].is_finite() && x[i].is_finite() && x[i - n].is_finite() {
+            out[i] = if path[i] <= 0.0 { 0.0 } else { ((x[i] - x[i - n]).abs() / path[i]).clamp(0.0, 1.0) };
+        }
+    }
+    out
+}
+
+/// Kaufman's adaptive moving average. The smoothing constant is
+/// (ER(n) * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1))^2.
+/// Seeds from the mean of `n+1` consecutive values; a nonfinite input resets the state and
+/// requires a fresh seed. `fast` and `slow` are smoothing periods, not extra warm-up windows.
+pub fn kama(x: &[f64], n: usize, fast: usize, slow: usize) -> S {
+    let mut out = nan(x.len());
+    if n == 0 || n >= x.len() || fast == 0 || slow == 0 || fast > slow {
+        return out;
+    }
+    let er = efficiency_ratio(x, n);
+    let seeds = sma(x, n + 1);
+    let (a_fast, a_slow) = (2.0 / (fast as f64 + 1.0), 2.0 / (slow as f64 + 1.0));
+    let mut value = f64::NAN;
+    for i in 0..x.len() {
+        if !er[i].is_finite() || !seeds[i].is_finite() {
+            value = f64::NAN;
+            continue;
+        }
+        if value.is_finite() {
+            let a = (er[i] * (a_fast - a_slow) + a_slow).powi(2);
+            value += a * (x[i] - value);
+        } else {
+            value = seeds[i];
+        }
+        out[i] = value;
+    }
+    out
+}
+
+/// Rolling least-squares regression on bar positions 0..n-1: (slope per bar, R squared).
+/// Uses centered rolling moments, with an exact resync every max(n, 4096) bars, so total work
+/// is O(number of bars), including large windows. Both outputs are 0 for a flat window.
+/// Requires n >= 2 consecutive finite values and resets after a nonfinite input.
+pub fn linreg(x: &[f64], n: usize) -> (S, S) {
+    let (mut slope, mut r2) = (nan(x.len()), nan(x.len()));
+    if n < 2 || n > x.len() {
+        return (slope, r2);
+    }
+    let nf = n as f64;
+    let centre = (nf - 1.0) / 2.0;
+    let xx = nf * (nf * nf - 1.0) / 12.0;
+    let resync = n.max(4096);
+    // Keep the mean relative to a nearby tick reference. Updating an absolute mean at large
+    // negative tick levels loses low bits each bar; the covariance recurrence would accumulate
+    // those tiny errors into slope drift, especially for short windows.
+    let (mut count, mut reference, mut mean, mut yy, mut xy) = (0usize, 0.0, 0.0, 0.0, 0.0);
+    let mut last_change: Option<usize> = None;
+    for i in 0..x.len() {
+        if !x[i].is_finite() {
+            (count, reference, mean, yy, xy) = (0, 0.0, 0.0, 0.0, 0.0);
+            last_change = None;
+            continue;
+        }
+        if count == 0 {
+            reference = x[i];
+            mean = 0.0;
+        } else if x[i] != x[i - 1] {
+            last_change = Some(i);
+        }
+        let value = x[i] - reference;
+        if count < n {
+            count += 1;
+            let k = count as f64;
+            let d = value - mean;
+            mean += d / k;
+            yy += d * (value - mean);
+            xy += k / 2.0 * (value - mean);
+        } else {
+            let old = x[i - n] - reference;
+            let old_mean = mean;
+            let d = value - old;
+            mean += d / nf;
+            yy += d * ((value - mean) + (old - old_mean));
+            xy += centre * d + nf * (old - old_mean);
+        }
+        if count < n {
+            continue;
+        }
+        if last_change.map(|j| j <= i + 1 - n).unwrap_or(true) {
+            // An exactly flat window should stay exactly neutral, even after a moving window.
+            (reference, mean, yy, xy) = (x[i], 0.0, 0.0, 0.0);
+            (slope[i], r2[i]) = (0.0, 0.0);
+            continue;
+        }
+        if i % resync == resync - 1 || yy <= 0.0 || !yy.is_finite() || !xy.is_finite() {
+            let w = &x[i + 1 - n..=i];
+            reference = w[0];
+            mean = w.iter().map(|v| v - reference).sum::<f64>() / nf;
+            yy = w.iter().map(|v| (v - reference - mean).powi(2)).sum();
+            xy = w.iter().enumerate().map(|(j, v)| (j as f64 - centre) * (v - reference - mean)).sum();
+        }
+        if yy.is_finite() && yy > 0.0 && xy.is_finite() {
+            slope[i] = xy / xx;
+            r2[i] = (xy * xy / (xx * yy)).clamp(0.0, 1.0);
+        }
+    }
+    (slope, r2)
+}
+
+/// Distance below the rolling high, in the input's tick units (positive drawdown).
+/// Includes the current bar and requires `n` consecutive finite values. For ticks, the
+/// corresponding price drawdown fraction is 1 - exp(-drawdown * ln(1.0001)).
+pub fn drawdown(x: &[f64], n: usize) -> S {
+    if n == 0 || n > x.len() {
+        return nan(x.len());
+    }
+    extreme(x, n, true).iter().zip(x).map(|(&high, &value)| {
+        if high.is_finite() && value.is_finite() { (high - value).max(0.0) } else { f64::NAN }
+    }).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9 * (1.0 + a.abs().max(b.abs()))
+    }
+
+    fn assert_causal(f: impl Fn(&[f64]) -> S) {
+        let mut x: S = (0..100).map(|i| -197_000.0 + ((i * 7919) % 101) as f64 * 0.37).collect();
+        x[0] = f64::NAN;
+        x[19] = f64::NAN;
+        x[53] = f64::INFINITY;
+        let whole = f(&x);
+        for end in [0, 1, 3, 5, 19, 20, 24, 53, 54, 59, 75] {
+            let prefix = f(&x[..end]);
+            assert_eq!(prefix.len(), end);
+            for i in 0..end {
+                assert!(prefix[i].is_nan() && whole[i].is_nan() || prefix[i] == whole[i], "appending future bars changed value {i} at prefix {end}: {} vs {}", prefix[i], whole[i]);
+            }
+        }
+    }
+
+    #[test]
+    fn parkinson_reference_warmup_and_invalid_ranges() {
+        // Ranges 2 and 4: mean squared log-tick range is 10.
+        let h = [-8.0, -6.0, -7.0, -5.0];
+        let l = [-10.0, -10.0, -10.0, -10.0];
+        let v = parkinson(&h, &l, 2);
+        assert!(v[0].is_nan());
+        assert!(close(v[1], (10.0 / (4.0 * std::f64::consts::LN_2)).sqrt()));
+        assert!(close(v[2], (12.5 / (4.0 * std::f64::consts::LN_2)).sqrt()));
+        assert_eq!(parkinson(&h, &h, 2)[3], 0.0);
+        let g = parkinson(&[3.0, 1.0, 3.0, 3.0, f64::NAN, 3.0, 3.0], &[2.0; 7], 2);
+        assert!(g[1].is_nan() && g[2].is_nan() && g[3].is_finite());
+        assert!(g[4].is_nan() && g[5].is_nan() && g[6].is_finite());
+        assert!(parkinson(&h, &l, 0).iter().all(|v| v.is_nan()));
+        assert!(parkinson(&h, &l, usize::MAX).iter().all(|v| v.is_nan()));
+        assert!(parkinson(&h, &l[..2], 2).iter().all(|v| v.is_nan()));
+        assert!(parkinson(&[], &[], 1).is_empty());
+    }
+
+    #[test]
+    fn parkinson_has_no_lookahead() {
+        assert_causal(|x| {
+            let h: S = x.iter().enumerate().map(|(i, v)| v + (i % 5) as f64).collect();
+            parkinson(&h, x, 4)
+        });
+    }
+
+    #[test]
+    fn efficiency_ratio_reference_warmup_flat_and_gaps() {
+        // 1 -> 3 -> 2 -> 4: net 3, path 2+1+2=5.
+        let e = efficiency_ratio(&[1.0, 3.0, 2.0, 4.0, 5.0], 3);
+        assert!(e[..3].iter().all(|v| v.is_nan()));
+        assert!(close(e[3], 3.0 / 5.0));
+        assert!(close(e[4], 2.0 / 4.0));
+        assert_eq!(efficiency_ratio(&[-3.0, -2.0, -1.0, 0.0], 3)[3], 1.0);
+        assert_eq!(efficiency_ratio(&[3.0, 2.0, 1.0, 0.0], 3)[3], 1.0);
+        assert_eq!(efficiency_ratio(&[7.0; 4], 3)[3], 0.0);
+        let g = efficiency_ratio(&[1.0, 2.0, 3.0, f64::NAN, 4.0, 5.0, 6.0], 2);
+        assert_eq!(g[2], 1.0);
+        assert!(g[3..6].iter().all(|v| v.is_nan()));
+        assert_eq!(g[6], 1.0);
+        for n in [0, 4, usize::MAX] {
+            assert!(efficiency_ratio(&[1.0; 4], n).iter().all(|v| v.is_nan()));
+        }
+        assert!(efficiency_ratio(&[], 1).is_empty());
+    }
+
+    #[test]
+    fn efficiency_ratio_has_no_lookahead() {
+        assert_causal(|x| efficiency_ratio(x, 4));
+    }
+
+    #[test]
+    fn kama_reference_seed_adaptation_and_gap_reset() {
+        let k = kama(&[1.0, 2.0, 3.0, 4.0, 3.0, 3.0], 2, 2, 4);
+        assert!(k[0].is_nan() && k[1].is_nan());
+        assert_eq!(k[2], 2.0); // mean of the first n+1 values
+        assert!(close(k[3], 2.0 + 4.0 / 9.0 * (4.0 - 2.0))); // ER=1, fast alpha squared
+        assert!(close(k[4], k[3] + 4.0 / 25.0 * (3.0 - k[3]))); // ER=0, slow alpha squared
+        assert!(close(k[5], k[4] + 4.0 / 9.0 * (3.0 - k[4]))); // ER=1 again
+        assert_eq!(kama(&[-7.0; 10], 2, 2, 30)[9], -7.0);
+        let g = kama(&[1.0, 2.0, 3.0, 4.0, f64::NAN, 10.0, 11.0, 12.0, 13.0], 2, 2, 4);
+        assert!(g[4..7].iter().all(|v| v.is_nan()));
+        assert_eq!(g[7], 11.0); // old state is discarded, not held across missing observations
+        assert!(close(g[8], 11.0 + 4.0 / 9.0 * 2.0));
+        for (n, fast, slow) in [(0, 2, 30), (10, 2, 30), (usize::MAX, 2, 30), (2, 0, 30), (2, 2, 0), (2, 30, 2)] {
+            assert!(kama(&[1.0; 10], n, fast, slow).iter().all(|v| v.is_nan()));
+        }
+        assert!(kama(&[], 2, 2, 30).is_empty());
+    }
+
+    #[test]
+    fn kama_has_no_lookahead() {
+        assert_causal(|x| kama(x, 4, 2, 30));
+    }
+
+    #[test]
+    fn linreg_reference_warmup_flat_and_gap_reset() {
+        let (s, r) = linreg(&[1.0, 2.0, 4.0, 6.0], 3);
+        assert!(s[..2].iter().chain(&r[..2]).all(|v| v.is_nan()));
+        assert!(close(s[2], 1.5));
+        assert!(close(r[2], 27.0 / 28.0)); // cov=3, Sxx=2, Syy=14/3
+        assert!(close(s[3], 2.0) && close(r[3], 1.0));
+        let (s, r) = linreg(&[-1.0, -3.0, -5.0, -5.0, -5.0, f64::INFINITY, 4.0, 5.0, 6.0], 3);
+        assert_eq!((s[2], r[2]), (-2.0, 1.0));
+        assert_eq!((s[4], r[4]), (0.0, 0.0));
+        assert!(s[5..8].iter().chain(&r[5..8]).all(|v| v.is_nan()));
+        assert_eq!((s[8], r[8]), (1.0, 1.0));
+        for n in [0, 1, 5, usize::MAX] {
+            let (s, r) = linreg(&[1.0; 4], n);
+            assert!(s.iter().chain(&r).all(|v| v.is_nan()));
+        }
+        assert_eq!(linreg(&[], 2), (vec![], vec![]));
+    }
+
+    #[test]
+    fn linreg_rolling_moments_match_direct_reference() {
+        let x: S = (0..20_000).map(|i| -197_000.0 + ((i * 7919) % 101) as f64 * 0.37 + i as f64 * 0.01).collect();
+        for n in [2, 17, 288, 5000] {
+            let (s, r) = linreg(&x, n);
+            for i in [n - 1, 5000, 12_345, 19_999] {
+                let w = &x[i + 1 - n..=i];
+                let mean = w.iter().sum::<f64>() / n as f64;
+                let centre = (n - 1) as f64 / 2.0;
+                let xy: f64 = w.iter().enumerate().map(|(j, v)| (j as f64 - centre) * (v - mean)).sum();
+                let xx: f64 = (0..n).map(|j| (j as f64 - centre).powi(2)).sum();
+                let yy: f64 = w.iter().map(|v| (v - mean).powi(2)).sum();
+                assert!((s[i] - xy / xx).abs() < 1e-6, "slope n={n} i={i}: {} vs {}", s[i], xy / xx);
+                assert!((r[i] - xy * xy / (xx * yy)).abs() < 1e-6, "r2 n={n} i={i}: {} vs {}", r[i], xy * xy / (xx * yy));
+            }
+        }
+    }
+
+    #[test]
+    fn linreg_has_no_lookahead() {
+        assert_causal(|x| linreg(x, 4).0);
+        assert_causal(|x| linreg(x, 4).1);
+    }
+
+    #[test]
+    fn drawdown_reference_warmup_expiry_and_gaps() {
+        let d = drawdown(&[-10.0, -6.0, -9.0, -11.0, -12.0, -5.0], 3);
+        assert!(d[..2].iter().all(|v| v.is_nan()));
+        assert_eq!(&d[2..], &[3.0, 5.0, 3.0, 0.0]);
+        assert_eq!(drawdown(&[7.0; 4], 3)[3], 0.0);
+        assert_eq!(drawdown(&[-7.0; 4], 1), vec![0.0; 4]);
+        let g = drawdown(&[3.0, 2.0, f64::NAN, 4.0, 2.0], 2);
+        assert_eq!(g[1], 1.0);
+        assert!(g[2].is_nan() && g[3].is_nan());
+        assert_eq!(g[4], 2.0);
+        for n in [0, 5, usize::MAX] {
+            assert!(drawdown(&[1.0; 4], n).iter().all(|v| v.is_nan()));
+        }
+        assert!(drawdown(&[], 1).is_empty());
+    }
+
+    #[test]
+    fn drawdown_has_no_lookahead() {
+        assert_causal(|x| drawdown(x, 4));
     }
 
     #[test]

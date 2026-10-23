@@ -274,6 +274,8 @@ pub struct Executor {
     /// Transactions handed to the network in this pass (counted before broadcasting). A step that
     /// failed after broadcasting is never retried: its transaction may have gone through.
     broadcasts: usize,
+    /// a move of this run was blocked (spot check, cap, lock, gas): the agent does not take it as done
+    was_blocked: bool,
     /// the pass's rebalance entry, logged with its first transaction: a pass that sends nothing
     /// is not an action (it neither shows in the activity nor counts against the daily cap)
     begun: Option<Value>,
@@ -319,6 +321,7 @@ impl Executor {
             is_solid_lp: false,
             solid_pair: None,
             broadcasts: 0,
+            was_blocked: false,
             begun: None,
             cfg,
         })
@@ -366,6 +369,27 @@ impl Executor {
     }
 
     /// The pool's capital for this run: its budget (USD) and what it may not touch.
+    /// What the executor may not touch (the other pools' tokens and Unallocated), without a budget.
+    /// The reserve as the run left it (a claim paid back from the host's idle tokens lowers it: those
+    /// tokens are this pool's from then on), for the worker's book after the run.
+    pub fn reserve_now(&self) -> Option<&crate::capital::Tokens> {
+        self.reserve.as_ref()
+    }
+
+    /// Whether this run sent a transaction (its own or a parking executor's).
+    /// Whether a move of this run was blocked.
+    pub fn was_blocked(&self) -> bool {
+        self.was_blocked
+    }
+
+    pub fn sent_any(&self) -> bool {
+        self.broadcasts > 0
+    }
+
+    pub fn set_reserve(&mut self, reserve: crate::capital::Tokens) {
+        self.reserve = Some(reserve);
+    }
+
     pub fn set_capital(&mut self, budget_usd: f64, reserve: crate::capital::Tokens) {
         self.budget_usd = Some(budget_usd);
         self.reserve = Some(reserve);
@@ -542,6 +566,18 @@ impl Executor {
         }
         if !problems.is_empty() {
             log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "blocked", "problems": problems}));
+            self.was_blocked = true;
+        }
+        Ok(!problems.is_empty())
+    }
+
+    /// Parking (park, unpark, re-centring a lot) moves tokens in another pool: the spot check and the
+    /// daily cap are this pool's rebalance's, but the gas floor and the agent's locks hold for it too.
+    fn parking_blocked(&mut self, m: &Market, tick: i64) -> Res<bool> {
+        let mut problems = self.checks(m, tick)?;
+        problems.retain(|x| !x.starts_with("spot tick") && x != "daily rebalance cap reached");
+        for x in &problems {
+            self.say_warn(format!("  parking BLOCKED: {x}"));
         }
         Ok(!problems.is_empty())
     }
@@ -580,6 +616,14 @@ impl Executor {
         let pos_json: Vec<Value> = positions.iter().map(|(a, b, l)| json!([a, b, l.to_string()])).collect();
         let mut summary = json!({"chain_id": self.cid, "pool": self.cfg.pool, "name": self.cfg.name, "tick": tick, "fee_pips": fee,
                                  "deployed0": pos_val, "idle0": idle0, "budget0": budget0, "usd0": usd0, "positions": pos_json, "mode": "keep"});
+        if (budget0 <= 0.0 || !self.cfg.enabled) && !crate::parking::of_origin(self.execute, self.cid, &self.cfg.pool).is_empty() {
+            // what it parked elsewhere (lots, claims on a pool that runs a strategy) comes back to it, and
+            // from it to Unallocated: a pool that is off keeps nothing anywhere
+            self.say("  pool switched off: bringing back what it parked");
+            if let Err(e) = self.unpark_all() {
+                self.say_warn(format!("  bringing back what it parked failed: {e}; retried next cycle"));
+            }
+        }
         if (budget0 <= 0.0 || !self.cfg.enabled) && !positions.is_empty() {
             self.say("  pool switched off: withdrawing all positions");
             summary["mode"] = json!("exit");
@@ -767,8 +811,10 @@ impl Executor {
                     } else {
                         crate::parking::Side::Token1
                     };
-                    if let Err(e) = self.park_pass(side, budget0, if positions.is_empty() { 0.0 } else { pos_val }) {
-                        self.say_warn(format!("  parking failed: {e}; retried next cycle"));
+                    if !self.parking_blocked(m, tick)? {
+                        if let Err(e) = self.park_pass(side, budget0, if positions.is_empty() { 0.0 } else { pos_val }) {
+                            self.say_warn(format!("  parking failed: {e}; retried next cycle"));
+                        }
                     }
                 }
             }
@@ -1111,7 +1157,7 @@ impl Executor {
                 return Ok(false);
             }
             let floor_bps = DEPOSIT_FLOOR_BPS[floor].max(self.cfg.slippage_bps);
-            let b = mint_bounds(&sp, &sa, &sb, liq, floor_bps);
+            let b = mint_bounds(&sp, &sa, &sb, liq, floor_bps, x, y);
             let (t0, t1) = (self.t0.clone(), self.t1.clone());
             self.ensure_allowance(&t0, b.max0 + b.max0 / 1000 + 10, None)?;
             self.ensure_allowance(&t1, b.max1 + b.max1 / 1000 + 10, None)?;
@@ -1191,7 +1237,7 @@ impl Executor {
             let (m0, m1) = crate::tickmath::amounts_for_liquidity(&sp, &sa, &sb, &big(liq));
             let (m0, m1) = (small(&m0), small(&m1));
             let floor_bps = DEPOSIT_FLOOR_BPS[floor].max(self.cfg.slippage_bps);
-            let b = mint_bounds(&sp, &sa, &sb, liq, floor_bps);
+            let b = mint_bounds(&sp, &sa, &sb, liq, floor_bps, x, y);
             let (t0, t1) = (self.t0.clone(), self.t1.clone());
             self.ensure_allowance(&t0, b.max0 + b.max0 / 1000 + 10, None)?;
             self.ensure_allowance(&t1, b.max1 + b.max1 / 1000 + 10, None)?;
@@ -1281,17 +1327,14 @@ impl Executor {
             }
             Ok(b as f64 / 10f64.powi(prices::meta(s.cid, t)?.decimals as i32) * prices::usd(s.cid, t)?)
         };
-        let mut toks: Vec<String> = vec![self.t0.clone(), self.t1.clone()];
-        toks.extend(others.iter().map(|t| t.to_lowercase()));
-        toks.retain(|t| *t != usdc);
-        toks.dedup();
+        let toks = idle_tokens(&self.t0, &self.t1, others, &usdc);
         let have_usdc = val(self, &usdc)?;
         let mut idle = 0.0;
         for t in &toks {
             idle += val(self, t)?;
         }
         self.say(format!("  withdrawal: ${} wanted; ${} in USDC and ${} in other idle tokens", commas(usd), commas(have_usdc), commas(idle)));
-        let short = usd - have_usdc - idle;
+        let mut short = usd - have_usdc - idle;
         if short > 1.0 {
             let positions = wallet_positions(self.cid, &self.cfg.pool, &self.wallet)?;
             let (sp, _, _, p) = self.price()?;
@@ -1300,7 +1343,18 @@ impl Executor {
                 let (a0, a1) = amounts_at(&sp, *tl, *tu, l);
                 self.value0(to_f64(&a0), to_f64(&a1), p) * u0
             }).sum();
-            if pos_usd > 0.0 {
+            // more than its own positions hold: what it parked elsewhere comes back first (a full or an
+            // emergency withdrawal would otherwise leave the parked part deployed)
+            if short > pos_usd + 1.0 && self.execute && !crate::parking::of_origin(true, self.cid, &self.cfg.pool).is_empty() {
+                self.say("  withdrawal: more than the pool's own positions hold: its parked lots come back first");
+                self.unpark_all()?;
+                let mut idle = 0.0;
+                for t in &toks {
+                    idle += val(self, t)?;
+                }
+                short = usd - val(self, &usdc)? - idle;
+            }
+            if pos_usd > 0.0 && short > 1.0 {
                 // a little more than the shortfall: the swaps to USDC cost something
                 let f = (short * 1.01 / pos_usd).min(1.0);
                 self.say(format!("  withdrawal: burning {:.1}% of each position (${} of ${})", f * 100.0, commas(short), commas(pos_usd)));
@@ -1326,7 +1380,7 @@ impl Executor {
                 continue;
             }
             let fair = usd_in / uu * 10f64.powi(um.decimals as i32);
-            let mc = max_cost_bps.unwrap_or_else(|| self.cfg.max_swap_cost_bps.max(10.0));
+            let mc = max_cost_bps.unwrap_or_else(|| self.cfg.floored_cost());
             let (a, c) = (t.clone(), usdc.clone());
             match self.retry("withdrawal swap", |s| s.swap(&a, &c, amt, fair, mc, "withdrawal swap to USDC")) {
                 Ok(_) => left -= usd_in,
@@ -1424,6 +1478,16 @@ impl Executor {
                 continue;
             }
             let id = lot["id"].as_str().unwrap_or("").to_string();
+            if crate::parking::is_claim(&lot) {
+                if lot["stage"] == "repaying" {
+                    // its withdrawal's outcome was never seen: taken as paid back (never withdrawn twice)
+                    self.say_warn(format!("  claim {id}: its repayment was cut short after a withdrawal was sent: counted as paid back"));
+                    let mut l = lot.clone();
+                    l["stage"] = json!("repaid");
+                    crate::parking::update(true, l);
+                }
+                continue;
+            }
             let pool = lot["pool"].as_str().unwrap_or("").to_string();
             let (tl, tu) = (lot["tl"].as_i64().unwrap_or(0), lot["tu"].as_i64().unwrap_or(0));
             let there = crate::parking::onchain(self.cid, &pool, &self.wallet, tl, tu).map_err(StepErr::Fail)?;
@@ -1442,7 +1506,7 @@ impl Executor {
                         if amt > 0 {
                             let (_, _, _, p) = pk.price()?;
                             let fair = if from == pk.t0 { amt as f64 * p } else { amt as f64 / p };
-                            let mc = pk.cfg.max_swap_cost_bps.max(10.0);
+                            let mc = pk.cfg.floored_cost();
                             let r = pk.retry("park recovery swap", |s| s.swap(&from, &to, amt, fair, mc, "park recovery: swap back"));
                             for l in std::mem::take(&mut pk.report) {
                                 self.report.push(l);
@@ -1499,7 +1563,7 @@ impl Executor {
             // the parking pool runs its own strategy: the tokens are its to place (parking.rs, claims)
             let lot = json!({"id": format!("{}-{}-{}", now(), &self.cfg.pool[2..8], &tok[2..6]), "kind": "claim", "chain_id": self.cid,
                              "origin": self.cfg.pool, "origin_name": self.cfg.name, "pool": w.pool, "host_name": host, "token": tok,
-                             "symbol": m.symbol, "amount": amount.to_string(), "usd": usd, "ts": now()});
+                             "symbol": m.symbol, "amount": amount.to_string(), "usd": usd, "ts": now(), "booked": false});
             crate::parking::add(self.execute, lot.clone());
             self.say(format!("  park: {:.4} {} (${usd:.2}) handed to {host}'s strategy as a claim: it places them with its own, and pays them back on unpark",
                              amount as f64 / 10f64.powi(m.decimals as i32), m.symbol));
@@ -1525,11 +1589,13 @@ impl Executor {
                 for (k, v) in [("stage", json!("parking")), ("pre", json!(pre.to_string())), ("other", json!(tout)), ("got", json!("0"))] {
                     lot[k] = v;
                 }
-                crate::parking::add(true, lot.clone());
+                if !crate::parking::add(true, lot.clone()) {
+                    return Err(StepErr::Fail("the parking ledger could not be saved: nothing parked".into()));
+                }
             }
             // the share of the lot the range wants in the other token
             let give = ((if is0 { 1.0 - f0 } else { f0 }) * amount as f64) as i128;
-            let mc = pk.cfg.max_swap_cost_bps.max(10.0);
+            let mc = pk.cfg.floored_cost();
             let got = if give > 0 {
                 let fair = if is0 { give as f64 * p } else { give as f64 / p };
                 let (a, b) = (tin.clone(), tout.clone());
@@ -1635,7 +1701,11 @@ impl Executor {
         step["stage"] = json!("unparking");
         step["pre"] = json!(there.to_string());
         step["other"] = json!(other);
-        crate::parking::update(true, step.clone());
+        // what this withdrawal takes: reconcile tells from the range's liquidity whether it happened
+        step["liquidity"] = json!(w.to_string());
+        if !crate::parking::update(true, step.clone()) {
+            return Err(StepErr::Fail(format!("the parking ledger could not be saved: lot {id} not withdrawn")));
+        }
         let r = (|| -> Res<i128> {
             pk.retry(&format!("unpark withdraw [{tl},{tu})"), |s| s.burn_one(tl, tu, w as i128).map(|_| ()))?;
             let got = pk.bal(&other)? - before;
@@ -1647,7 +1717,7 @@ impl Executor {
             if got > 0 {
                 let (_, _, _, p) = pk.price()?;
                 let fair = if other == pk.t0 { got as f64 * p } else { got as f64 / p };
-                let mc = pk.cfg.max_swap_cost_bps.max(10.0);
+                let mc = pk.cfg.floored_cost();
                 let (a, b) = (other.clone(), token.clone());
                 if let Err(e) = pk.retry("unpark swap", |s| s.swap(&a, &b, got, fair, mc, "unpark: swap back")) {
                     // left at "burned": the next cycle swaps it back
@@ -1664,10 +1734,9 @@ impl Executor {
         let back = match r {
             Ok(b) => b,
             Err(e) => {
-                // the withdrawal failed: still parked as it was
-                if step["stage"] == "unparking" {
-                    crate::parking::update(true, lot.clone());
-                }
+                // left at "unparking": the withdrawal may have gone through (a read after it failed, a
+                // receipt not seen), so the next cycle's reconcile decides from the range's liquidity
+                // whether it is still parked; restoring it here could withdraw another lot's share
                 return Err(e);
             }
         };
@@ -1695,10 +1764,25 @@ impl Executor {
             crate::parking::remove(false, &id);
             return Ok(amount);
         }
+        // a claim never booked (its run's balances were not read) moved nothing to the host: the tokens
+        // are still this pool's, so it is dropped, not paid back by the host
+        let key = format!("book:{id}");
+        if lot["booked"] == false && !crate::capital::load(true).applied.contains(&key) {
+            self.say("    the claim was never booked to the host: dropped, its tokens are this pool's");
+            crate::parking::remove(true, &id);
+            return Ok(0);
+        }
         let mut pk = self.parking_executor(&host)?;
         let mut keep = false;
+        // the host pays back from its own idle tokens first (the book's: this executor's balance is
+        // the origin's own), then from its positions
+        let host_idle = crate::capital::load(true).pool(self.cid, &host).get(&token).copied().unwrap_or(0).max(0);
+        let have = host_idle.min(amount);
+        let before_tok = pk.bal(&token)?;
+        // once any of the host's liquidity is withdrawn the claim counts as paid back (what came out is
+        // this pool's in the book after the run): trying again would withdraw the host's share twice
+        let mut burned = false;
         let r = (|| -> Res<()> {
-            let have = pk.bal(&token)?.max(0);
             if have >= amount {
                 return Ok(());
             }
@@ -1706,7 +1790,9 @@ impl Executor {
             let is0 = token == pk.t0;
             let other = if is0 { pk.t1.clone() } else { pk.t0.clone() };
             let short = amount - have;
-            let short0 = if is0 { short as f64 } else { short as f64 / p };
+            // in token0 units, as value0 counts the positions (raw / unit): raw against units made every
+            // claim, however small, withdraw all of the host's positions
+            let short0 = (if is0 { short as f64 } else { short as f64 / p }) / pk.unit;
             let positions = wallet_positions(self.cid, &host, &self.wallet)?;
             let (sp, _, _, _) = pk.price()?;
             let held0: f64 = positions.iter().map(|(tl, tu, l)| {
@@ -1714,6 +1800,14 @@ impl Executor {
                 pk.value0(to_f64(&a0), to_f64(&a1), p)
             }).sum();
             if held0 > 0.0 {
+                // journaled before the withdrawal: if its outcome is not seen (a receipt that comes
+                // late, a stop), the claim is taken as paid back rather than withdrawn twice
+                let mut j = lot.clone();
+                j["stage"] = json!("repaying");
+                j["from_idle"] = json!(have.to_string());
+                if !crate::parking::update(true, j) {
+                    return Err(StepErr::Fail("the parking ledger could not be saved: the claim is not paid back yet".into()));
+                }
                 let f = (short0 * 1.01 / held0).min(1.0);
                 self.say(format!("    {:.1}% of {name}'s positions withdrawn to pay it back", f * 100.0));
                 let before = pk.bal(&other)?;
@@ -1722,14 +1816,18 @@ impl Executor {
                     if take > 0 {
                         let (a, b) = (*tl, *tu);
                         pk.retry(&format!("claim withdraw [{a},{b})"), |s| s.burn_one(a, b, take).map(|_| ()))?;
+                        burned = true;
                     }
                 }
                 let got = pk.bal(&other)? - before;
                 if got > 0 {
                     let fair = if other == pk.t0 { got as f64 * p } else { got as f64 / p };
-                    let mc = pk.cfg.max_swap_cost_bps.max(10.0);
+                    let mc = pk.cfg.floored_cost();
                     let (a, b) = (other.clone(), token.clone());
-                    pk.retry("claim swap", |s| s.swap(&a, &b, got, fair, mc, "unpark: swap back"))?;
+                    if let Err(e) = pk.retry("claim swap", |s| s.swap(&a, &b, got, fair, mc, "unpark: swap back")) {
+                        // the other token stays this pool's idle tokens: its own strategy places them
+                        pk.say_warn(format!("    claim swap back failed: {e}; the withdrawn tokens stay this pool's as they are"));
+                    }
                 }
             } else {
                 // the host holds the claim's tokens idle (its capital, capital.rs): paid back once it
@@ -1742,14 +1840,34 @@ impl Executor {
             self.report.push(l);
         }
         self.broadcasts += pk.broadcasts;
-        r?;
+        match r {
+            Err(e) if !burned && !pk.sent_any() => {
+                // nothing was sent: still owed as it was
+                crate::parking::update(true, lot.clone());
+                return Err(e);
+            }
+            Err(e) if !burned => self.say_warn(format!("    a withdrawal for the claim was sent but its outcome is not known ({e}): counted as paid back")),
+            Err(e) => self.say_warn(format!("    paying the claim back stopped after part was withdrawn ({e}): counted as paid back")),
+            Ok(()) => {}
+        }
         if keep {
             self.say_warn(format!("    {name} has no positions to pay it back from: the claim stays until it has"));
             return Ok(0);
         }
-        let back = pk.bal(&token)?.max(0).min(amount);
-        log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "unpark", "live": true, "lot": lot, "back": back.to_string()}));
-        crate::parking::remove(true, &id);
+        // the host's idle part is this pool's from now on: no longer reserved for this run, and taken
+        // from the host in the book after it (capital::settle_repaid)
+        if have > 0 {
+            if let Some(r) = self.reserve.as_mut() {
+                let e = r.entry(token.clone()).or_default();
+                *e = (*e - have).max(0);
+            }
+        }
+        let back = have + pk.bal(&token).map(|b| (b - before_tok).max(0)).unwrap_or(0);
+        log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "unpark", "live": true, "lot": lot, "back": back.to_string(), "from_idle": have.to_string()}));
+        let mut done = lot.clone();
+        done["stage"] = json!("repaid");
+        done["from_idle"] = json!(have.to_string());
+        crate::parking::update(true, done);
         Ok(back)
     }
 
@@ -1759,6 +1877,9 @@ impl Executor {
         for mut lot in crate::parking::of_origin(self.execute, self.cid, &self.cfg.pool) {
             if crate::parking::is_claim(&lot) {
                 continue; // its host's strategy places it
+            }
+            if !lot["stage"].is_null() {
+                continue; // a step cut short: reconcile_lots puts it right first
             }
             let Some(w) = crate::parking::entry_of(&self.settings, &lot) else { continue };
             let Some(after) = w.recentre_after_min else { continue };
@@ -1886,7 +2007,7 @@ impl Executor {
             }
             let (px, m) = (prices::usd(self.cid, &ft)?, prices::meta(self.cid, &ft)?);
             let amount = b.min((short / px * 10f64.powi(m.decimals as i32)) as i128);
-            let mc = self.cfg.max_swap_cost_bps.max(10.0);
+            let mc = self.cfg.floored_cost();
             let (f2, i2) = (ft.clone(), into.clone());
             match self.retry(&format!("funding swap {}", m.symbol), |s| s.swap(&f2, &i2, amount, 0.0, mc, "d. funding swap")) {
                 Ok(_) => short -= amount as f64 / 10f64.powi(m.decimals as i32) * px,
@@ -1943,6 +2064,16 @@ impl Executor {
             }
         }
     }
+}
+
+/// The tokens a withdrawal counts as idle: the pair's and the pool's others, each once (`others` is the
+/// pool's book, which holds the pair's two as well: counted twice, a withdrawal burned too little),
+/// without the asset it is sold to.
+fn idle_tokens(t0: &str, t1: &str, others: &[String], usdc: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    [t0.to_string(), t1.to_string()].into_iter().chain(others.iter().map(|t| t.to_lowercase()))
+        .filter(|t| t != usdc && seen.insert(t.clone()))
+        .collect()
 }
 
 fn simulation_reverted(e: &TxError) -> bool {
@@ -2041,16 +2172,41 @@ struct MintBounds {
     min1: i128,
 }
 
-fn mint_bounds(sp: &BigUint, sa: &BigUint, sb: &BigUint, liq: i128, floor_bps: f64) -> MintBounds {
+/// The mint's bounds for `liq` at `sp`. The floors bound the price the mint may execute at: token0
+/// pulled falls as the price rises and token1 rises with it, so `min0` (token0 at the band's top)
+/// and `min1` (token1 at its bottom) keep the price inside the band. The band is the floor band,
+/// narrowed to the prices at which the pool's own tokens (`have0`, `have1`: what it may use) still
+/// pay: in a narrow range the floor band reaches the range's edges, and the mint would otherwise be
+/// free to pull most of a range's worth of one token, taking it from another pool's reserve.
+fn mint_bounds(sp: &BigUint, sa: &BigUint, sb: &BigUint, liq: i128, floor_bps: f64, have0: i128, have1: i128) -> MintBounds {
     let l = big(liq);
     let at = |s: &BigUint| {
         let (a0, a1) = crate::tickmath::amounts_for_liquidity(s, sa, sb, &l);
         (small(&a0), small(&a1))
     };
     let (slo, shi) = price_band(sp, sa, sb, sizing_bps(sa, sb));
-    let (flo, fhi) = price_band(sp, sa, sb, floor_bps);
+    let (mut flo, mut fhi) = price_band(sp, sa, sb, floor_bps);
+    if sp > sa && sp < sb && liq > 0 {
+        // token0 pulled at sqrt price s: L·Q·(sb − s) / (sb·s), at most have0 from s ≥ L·Q·sb / (have0·sb + L·Q)
+        let lq = &l * q96();
+        let pay0 = &lq * sb / (big(have0.max(0)) * sb + &lq) + 1u8;
+        // token1 pulled: L·(s − sa) / Q, at most have1 up to s ≤ sa + have1·Q / L
+        let pay1 = sa + big(have1.max(0)) * q96() / &l;
+        flo = flo.max(pay0).min(sp.clone());
+        fhi = fhi.min(pay1).max(sp.clone());
+    }
     // the pool rounds what it pulls up
     MintBounds { max0: at(&slo).0 + 1, max1: at(&shi).1 + 1, min0: at(&fhi).0, min1: at(&flo).1 }
+}
+
+#[cfg(test)]
+mod idle_tests {
+    #[test]
+    fn a_withdrawal_counts_each_idle_token_once() {
+        let others = vec!["0xA0".to_string(), "0xb1".to_string(), "0xc2".to_string()];
+        assert_eq!(super::idle_tokens("0xa0", "0xb1", &others, "0xc2"), vec!["0xa0", "0xb1"]);
+        assert_eq!(super::idle_tokens("0xa0", "0xb1", &["0xd3".to_string()], "0xc2"), vec!["0xa0", "0xb1", "0xd3"]);
+    }
 }
 
 #[cfg(test)]
@@ -2073,7 +2229,7 @@ mod mint_tests {
         // a 7-tick range: a band of 0.35 bp
         assert!((sizing_bps(&sa, &sb) - 0.35).abs() < 0.01);
         let liq = (to_f64(&mint_liquidity(&sq(BEFORE), &sa, &sb, &big(BAL.0), &big(BAL.1))) * 0.999) as i128;
-        let b = mint_bounds(&sq(BEFORE), &sa, &sb, liq, DEPOSIT_FLOOR_BPS[0]);
+        let b = mint_bounds(&sq(BEFORE), &sa, &sb, liq, DEPOSIT_FLOOR_BPS[0], BAL.0, BAL.1);
         assert!(b.max0 <= BAL.0 && b.max1 <= BAL.1);
         // the block moved the price 0.37 bp up, just past the band: the token1 it pulls is what fits
         // at the band's top plus that last 0.02 bp, within the 0.1% the size is cut by
@@ -2121,15 +2277,40 @@ mod mint_tests {
         let sp = sq(BEFORE);
         let (lo, hi) = price_band(&sp, &sa, &sb, 50.0);
         assert!(lo > sa && hi < sb);
-        let b = mint_bounds(&sp, &sa, &sb, 54_000_000_000, 50.0);
+        let b = mint_bounds(&sp, &sa, &sb, 54_000_000_000, 50.0, i128::MAX / 4, i128::MAX / 4);
         assert!(b.min0 <= b.max0 && b.min1 <= b.max1);
         // a wide range keeps the whole band, and real floors on both sides
         let (wa, wb) = (sqrt_ratio_at_tick(-500), sqrt_ratio_at_tick(500));
-        let w = mint_bounds(&sqrt_ratio_at_tick(0), &wa, &wb, 10i128.pow(12), 10.0);
+        let w = mint_bounds(&sqrt_ratio_at_tick(0), &wa, &wb, 10i128.pow(12), 10.0, i128::MAX / 4, i128::MAX / 4);
         assert!(w.min0 > 0 && w.min1 > 0 && w.min0 < w.max0 && w.min1 < w.max1);
         // out of range the amounts do not move with the price: the floors are the amounts
-        let o = mint_bounds(&sqrt_ratio_at_tick(5), &sa, &sb, 10i128.pow(12), 50.0);
+        let o = mint_bounds(&sqrt_ratio_at_tick(5), &sa, &sb, 10i128.pow(12), 50.0, i128::MAX / 4, i128::MAX / 4);
         assert_eq!((o.min0 + 1, o.min1 + 1), (o.max0, o.max1));
+    }
+
+    #[test]
+    fn a_mint_never_pulls_more_than_the_pool_holds() {
+        // a 7-tick range: the 50 bp floor band reaches both edges, where one token would be pulled
+        // many times over; the floors keep the price where the pool's own tokens pay
+        let (sa, sb) = (sqrt_ratio_at_tick(9), sqrt_ratio_at_tick(16));
+        let sp = sqrt_ratio_at_tick(12);
+        let (x, y) = (100_000_000i128, 100_000_000i128);
+        let liq = (to_f64(&mint_liquidity(&sp, &sa, &sb, &big(x), &big(y))) * 0.999) as i128;
+        let b = mint_bounds(&sp, &sa, &sb, liq, 50.0, x, y);
+        // the worst prices the floors allow: token0 at the bottom, token1 at the top
+        let at = |s: &BigUint| { let (a0, a1) = crate::tickmath::amounts_for_liquidity(s, &sa, &sb, &big(liq)); (small(&a0), small(&a1)) };
+        // find the band's ends back from the floors by bisection over sqrt prices
+        let bisect = |want: &dyn Fn(&BigUint) -> bool, lo: BigUint, hi: BigUint| {
+            let (mut lo, mut hi) = (lo, hi);
+            for _ in 0..200 { let mid = (&lo + &hi) / 2u8; if want(&mid) { hi = mid } else { lo = mid } }
+            hi
+        };
+        let bottom = bisect(&|s| at(s).1 >= b.min1, sa.clone(), sp.clone());
+        let top = bisect(&|s| at(s).0 < b.min0, sp.clone(), sb.clone());
+        assert!(at(&bottom).0 <= x + 1, "token0 at the band's bottom {} > {x}", at(&bottom).0);
+        assert!(at(&top).1 <= y + 1, "token1 at the band's top {} > {y}", at(&top).1);
+        // and the floors still allow a real move: the band is not the price alone
+        assert!(b.min0 < at(&sp).0 && b.min1 < at(&sp).1);
     }
 
     #[test]
@@ -2187,17 +2368,6 @@ mod swap_back_tests {
         // almost none of it (0.3%), and it wants 37% now; that is a new mix, not the swap undone
         assert!(!swaps_back(Some((now - 250 * 60, true, 0.003)), now, false, 0.37));
     }
-}
-
-/// Make the pool's strategy decide afresh on its next cycle instead of on its schedule, and take the
-/// new target whatever the turnover: the strategy's last move is forgotten (a ladder block re-solves;
-/// a range strategy is past its cooldown).
-pub fn resolve_now(cid: u64, cfg: &PoolConfig, live: bool) {
-    let mut st = crate::custom::load_state(cid, &cfg.pool, live);
-    st.last_move = 0;
-    st.force_solve = true;
-    crate::custom::save_state(cid, &cfg.pool, live, &st);
-    crate::info!("worker", "[{}] re-solving on this cycle (a parked lot was handed over to it)", cfg.name);
 }
 
 pub fn thousands(n: u64) -> String {

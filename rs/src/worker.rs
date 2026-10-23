@@ -69,6 +69,12 @@ impl Worker {
         })
     }
 
+    /// The run lock, when no cycle or minute pass is running: held while the agent changes a pool's
+    /// strategy and state, so a run in flight cannot save its old state over the new one.
+    pub fn idle_guard(&self) -> Option<std::sync::MutexGuard<'_, ()>> {
+        self.running.try_lock().ok()
+    }
+
     pub fn request(&self, claim_now: bool) {
         if claim_now {
             self.force_claim.lock().unwrap().insert(crate::paths::wallet());
@@ -194,6 +200,13 @@ impl Worker {
         }
     }
 
+    /// Live trading is on, whether or not this cycle can sign (paused, an earlier transaction still
+    /// pending, a key that does not match): capital requests are then the live book's, and wait for a
+    /// cycle that can carry them out instead of being taken as a dry run's.
+    fn live_intended(s: &Value) -> bool {
+        s["execute"].as_bool().unwrap_or(false) && crate::signer::configured()
+    }
+
     /// Live or dry run, and how the dashboard names it.
     fn mode(&self, s: &Value, wallet: &str) -> Result<(bool, &'static str), String> {
         let has_signer = crate::signer::configured();
@@ -242,6 +255,10 @@ impl Worker {
             let to = r["to"].as_str().map(|x| x.to_lowercase());
             let dest = to.clone().unwrap_or_else(|| "Unallocated".into());
             any = true;
+            if !execute && Self::live_intended(s) {
+                report.push(format!("  withdrawal of ${} waits: live trading is on but this cycle cannot sign (paused, or an earlier transaction is pending)", engine::commas(usd)));
+                continue;
+            }
             if !execute {
                 let moved = capital::move_in_book(book, cid, &cfg.pool, usd, to.as_deref());
                 report.push(format!("  withdrawal (dry run): ${} of idle tokens moved to {dest} as they are (live, positions would be burned and sold to USDC as needed)", engine::commas(moved)));
@@ -258,23 +275,52 @@ impl Worker {
             let others: Vec<String> = own.keys().cloned().collect();
             let res = rx.release(usd, &usdc, &others, r["max_cost_bp"].as_f64());
             report.extend(rx.report.drain(..));
-            let after = capital::balances(cid, uni, wallet)?;
-            let mut mine = capital::after_run(&reserve, &after);
+            let after = match capital::balances(cid, uni, wallet) {
+                Ok(a) => a,
+                Err(e) => {
+                    capital::settle_repaid(book, execute, cid, &cfg.pool);
+                    book.mark_dirty(cid, &cfg.pool, rx.reserve_now().unwrap_or(&reserve));
+                    capital::save(execute, book);
+                    return Err(e);
+                }
+            };
+            // the reserve as the run left it: a claim the host paid back from its idle tokens is this pool's
+            let mut mine = capital::after_run(rx.reserve_now().unwrap_or(&reserve), &after);
             let want = (usd / capital::px_raw(cid, &usdc)?) as i128;
             let moved = mine.get(&usdc).copied().unwrap_or(0).min(want);
             *mine.entry(usdc.clone()).or_default() -= moved;
             book.set_pool(cid, &cfg.pool, mine);
+            capital::settle_repaid(book, execute, cid, &cfg.pool);
             if let Some(t) = &to {
                 let mut tb = book.pool(cid, t);
                 *tb.entry(usdc.clone()).or_default() += moved;
                 book.set_pool(cid, t, tb);
+            }
+            if execute && rx.sent_any() && crate::chain::pending_age(cid, wallet).is_some() {
+                // a transaction of the release may still be mined: the book is settled once it is
+                book.mark_dirty(cid, &cfg.pool, rx.reserve_now().unwrap_or(&reserve));
             }
             let moved_usd = moved as f64 * capital::px_raw(cid, &usdc).unwrap_or(0.0);
             report.push(format!("  withdrawal: ${} USDC moved to {dest} (asked ${}){}", engine::commas(moved_usd), engine::commas(usd),
                                 res.as_ref().err().map(|e| format!("; stopped early: {e}")).unwrap_or_default()));
             engine::log(json!({"chain_id": cid, "pool": cfg.pool, "kind": "capital", "what": "withdraw", "usd": moved_usd, "asked_usd": usd, "to": to,
                                "asset": usdc, "plan": r["plan"], "emergency": r["emergency"]}));
-            capital::remove(&id);
+            match capital::after_release(&r, usd, moved_usd, res.is_err()) {
+                Some(rest) => {
+                    report.push(format!("  the remaining ${} stays queued (attempt {} of {})", engine::commas(rest["usd"].as_f64().unwrap_or(0.0)),
+                                        rest["attempts"], capital::RELEASE_ATTEMPTS));
+                    capital::replace(&id, vec![rest]);
+                }
+                None if res.is_err() || moved_usd + 1.0 < usd => {
+                    crate::error!("capital", "[{}] withdrawal of ${} gave ${} after {} attempts; the rest is not withdrawn", cfg.name,
+                                  engine::commas(usd), engine::commas(moved_usd), capital::RELEASE_ATTEMPTS);
+                    report.push(format!("  the remaining ${} could not be withdrawn after {} attempts: it stays listed as failed", engine::commas(usd - moved_usd),
+                                        capital::RELEASE_ATTEMPTS));
+                    let why = res.as_ref().err().map(|e| e.to_string());
+                    capital::replace(&id, vec![capital::failed_release(&r, (usd - moved_usd).max(0.0), why.as_deref())]);
+                }
+                None => { capital::remove(&id); }
+            }
             capital::save(execute, book);
             before = after;
         }
@@ -291,7 +337,20 @@ impl Worker {
             // its own tokens only: the rest of the wallet is reserved for the other pools and Unallocated
             let uni = capital::universe(cid, &refs, s, acct, &book);
             let before = capital::balances(cid, &uni, wallet).map_err(|e| format!("wallet balances not read, so the pool's own tokens are not known: {e}"))?;
+            // a book not final after an earlier run (balances unread, a transaction unresolved) is
+            // settled first; this pool does not run on one that cannot be settled yet
+            let pending = execute && crate::chain::pending_age(cid, wallet).is_some();
+            capital::settle_dirty_chain(&mut book, cid, &before, pending);
+            if book.is_dirty(cid, &cfg.pool) {
+                return Err("its book waits for an unresolved transaction to be mined or replaced".into());
+            }
+            capital::save(execute, &book);
             let (before, released, any) = self.release(cid, cfg, wallet, s, execute, &mut book, &uni, before)?;
+            if book.is_dirty(cid, &cfg.pool) {
+                // its release left a transaction unresolved: its book waits for it, and so does its run
+                capital::save(execute, &book);
+                return Err("its withdrawal's transaction is not resolved yet; the pool waits for it".into());
+            }
             let mut acct = acct.clone();
             if any && execute {
                 if let Ok((info, ..)) = pool_value(cid, cfg, wallet) {
@@ -318,12 +377,27 @@ impl Worker {
             };
             if execute {
                 // what changed in the wallet during the run is the pool's
-                match capital::balances(cid, &uni, wallet) {
+                let read = capital::balances(cid, &uni, wallet).or_else(|_| {
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    capital::balances(cid, &uni, wallet)
+                });
+                match read {
                     Ok(after) => {
-                        book.set_pool(cid, &cfg.pool, capital::after_run(&reserve, &after));
+                        book.set_pool(cid, &cfg.pool, capital::after_run(ex.reserve_now().unwrap_or(&reserve), &after));
+                        capital::settle_repaid(&mut book, execute, cid, &cfg.pool);
+                        capital::book_claims(&mut book, execute, cid, &cfg.pool);
+                        if ex.sent_any() && crate::chain::pending_age(cid, wallet).is_some() {
+                            // a transaction of the run may still be mined after this read
+                            book.mark_dirty(cid, &cfg.pool, ex.reserve_now().unwrap_or(&reserve));
+                        }
                         capital::save(execute, &book);
                     }
-                    Err(e) => crate::error!("worker", "[{}] balances after the run not read ({e}): the pool's idle tokens are as before the run until the next one", cfg.name),
+                    Err(e) => {
+                        crate::error!("worker", "[{}] balances after the run not read ({e}): the pool's idle tokens are as before the run; what it spent is taken from it next cycle", cfg.name);
+                        capital::settle_repaid(&mut book, execute, cid, &cfg.pool);
+                        book.mark_dirty(cid, &cfg.pool, ex.reserve_now().unwrap_or(&reserve));
+                        capital::save(execute, &book);
+                    }
                 }
             }
             let n = ex.report.len();
@@ -331,6 +405,8 @@ impl Worker {
             summary["budget_usd"] = json!(budget);
             summary["capital_usd"] = json!(parts.capital());
             summary["decides_every_s"] = json!(bar_s);
+            summary["ran_at"] = json!(engine::now());
+            summary["blocked"] = json!(ex.was_blocked());
             // Monitor only (reports/VOLATILE.md): shown on the dashboard, not used for trading.
             summary["flvr"] = crate::data::pool_flvr(cid, &cfg.pool, ex.dec0, ex.dec1, num);
             Ok(summary)
@@ -356,6 +432,7 @@ impl Worker {
 
     fn cycle_one(&self) {
         let t0 = std::time::Instant::now();
+        let started = engine::now();
         self.set("state", json!("running"));
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.cycle_inner())) {
             Ok(Ok(())) => self.set("last_error", Value::Null),
@@ -371,6 +448,8 @@ impl Worker {
         self.with_status(|s| {
             s["state"] = json!("idle");
             s["last_cycle"] = json!(engine::now());
+            // when the last finished cycle began (agent plans: a cycle that began after a change saw it)
+            s["last_cycle_started"] = json!(started);
             s["cycle_seconds"] = json!((t0.elapsed().as_secs_f64() * 10.0).round() / 10.0);
         });
     }
@@ -413,18 +492,6 @@ impl Worker {
                 }
             }
         }
-        // lots parked by a pool that is now switched off (or at 0%) become the pool's they sit in,
-        // when that pool runs a strategy of its own: before valuing, so they count there this cycle
-        for (cid, pools) in &by_chain {
-            let on = |addr: &str| pools.iter().any(|(_, c)| c.pool.eq_ignore_ascii_case(addr) && c.enabled);
-            let got = crate::parking::hand_over(execute, *cid, &on, &on);
-            // the lot keeps the parking range it was minted in (wide, so it stayed in range without
-            // care): the pool that now owns it re-solves on this cycle instead of on its schedule, so
-            // the lot is folded into its own ranges
-            for (_, cfg) in pools.iter().filter(|(_, c)| got.iter().any(|x| x["pool"].as_str().map(|p| p.eq_ignore_ascii_case(&c.pool)).unwrap_or(false))) {
-                engine::resolve_now(*cid, cfg, execute);
-            }
-        }
         let acct = account_value(&by_chain, &wallet, &s);
         self.set("account", acct.clone());
 
@@ -435,7 +502,8 @@ impl Worker {
             let refs: Vec<&PoolConfig> = pools.iter().map(|x| &x.1).collect();
             let uni = capital::universe(*cid, &refs, &s, &acct, &book);
             match capital::balances(*cid, &uni, &wallet) {
-                Ok(w) => capital::prepare(&mut book, *cid, &refs, &acct, &w, execute),
+                Ok(w) => capital::prepare(&mut book, *cid, &refs, &acct, &w, execute, execute || !Self::live_intended(&s),
+                                          execute && crate::chain::pending_age(*cid, &wallet).is_some()),
                 Err(e) => crate::warn!("capital", "chain {cid}: wallet balances not read ({e}); capital requests wait for the next cycle"),
             }
             unis.insert(*cid, uni);
@@ -471,7 +539,9 @@ impl Worker {
         }
         if s["solid_lp"]["enabled"].as_bool().unwrap_or(false) {
             let cid = s["solid_lp"]["chain_id"].as_u64().unwrap_or(chains::BASE);
-            self.set("solid_lp", crate::solid_lp::run(cid, &wallet, &s, execute));
+            // the pools' tokens are theirs: it pairs SOLID with Unallocated ones only
+            let reserve = capital::load(execute).held(cid);
+            self.set("solid_lp", crate::solid_lp::run(cid, &wallet, &s, execute, reserve));
         } else {
             self.with_status(|st| st.as_object_mut().map(|o| o.remove("solid_lp")));
         }
@@ -493,11 +563,21 @@ impl Worker {
             for (_, cfg) in pools {
                 let info = &acct["pools"][&cfg.name];
                 let has_pos = info["positions"].as_array().map(|a| !a.is_empty()).unwrap_or(false);
-                if !cfg.enabled && !has_pos {
+                // a withdrawal from a pool with parked lots (or claims) of its own goes through its run's
+                // release, which unparks them; moving only its idle tokens would drop the request
+                let rel = capital::releases(*cid, &cfg.pool);
+                // a pool that is off runs while it still has lots or claims parked elsewhere: its run
+                // brings them back, and its idle tokens then go to Unallocated. So does one whose
+                // withdrawal sells to a safe asset (an emergency exit, a plan): moved as they are, its
+                // tokens would still be the asset it is meant to leave
+                let parked = !crate::parking::of_origin(execute, *cid, &cfg.pool).is_empty()
+                    || rel.iter().any(|r| r["safe"].as_str().map(crate::agent::is_addr).unwrap_or(false) || r["emergency"] == true);
+                if !cfg.enabled && !has_pos && !parked {
                     // a pool that is off and holds no positions gives its idle tokens back to Unallocated
                     // (or to the pool a move asked for), as they are
                     let mut book = capital::load(execute);
-                    for r in capital::releases(*cid, &cfg.pool) {
+                    // (a live wallet's requests wait for a cycle that can sign: they are the live book's)
+                    for r in capital::releases(*cid, &cfg.pool).into_iter().filter(|_| execute || !Self::live_intended(&s)) {
                         capital::move_in_book(&mut book, *cid, &cfg.pool, r["usd"].as_f64().unwrap_or(0.0), r["to"].as_str());
                         capital::remove(r["id"].as_str().unwrap_or(""));
                     }

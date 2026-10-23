@@ -1676,7 +1676,12 @@ fn execute(id: u64, cid: u64, pool: &str, days: i64, req: &Value, wallet: &str) 
         emis_usd_h: apr.iter().map(|(h, (_, e))| (*h, *e)).collect(),
         sqrt_px: m.px_scale.sqrt(),
         beta,
-        park: park_rates(cid, [tok0.as_str(), tok1.as_str()], from - warm, &Costs::from(&req["costs"]), req["capital_usd"].as_f64().unwrap_or(0.0)),
+        // `live_parking` (the agent's strategy gate): parking earns only when the live switch is on
+        park: if req["live_parking"] == true && !crate::parking::enabled(&crate::settings::load_settings()) {
+            Default::default()
+        } else {
+            park_rates(cid, [tok0.as_str(), tok1.as_str()], from - warm, &Costs::from(&req["costs"]), req["capital_usd"].as_f64().unwrap_or(0.0))
+        },
         cid,
         num_token: num_tok.to_lowercase(),
         hedge,

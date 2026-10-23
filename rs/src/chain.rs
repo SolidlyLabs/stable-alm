@@ -339,15 +339,16 @@ fn pending_load() -> Vec<Value> {
     std::fs::read_to_string(pending_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
 
-fn pending_save(v: &[Value]) {
+fn pending_save(v: &[Value]) -> Result<(), String> {
     let _ = std::fs::create_dir_all(crate::paths::logs());
     let tmp = pending_path().with_extension("tmp");
-    if std::fs::write(&tmp, serde_json::to_string_pretty(v).unwrap()).is_ok() {
-        let _ = std::fs::rename(tmp, pending_path());
-    }
+    std::fs::write(&tmp, serde_json::to_string_pretty(v).unwrap()).map_err(|e| e.to_string())?;
+    std::fs::rename(tmp, pending_path()).map_err(|e| e.to_string())
 }
 
-fn pending_upsert(cid: u64, from: &str, nonce: u64, hash: &str, raw: &str, to: &str) {
+/// Record a signed copy before it is broadcast. Err: it could not be written, and must not be sent
+/// (a lost response would leave nothing to reconcile, and the operation could be sent again).
+fn pending_upsert(cid: u64, from: &str, nonce: u64, hash: &str, raw: &str, to: &str) -> Result<(), String> {
     let _g = PENDING_LOCK.lock().unwrap();
     let mut all = pending_load();
     match all.iter_mut().find(|p| p["chain_id"] == cid && p["nonce"] == nonce && p["from"] == from) {
@@ -359,14 +360,16 @@ fn pending_upsert(cid: u64, from: &str, nonce: u64, hash: &str, raw: &str, to: &
         None => all.push(json!({"chain_id": cid, "from": from, "nonce": nonce, "to": to, "ts": crate::engine::now(),
                                 "copies": [{"hash": hash, "raw": raw}]})),
     }
-    pending_save(&all);
+    pending_save(&all).map_err(|e| format!("the pending transaction could not be recorded ({e}); not sent"))
 }
 
 fn pending_clear(cid: u64, from: &str, nonce: u64) {
     let _g = PENDING_LOCK.lock().unwrap();
     let mut all = pending_load();
     all.retain(|p| !(p["chain_id"] == cid && p["nonce"] == nonce && p["from"] == from));
-    pending_save(&all);
+    if let Err(e) = pending_save(&all) {
+        crate::warn!("chain", "pending nonce {nonce} on chain {cid} could not be cleared ({e}); it is reconciled on the next send");
+    }
 }
 
 /// Pending transactions waiting to be reconciled (for the dashboard).
@@ -388,6 +391,9 @@ pub fn reconcile_pending(cid: u64, from: &str) -> Result<(), String> {
                          hex_u64(&rc["blockNumber"]), rc["status"].as_str().unwrap_or("?"));
             crate::engine::log(json!({"chain_id": cid, "kind": "reconciled", "nonce": nonce, "hash": rc["transactionHash"], "status": rc["status"],
                                       "to": p["to"]}));
+            // reads from now on are at or after its block, as after a send that saw its receipt
+            note_mined(cid, hex_u64(&rc["blockNumber"]));
+            crate::ledger::invalidate();
             pending_clear(cid, &from, nonce);
             continue;
         }
@@ -501,11 +507,23 @@ pub fn gas_preview(cid: u64) -> Result<Value, String> {
     Ok(json!({"chain_id": cid, "base_gwei": gwei(&base), "speed": crate::chains::get(cid).gas_speed, "levels": levels}))
 }
 
+/// Why nothing may be signed for this wallet now: paused, updating, or live trading switched off or
+/// its key removed since the run began (a run holds its account; this is asked before every copy).
+fn not_live() -> Option<String> {
+    if let Some(why) = crate::paths::execution_blocked() {
+        return Some(why);
+    }
+    if crate::settings::load_settings()["execute"] != true || !crate::signer::configured() {
+        return Some("live trading was switched off".into());
+    }
+    None
+}
+
 /// Sign and broadcast at the chain's gas speed; re-broadcast with fees +25% (same nonce) when not
 /// mined within the speed's wait (low 180 s, normal 90 s, instant 45 s), up to 3 times. Returns once any copy is mined; Err if it reverted. Refuses while execution is paused, and
 /// while an earlier transaction on the chain is unresolved.
 pub fn send(cid: u64, acct: &Account, to: &str, data: &str, gas: u64) -> Result<Sent, TxError> {
-    if let Some(why) = crate::paths::execution_blocked() {
+    if let Some(why) = not_live() {
         return Err(err(format!("not sent: {why}"), "paused"));
     }
     reconcile_pending(cid, &acct.address).map_err(|e| err(e, "pending"))?;
@@ -517,6 +535,14 @@ pub fn send(cid: u64, acct: &Account, to: &str, data: &str, gas: u64) -> Result<
     let mut hashes: Vec<String> = vec![];
     let body = eth::unhex(data).map_err(TxError::from)?;
     for attempt in 0..4 {
+        // asked right before every signature: the reads before it (pending, nonce, fees) take time
+        if let Some(why) = not_live() {
+            if attempt == 0 {
+                return Err(err(format!("not sent: {why}"), "paused"));
+            }
+            // the copies sent stay recorded: whichever is mined resolves the nonce on a later send
+            return Err(err(format!("transaction (nonce {nonce}) not mined yet and no higher-fee copy sent: {why}; kept as pending"), "paused"));
+        }
         let tx = eth::Tx1559 {
             chain_id: cid,
             nonce,
@@ -529,7 +555,7 @@ pub fn send(cid: u64, acct: &Account, to: &str, data: &str, gas: u64) -> Result<
         let signed = tx.sign(acct);
         let raw = format!("0x{}", eth::hex(&signed));
         let local = format!("0x{}", eth::hex(&eth::keccak(&signed)));
-        pending_upsert(cid, &from, nonce, &local, &raw, to);
+        pending_upsert(cid, &from, nonce, &local, &raw, to).map_err(|e| err(e, "pending"))?;
         if !hashes.contains(&local) {
             hashes.push(local.clone());
         }
@@ -594,6 +620,9 @@ pub fn send(cid: u64, acct: &Account, to: &str, data: &str, gas: u64) -> Result<
 pub fn replace_stuck(cid: u64, acct: &Account, max_fee_gwei: f64) -> Result<Option<String>, String> {
     let from = acct.address.to_lowercase();
     let Some(p) = pending_load().into_iter().find(|p| p["chain_id"] == cid && p["from"] == from.as_str()) else { return Ok(None) };
+    if let Some(why) = crate::paths::execution_blocked() {
+        return Err(format!("not replaced: {why}"));
+    }
     let nonce = p["nonce"].as_u64().unwrap_or(0);
     let blk = rpc::call_ok(cid, "eth_getBlockByNumber", json!(["latest", false]))?;
     let base = eth::parse_uint(blk["baseFeePerGas"].as_str().unwrap_or("0x0"));
@@ -607,11 +636,14 @@ pub fn replace_stuck(cid: u64, acct: &Account, max_fee_gwei: f64) -> Result<Opti
     if max_fee < tip {
         return Err(format!("the emergency gas limit ({max_fee_gwei} gwei) is below the tip needed"));
     }
+    if let Some(why) = not_live() {
+        return Err(format!("not replaced: {why}"));
+    }
     let tx = eth::Tx1559 { chain_id: cid, nonce, max_priority_fee: tip, max_fee, gas: 21_000, to: from.clone(), data: vec![] };
     let signed = tx.sign(acct);
     let raw = format!("0x{}", eth::hex(&signed));
     let local = format!("0x{}", eth::hex(&eth::keccak(&signed)));
-    pending_upsert(cid, &from, nonce, &local, &raw, &from);
+    pending_upsert(cid, &from, nonce, &local, &raw, &from)?;
     crate::warn!("chain", "replacing stuck nonce {nonce} on chain {cid} with a self-transfer {local}");
     crate::engine::log(json!({"chain_id": cid, "kind": "replace_stuck", "nonce": nonce, "hash": local}));
     match rpc::send_call(cid, "eth_sendRawTransaction", json!([raw])) {

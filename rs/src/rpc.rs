@@ -380,6 +380,16 @@ mod tests {
     }
 
     #[test]
+    fn only_a_json_rpc_error_is_a_rejection() {
+        assert_eq!(answer(&json!({"result": "0xab"}), 200).unwrap().unwrap(), json!("0xab"));
+        assert!(answer(&json!({"error": {"code": -32000, "message": "nonce too low"}}), 200).unwrap().is_err());
+        assert!(answer(&json!({"error": {"code": -32000, "message": "x"}}), 400).unwrap().is_err());
+        // a proxy's HTML page (no JSON) or an empty object: no answer
+        assert!(answer(&json!({}), 502).is_err());
+        assert!(answer(&json!({"jsonrpc": "2.0", "id": 1}), 200).is_err());
+    }
+
+    #[test]
     fn rate_limit_detection() {
         assert!(is_rate_limit(&json!({"code": 429, "message": "x"})));
         assert!(is_rate_limit(&json!({"code": -1, "message": "Too Many Requests"})));
@@ -396,8 +406,26 @@ pub fn call_ok(cid: u64, method: &str, params: Value) -> Result<Value, String> {
     call(cid, method, params)?.map_err(|e| format!("{method}: {e}"))
 }
 
+/// A send node's reply: Ok(result or the node's JSON-RPC error), or Err when it is neither (a proxy's
+/// 502 page, an empty body). Only a real JSON-RPC error says the node refused the request: for a
+/// broadcast, anything else may have reached the node, so it is no answer, not a rejection.
+fn answer(v: &Value, code: u16) -> Result<R, String> {
+    if v.get("result").is_none() && !v.get("error").map(|e| e.is_object() || e.is_string()).unwrap_or(false) {
+        return Err(format!("HTTP {code} without a JSON-RPC answer"));
+    }
+    Ok(unpack(Some(v)))
+}
+
 pub fn send_call(cid: u64, method: &str, params: Value) -> Result<R, String> {
     let mut delay = 2;
+    // a broadcast that went unanswered may have reached the node: a later attempt's error (a rate
+    // limit, "already known" from another node) does not say it was refused
+    let broadcast = method == "eth_sendRawTransaction";
+    let mut unanswered = false;
+    let settle = |r: Result<R, String>, unanswered: bool| match r {
+        Ok(Err(e)) if broadcast && unanswered => Err(format!("an earlier attempt had no answer; then: {e}")),
+        r => r,
+    };
     for attempt in 0..4 {
         let body = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
         let url = send_url(cid)?;
@@ -410,7 +438,7 @@ pub fn send_call(cid: u64, method: &str, params: Value) -> Result<R, String> {
                     delay *= 2;
                     continue;
                 }
-                return Ok(unpack(Some(&v)));
+                return settle(answer(&v, 200), unanswered);
             }
             Err(ureq::Error::Status(code, r)) => {
                 let v: Value = r.into_json().unwrap_or(json!({}));
@@ -420,10 +448,10 @@ pub fn send_call(cid: u64, method: &str, params: Value) -> Result<R, String> {
                     delay *= 2;
                     continue;
                 }
-                return Ok(unpack(Some(&v)));
+                return settle(answer(&v, code), unanswered);
             }
             Err(e) if attempt == 3 => return Err(e.to_string()),
-            Err(_) => {}
+            Err(_) => unanswered = true,
         }
         std::thread::sleep(Duration::from_secs(delay));
         delay *= 2;

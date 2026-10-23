@@ -103,71 +103,56 @@ fn path(live: bool) -> std::path::PathBuf {
 /// Every lot: {id, chain_id, origin, pool, token, tl, tu, liquidity (string), amount (raw token units), usd, ts}.
 pub fn lots(live: bool) -> Vec<Value> {
     let _g = LOCK.lock().unwrap();
+    read(live)
+}
+
+/// The ledger as saved; the caller holds LOCK across its write too (a change in between is lost).
+fn read(live: bool) -> Vec<Value> {
     std::fs::read_to_string(path(live)).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
 
-fn write(live: bool, l: &[Value]) {
+/// Whether it was saved (an error is logged).
+fn write(live: bool, l: &[Value]) -> bool {
     let p = path(live);
     let _ = std::fs::create_dir_all(p.parent().unwrap());
-    let _ = crate::settings::write_atomic(&p, &Value::Array(l.to_vec()));
+    match crate::settings::write_atomic(&p, &Value::Array(l.to_vec())) {
+        Ok(()) => true,
+        Err(e) => {
+            crate::error!("parking", "parking ledger not saved: {e}");
+            false
+        }
+    }
 }
 
-pub fn add(live: bool, lot: Value) {
-    let mut l = lots(live);
+pub fn add(live: bool, lot: Value) -> bool {
     let _g = LOCK.lock().unwrap();
+    let mut l = read(live);
     l.push(lot);
-    write(live, &l);
+    write(live, &l)
 }
 
 /// Replace the lot with the same id.
-pub fn update(live: bool, lot: Value) {
-    let mut l = lots(live);
+pub fn update(live: bool, lot: Value) -> bool {
     let _g = LOCK.lock().unwrap();
+    let mut l = read(live);
     for x in l.iter_mut() {
         if x["id"] == lot["id"] {
             *x = lot.clone();
         }
     }
-    write(live, &l);
+    write(live, &l)
 }
 
-pub fn remove(live: bool, id: &str) {
-    let mut l = lots(live);
+pub fn remove(live: bool, id: &str) -> bool {
     let _g = LOCK.lock().unwrap();
+    let mut l = read(live);
     l.retain(|x| x["id"].as_str() != Some(id));
-    write(live, &l);
+    write(live, &l)
 }
 
 /// The lots parked by the strategy of `origin` on chain `cid`.
 pub fn of_origin(live: bool, cid: u64, origin: &str) -> Vec<Value> {
     lots(live).into_iter().filter(|x| x["chain_id"].as_u64() == Some(cid) && x["origin"].as_str().map(|o| o.eq_ignore_ascii_case(origin)).unwrap_or(false)).collect()
-}
-
-/// The lots to hand over to the pool they sit in: their origin no longer wants them (switched off,
-/// set to 0% or no longer configured: `wants(origin)` is false) and that pool runs a strategy of its
-/// own (`runs(pool)`). Handed over, a lot leaves the ledger and its liquidity is that pool's own: it
-/// counts as deployed there and that pool's strategy manages it. A lot in the middle of a park or an
-/// unpark (a journal stage) waits until that is finished or undone; a lot in a pool without a
-/// strategy of its own stays parked, earning, and counted in the account.
-pub fn to_hand_over(lots: &[Value], cid: u64, wants: &dyn Fn(&str) -> bool, runs: &dyn Fn(&str) -> bool) -> Vec<Value> {
-    lots.iter()
-        .filter(|x| x["chain_id"].as_u64() == Some(cid) && x.get("stage").is_none())
-        .filter(|x| !wants(x["origin"].as_str().unwrap_or("")) && runs(x["pool"].as_str().unwrap_or("")))
-        .cloned()
-        .collect()
-}
-
-/// `to_hand_over` on the ledger: those lots leave it (logged); returns them.
-pub fn hand_over(live: bool, cid: u64, wants: &dyn Fn(&str) -> bool, runs: &dyn Fn(&str) -> bool) -> Vec<Value> {
-    let out = to_hand_over(&lots(live), cid, wants, runs);
-    for x in &out {
-        remove(live, x["id"].as_str().unwrap_or(""));
-        crate::info!("parking", "lot {} ({} {}, ${:.2}) handed over to the pool it sits in ({}): its origin {} no longer runs",
-                     x["id"].as_str().unwrap_or(""), x["amount"].as_str().unwrap_or(""), x["symbol"].as_str().unwrap_or(""), x["usd"].as_f64().unwrap_or(0.0),
-                     x["pool"].as_str().unwrap_or(""), x["origin_name"].as_str().or(x["origin"].as_str()).unwrap_or(""));
-        crate::engine::log(json!({"chain_id": cid, "pool": x["pool"], "kind": "park_handover", "lot": x, "live": live}));
-    }
-    out
 }
 
 /// Liquidity parked in `pool` per range (live lots only): left out of that pool's own positions.
@@ -208,7 +193,8 @@ pub fn claims_usd(live: bool, cid: u64, pool: &str) -> (f64, f64) {
 
 fn split_claims(lots: &[Value], cid: u64, pool: &str, usd: &dyn Fn(&Value) -> f64) -> (f64, f64) {
     let (mut hosted, mut owed) = (0.0, 0.0);
-    for x in lots.iter().filter(|x| is_claim(x) && x["chain_id"].as_u64() == Some(cid)) {
+    // a claim paid back ("repaid") is settled in the book after the run: no longer owed or hosted
+    for x in lots.iter().filter(|x| is_claim(x) && x["chain_id"].as_u64() == Some(cid) && x["stage"] != "repaid") {
         if x["pool"].as_str().map(|p| p.eq_ignore_ascii_case(pool)).unwrap_or(false) {
             hosted += usd(x);
         }
@@ -829,28 +815,6 @@ mod tests {
         let parked = by_range(&lots, 8453, "0xstable");
         assert_eq!(parked.len(), 1);
         assert_eq!(parked[&(-35, 66)], 600);
-        // a claim whose origin stopped is handed over like any lot: the host keeps the tokens
-        let ids: Vec<String> = to_hand_over(&lots, 8453, &|o: &str| o != "0xweth", &|_: &str| true).iter().map(|x| x["id"].as_str().unwrap().to_string()).collect();
-        assert_eq!(ids, vec!["c".to_string()]);
-    }
-
-    #[test]
-    fn a_switched_off_pool_hands_its_lots_to_the_pool_they_sit_in() {
-        // weth-usdc parked USDT in USDC/USDT, then was switched off; USDC/USDT runs its own strategy
-        let lot = |id: &str, origin: &str, pool: &str| json!({"id": id, "chain_id": 8453, "origin": origin, "pool": pool, "tl": -35, "tu": 66, "liquidity": "600"});
-        let lots = vec![lot("a", "0xweth", "0xstable"), lot("b", "0xother", "0xstable"), lot("c", "0xweth", "0xbare"),
-                        {let mut x = lot("d", "0xweth", "0xstable"); x["stage"] = json!("unparking"); x}];
-        let wants = |o: &str| o == "0xother";
-        let runs = |p: &str| p == "0xstable";
-        let ids: Vec<String> = to_hand_over(&lots, 8453, &wants, &runs).iter().map(|x| x["id"].as_str().unwrap().to_string()).collect();
-        // a: handed over; b: its origin still runs; c: no strategy where it sits, stays parked; d: mid-unpark, waits
-        assert_eq!(ids, vec!["a".to_string()]);
-        // another chain's lots are not this chain's business
-        assert!(to_hand_over(&lots, 10, &wants, &runs).is_empty());
-        // once handed over, its liquidity is the pool's own: nothing parked is left on that range
-        let rest: Vec<Value> = lots.iter().filter(|x| !ids.contains(&x["id"].as_str().unwrap().to_string())).cloned().collect();
-        let parked = by_range(&rest, 8453, "0xstable");
-        assert_eq!(own_share(1800, parked[&(-35, 66)]), 600, "of 1800 on the range, the pool now owns 600 more than before");
     }
 
     #[test]

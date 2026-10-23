@@ -2,7 +2,7 @@
 # of it in namespace "stable-alm-release", then checks it against the signer whitelist the app has
 # built in (rs/release/allowed_signers). Upload both files with the release; the app's updater
 # offers a release only when this signature verifies (src/update.rs).
-#   pwsh rs/release/sign.ps1 -Files rs\dist\StableALM-Setup-0.6.6.exe, rs\dist\StableALM.exe
+#   pwsh rs/release/sign.ps1 -Files rs\dist\StableALM-Setup-0.7.0.exe, rs\dist\StableALM.exe
 #   -Key: the signing key (default ~/.ssh/stable_alm_release); -Signer: its name in allowed_signers
 $ErrorActionPreference = "Stop"
 # arguments by hand: -Files a, b arrives in several shapes (pwsh -File, & from a shell)

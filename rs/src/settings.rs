@@ -229,6 +229,42 @@ fn migrate_pools(raw: &Value, pools: &[Value], migrated: &[Value]) {
     }
 }
 
+/// Held across a read-modify-write of pools.json (`update_pools`), so two writers (the worker's
+/// agent threads, the dashboard) do not undo each other's change.
+static POOLS_RMW: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Change the pools under one lock: `f` gets them as they are now and saves when it returns Ok.
+pub fn update_pools<T>(f: impl FnOnce(&mut Vec<Value>) -> Result<T, String>) -> Result<T, String> {
+    let _g = POOLS_RMW.lock().unwrap_or_else(|e| e.into_inner());
+    let mut pools = load_pools();
+    let r = f(&mut pools)?;
+    save_pools(&pools)?;
+    Ok(r)
+}
+
+/// A pool list sent by the dashboard, as it is saved: a pool the risk controller switched off
+/// (`switched_off`) after the dashboard read the list stays off. Returns the names kept off.
+pub fn keep_switched_off(current: &[Value], sent: &mut [Value]) -> Vec<String> {
+    let mut kept = vec![];
+    for p in sent.iter_mut().filter(|p| p["enabled"] == true) {
+        let same = |q: &&Value| q["pool"].as_str().map(|a| a.eq_ignore_ascii_case(p["pool"].as_str().unwrap_or(""))).unwrap_or(false) && q["chain_id"] == p["chain_id"];
+        let Some(c) = current.iter().find(same) else { continue };
+        if c["enabled"] == false && !c["switched_off"].is_null() {
+            if p["switched_off"]["at"] == c["switched_off"]["at"] {
+                // switched on again by someone who saw it switched off
+                if let Some(o) = p.as_object_mut() {
+                    o.remove("switched_off");
+                }
+            } else {
+                p["enabled"] = json!(false);
+                p["switched_off"] = c["switched_off"].clone();
+                kept.push(p["name"].as_str().unwrap_or("").to_string());
+            }
+        }
+    }
+    kept
+}
+
 pub fn save_pools(pools: &[Value]) -> Result<(), String> {
     // Allocations are shares of each chain's own total (no bridging), so the check is per chain.
     let mut by: std::collections::BTreeMap<u64, f64> = Default::default();
@@ -264,6 +300,8 @@ pub struct PoolConfig {
     pub allocation_pct: f64,
     pub max_ranges: usize,
     pub enabled: bool,
+    /// The agent's plan cost bound while one is in force (agent::exec::bounded): no swap costs more.
+    pub plan_bound_bps: Option<f64>,
 }
 
 impl PoolConfig {
@@ -282,7 +320,15 @@ impl PoolConfig {
             allocation_pct: f("allocation_pct", 0.0),
             max_ranges: f("max_ranges", 5.0) as usize,
             enabled: v["enabled"].as_bool().unwrap_or(false),
+            plan_bound_bps: None,
         }
+    }
+
+    /// The cost limit of the swaps that must clear for the pool to work (funding, parking, a
+    /// withdrawal's): the pool's limit, at least 10 bp, but never above the agent's plan bound.
+    pub fn floored_cost(&self) -> f64 {
+        let c = self.max_swap_cost_bps.max(10.0);
+        self.plan_bound_bps.map(|b| c.min(b)).unwrap_or(c)
     }
 }
 
@@ -415,5 +461,28 @@ mod migrate_tests {
         let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(crate::paths::config().join("pools.json")).unwrap()).unwrap();
         assert!(saved.as_array().unwrap().iter().all(|p| p["strategy"]["type"] != "ladder"), "pools.json was rewritten");
         assert_eq!(super::load_pools(), pools, "a second load changes nothing");
+    }
+}
+
+#[cfg(test)]
+mod pool_save_tests {
+    use super::*;
+
+    #[test]
+    fn a_stale_dashboard_save_does_not_switch_a_risk_switched_off_pool_on() {
+        let off = json!({"name": "a", "pool": "0xA", "chain_id": 8453, "enabled": false, "switched_off": {"at": 100, "reason": "loss"}});
+        // sent from a page loaded before the switch-off: it stays off
+        let mut sent = vec![json!({"name": "a", "pool": "0xa", "chain_id": 8453, "enabled": true})];
+        assert_eq!(keep_switched_off(&[off.clone()], &mut sent), vec!["a".to_string()]);
+        assert_eq!(sent[0]["enabled"], false);
+        assert_eq!(sent[0]["switched_off"]["at"], 100);
+        // switched on by someone who saw it off: allowed, and the mark goes
+        let mut sent = vec![json!({"name": "a", "pool": "0xa", "chain_id": 8453, "enabled": true, "switched_off": {"at": 100}})];
+        assert!(keep_switched_off(&[off], &mut sent).is_empty());
+        assert_eq!(sent[0]["enabled"], true);
+        assert!(sent[0].get("switched_off").is_none());
+        // a pool the user switched off is theirs to switch on
+        let mut sent = vec![json!({"name": "b", "pool": "0xb", "chain_id": 8453, "enabled": true})];
+        assert!(keep_switched_off(&[json!({"name": "b", "pool": "0xb", "chain_id": 8453, "enabled": false})], &mut sent).is_empty());
     }
 }

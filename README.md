@@ -137,9 +137,10 @@ There are two kinds of strategy you can edit:
   reward claims, not into positions, so a pegged host adds or takes nothing measurable on top. In a
   pegged pool with no strategy here, a lot gets a range of its own, which that pool never counts or
   moves; a lot that cannot be valued holds the cycle rather than shrink the budgets. When the pool a
-  lot came from is switched off, the lot is handed over to the pool it sits in, if that
-  pool runs a strategy: it counts as deployed there and that strategy re-solves on the same cycle,
-  whatever its turnover, so the lot is folded into its own ranges; otherwise it stays parked, earning.
+  lot came from is switched off or set to 0%, the lot comes back to it (a claim is paid back by its
+  host, as an unpark is) and goes with the rest of that pool's money where the user chose when
+  switching it off (the dashboard asks: Unallocated as the tokens are, Unallocated as USDC, or
+  another pool).
   In backtests a parked token earns what its pegged pool paid each day, and nothing before that
   pool's history begins (it parks the day the pool appears); every pool a run depends on (the main
   pool, the pools a token price block reads, the parking pools) is downloaded over its period.
@@ -254,13 +255,13 @@ It is a single file of about 8 MB; copy it anywhere and run it.
 To build the Windows installer, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run, from `rs/`:
 
 ```bash
-ISCC /DAppVersion=0.6.6 installer/StableALM.iss     # -> rs/dist/StableALM-Setup-0.6.6.exe
+ISCC /DAppVersion=0.7.0 installer/StableALM.iss     # -> rs/dist/StableALM-Setup-0.7.0.exe
 ```
 
 To sign a release (writes `SHA256SUMS.txt` and `SHA256SUMS.txt.sig` next to the files; upload both):
 
 ```bash
-pwsh release/sign.ps1 -Files dist/StableALM-Setup-0.6.6.exe, dist/StableALM.exe
+pwsh release/sign.ps1 -Files dist/StableALM-Setup-0.7.0.exe, dist/StableALM.exe
 ```
 
 Signers are listed in `rs/release/allowed_signers` (OpenSSH format). To let someone else sign
