@@ -327,6 +327,7 @@
       <li><b>topup</b>: add idle tokens to the current ranges without withdrawing.</li>
       <li><b>exit</b>: the pool was switched off, so all positions are withdrawn.</li>
       <li><b>guard</b>: the depeg guard froze the pool because the price is far from its 7-day median.</li>
+      <li><b>await_swap</b>: the swap that would set the tokens' mix costs more than the pool's max swap cost. Either the withdrawal was held back (its positions are still in range) or the idle tokens wait. Top-ups quote again after 5 min, then 15 min, 1 h and 4 h.</li>
       <li><b>error</b>: the pass failed. Details are in the log and Activity, and it is retried next cycle.</li></ul>`],
     wallet: ["Wallet (managed tokens)", `<p>Free balances of the tokens the worker manages: every configured pool's two tokens plus the funding tokens.</p>
       <p>Other tokens in the wallet are ignored and never touched, except the reward tokens listed for selling (SOLID).</p>`],
@@ -425,6 +426,8 @@
 
     // ---- settings ----
     "set-interval_s": ["Cycle interval", `<p>Seconds between worker cycles (default 300). Strategies keep their own cadence (the ladder re-solves every 6 h), so a shorter interval mostly means faster reaction to failures, idle tokens and depeg-guard releases. Very short intervals add RPC and aggregator load.</p>`],
+    "set-min_deploy_share_pct": ["Min deposit when a swap is refused", `<p>When the swap that sets a deposit's token mix costs more than the pool's max swap cost, the deposit uses the balances as they are. The token left over goes on its own into the side of the range where the pool holds only that token. If the range has no room there (a range one tick spacing wide) and the deposit would take less than this % of the usable value, nothing is deposited: the tokens wait for a cheaper swap instead of a small deposit every cycle. Default 50%.</p>`],
+    "set-max_topups_per_day": ["Max top-ups per day", `<p>The most live top-ups (deposits of idle tokens into the current ranges, nothing withdrawn) a pool makes per day. Top-ups do not use up the pool's daily rebalance cap. Default 12.</p>`],
     "set-idle_redeploy_pct": ["Redeploy idle above", `<p>When a pool's idle tokens exceed this % of its capital, the next cycle deposits them into the current ranges (a top-up) without waiting for the next rebalance. It recovers failed or partial deposits and money added quickly. Smaller amounts, such as weekly claims, wait for the next rebalance.</p>`],
     "set-resize_tolerance_pct": ["Resize tolerance", `<p>A rebalance changes only what has to change. A position whose range is still in the new target is kept: it is trimmed with a partial withdrawal when it holds too much, or topped up by depositing into the same range when it holds too little. Only ranges that leave the target are withdrawn in full.</p><p>Differences smaller than this % of the pool's capital (and never less than the pool's minimum swap value) are left alone, so small drifts don't cost transactions. Default 1%.</p>`],
     "set-claim.enabled": ["Auto-claim rewards", `<p>Claims rewards automatically every <i>Claim every</i> days, following Solidly's Merkle flow:</p>
@@ -468,11 +471,12 @@
     "ev-sent": ["sent", `<p>A real transaction was broadcast and mined successfully. The link opens it on the chain's explorer.</p>`],
     "ev-dry_run": ["dry_run", `<p>A transaction that would have been sent in live mode. It was built and, where its inputs already exist on-chain, simulated successfully.</p>`],
     "ev-solid_lp": ["solid_lp", `<p>The start of a SOLID deposit into the SOLID pool (full range, paired with the same $ of the other token). The amount of SOLID and its USD value are in details.</p>`],
-    "ev-rebalance": ["rebalance", `<p>The start of a rebalance, top-up or exit (the mode is shown in details). Live ones count towards the daily cap.</p>`],
+    "ev-rebalance": ["rebalance", `<p>The start of a rebalance, top-up or exit (the mode is shown in details). Live rebalances and exits count towards the pool's daily cap; live top-ups count towards the daily top-up cap in Settings.</p>`],
+    "ev-swap_refused": ["swap_refused", `<p>A swap was not made because it would cost more than the pool's max swap cost. For a ratio swap, the part that fits the limit is swapped when it is worth a swap. The token that is left over is deposited on its own into the side of the range where the pool holds only that token (no swap: it converts as the price crosses it). If the range has no room there and the deposit would take less than the minimum share in Settings, nothing is deposited and the tokens wait. <i>pre-check</i>: before withdrawing, the swap the move needs was quoted (scaled up for the liquidity the withdrawal takes out of the pool) and was over the limit, so the in-range positions were kept.</p>`],
     "ev-keep": ["keep", `<p>The strategy saw no reason to change anything this cycle.</p>`],
     "ev-retry": ["retry", `<p>A step failed and will be retried with fresh state. Common causes: an aggregator hiccup (502), a price move past the min amounts, or a stale quote.</p>`],
     "ev-error": ["error", `<p>A step failed after all retries, or a whole pool pass failed. Tokens stay where the last confirmed transaction left them; idle tokens are redeployed by the next cycle's top-up. Details are in the errors log below.</p>`],
-    "ev-blocked": ["blocked", `<p>A safety check stopped an action: kill switch, gas, price far from the 1 h median, or the daily cap. Nothing was sent.</p>`],
+    "ev-blocked": ["blocked", `<p>A safety check stopped an action: kill switch, gas, price far from the 1 h median, or the daily rebalance or top-up cap. Nothing was sent.</p>`],
     "ev-guard_freeze": ["guard_freeze", `<p>The depeg guard froze the pool because the price is more than <i>guard</i> ticks from its 7-day median. It waits for the price to return.</p>`],
     errors: ["Errors & warnings", `<p>The tail of <code>logs/errors.log</code> (newest first): warnings such as retries and skipped swaps, and errors with tracebacks. If an alert webhook or Telegram is configured, errors are also sent there, at most once an hour per message.</p>`],
   };

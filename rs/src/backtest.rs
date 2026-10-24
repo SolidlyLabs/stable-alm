@@ -1376,7 +1376,7 @@ pub fn run_carry(c: &Ctx, strat: &Strategy, cost: &Costs, capital: f64, b0: usiz
     }
     if sim.swaps_over > 0 {
         let lim = cost.max_swap_cost_bps.unwrap_or(3.0);
-        watch_errors.push(format!("{} swaps cost more than the live limit of {lim} bp (the dearest {:.1} bp): live refuses those swaps, so it cannot trade this way unless the pool's max swap cost is raised to about {:.0} bp",
+        watch_errors.push(format!("{} swaps cost more than the live limit of {lim} bp (the dearest {:.1} bp): live refuses those swaps (it swaps the part within the limit, deposits the rest on its own side of the range or leaves it idle, and keeps in-range positions it would have withdrawn), so it cannot trade this way unless the pool's max swap cost is raised to about {:.0} bp",
                                   sim.swaps_over, sim.max_swap_bps, sim.max_swap_bps.ceil()));
     }
     let hedge_json = hedge.map(|h| {

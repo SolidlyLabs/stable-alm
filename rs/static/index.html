@@ -807,7 +807,7 @@ function poolDetail(p) {
       <div data-help="flvr"><div title="fee income ÷ loss to arbitrage, trailing 7 days; good above 10, warning below 2">Fee / arb loss (7d)</div>${flvrFig(st.flvr)}</div></div>
     <div class="ladder pos-list">${pos}</div>
     ${(st.parked || []).length ? `<div class="small" style="margin-top:8px" data-help="lab-park">Parked while waiting: ${st.parked.map(l => `<b>${esc(l.symbol || "?")}</b> $${fmt(l.usd || 0, 2)} in <span class=mono>${esc((l.pool || "").slice(0, 10))}</span>`).join(", ")}${S.mode === "dry run" || (S.worker || {}).mode === "dry run" ? " <span class=mute>(dry run)</span>" : ""}</div>` : ""}
-    <div class="small" style="margin-top:10px">Last decision: <b>${esc(st.mode || "–")}</b>${st.error ? ` <span class=bad>${esc(st.error)}</span>` : ""}
+    <div class="small" style="margin-top:10px">Last decision: <b>${esc(st.mode || "–")}</b>${st.error ? ` <span class=bad>${esc(st.error)}</span>` : ""}${st.await_swap ? ` <span class=warn>${esc(st.await_swap.why || "")}</span>` : ""}
       ${st.report ? `<details style="margin-top:4px"><summary>cycle log</summary><pre class="mute">${esc(st.report.join("\n"))}</pre></details>` : ""}</div></div>`;
 }
 function chart() {
@@ -1607,6 +1607,7 @@ async function agFreeze() {
 const SETTINGS = [
   ["interval_s", "Cycle interval (s)", "number"], ["idle_redeploy_pct", "Redeploy idle above (% of capital)", "number"],
   ["resize_tolerance_pct", "Resize tolerance (% of capital)", "number"],
+  ["min_deploy_share_pct", "Min deposit when a swap is refused (% of usable)", "number"], ["max_topups_per_day", "Max top-ups per day", "number"],
   ["claim.enabled", "Auto-claim rewards", "checkbox"], ["claim.every_days", "Claim every (days)", "number"],
   ["solid_mode", "Claimed SOLID", "solidmode"], ["sell_rewards.max_impact_pct", "Max SOLID sale loss (%)", "number"],
   ["sell_rewards.min_value_usd", "Min SOLID sale value ($)", "number"],
@@ -1951,6 +1952,7 @@ function poolStatus(p) {
   if (st.mode === "error") return `<span class="pstat bad" title="${esc(st.error || "")}">error</span>`;
   if (!p.enabled) return has ? `<span class="pstat warn">off · withdrawing</span>` : `<span class="pstat mute">off</span>`;
   if (st.mode === "hold") return `<span class="pstat warn" title="${esc(st.error || "")}">holding</span>`;
+  if (st.mode === "await_swap") { const w = st.await_swap || {}; return `<span class="pstat warn" title="${esc(w.why || "")}">waiting for a swap${w.cost_bps != null ? ` · ${fmt(w.cost_bps, 1)} bp > ${fmt(w.max_bps, 1)}` : ""}</span>`; }
   if (!has) return `<span class="pstat mute">no positions yet</span>`;
   return a.in_range ? `<span class="pstat ok">in range · ${usd(a.deployed_usd, 0)}</span>` : `<span class="pstat bad">out of range · ${usd(a.deployed_usd, 0)}</span>`;
 }
@@ -2316,8 +2318,9 @@ function renderActivity() {
   list.sort((a, b) => (b.e.ts || 0) - (a.e.ts || 0));
   let rows = `<thead><tr><th>When</th>${all ? "<th>Wallet</th>" : ""}<th>Chain</th><th>Pool</th><th>Event</th><th>Details</th></tr></thead><tbody>`;
   for (const {e, w, names} of list.slice(0, 300)) {
-    const k = e.kind, cls = k === "error" ? "bad" : k === "retry" || k === "blocked" ? "warn" : k === "sent" ? "ok" : "", id = e.chain_id || 8453;
+    const k = e.kind, cls = k === "error" ? "bad" : k === "retry" || k === "blocked" || k === "swap_refused" ? "warn" : k === "sent" ? "ok" : "", id = e.chain_id || 8453;
     let d = esc(e.what || e.mode || (e.problems || []).join("; ") || e.error || e.reason || "");
+    if (k === "swap_refused") d += ` · ${fmt(e.cost_bps || 0, 2)} bp > max ${fmt(e.max_bps || 0, 2)} bp`;
     if (e.hash) d += ` <a href="${explorer(id, "tx", esc(e.hash))}" target=_blank>${esc(e.hash.slice(0, 12))}…</a>`;
     rows += `<tr><td class="mute small" style="white-space:nowrap">${new Date(e.ts * 1000).toLocaleString()}</td>${all ? `<td>${wtag(w)}</td>` : ""}<td>${ctag(id)}</td><td>${esc(names[id + ":" + (e.pool || "").toLowerCase()] || "")}</td>
       <td class=${cls}>${esc(k)}${e.live === false ? " <span class=mute>(dry)</span>" : ""}</td><td class=small>${d}</td></tr>`;

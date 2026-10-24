@@ -62,13 +62,23 @@ fn event_chain(e: &Value) -> u64 {
     e["chain_id"].as_u64().unwrap_or(crate::chains::BASE)
 }
 
+/// The pool's live rebalances and exits today: what the daily cap counts. Top-ups (deposits of idle
+/// tokens, nothing withdrawn) have their own cap and do not use it up (`topups_today`).
 pub fn actions_today(cid: u64, pool: &str) -> i64 {
+    passes_today(cid, pool, false)
+}
+
+pub fn topups_today(cid: u64, pool: &str) -> i64 {
+    passes_today(cid, pool, true)
+}
+
+fn passes_today(cid: u64, pool: &str, topups: bool) -> i64 {
     let day = now() / 86400;
     log_tail(8 << 20)
         .iter()
         .filter(|e| {
             e["pool"].as_str() == Some(pool) && event_chain(e) == cid && e["kind"] == "rebalance" && e["live"] == true
-                && e["ts"].as_u64().unwrap_or(0) / 86400 == day
+                && e["ts"].as_u64().unwrap_or(0) / 86400 == day && (e["mode"] == "topup") == topups
         })
         .count() as i64
 }
@@ -209,6 +219,9 @@ pub fn resize_plan(
 pub enum StepErr {
     Abort(String),
     Fail(String),
+    /// A limit the user set said no (a swap over the pool's max swap cost): the same step now would
+    /// get the same answer, so it is not retried; the caller decides what to do without it.
+    Refused(String),
 }
 impl From<String> for StepErr {
     fn from(s: String) -> Self {
@@ -228,7 +241,7 @@ impl From<TxError> for StepErr {
 impl std::fmt::Display for StepErr {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            StepErr::Abort(s) | StepErr::Fail(s) => f.write_str(s),
+            StepErr::Abort(s) | StepErr::Fail(s) | StepErr::Refused(s) => f.write_str(s),
         }
     }
 }
@@ -279,6 +292,11 @@ pub struct Executor {
     /// the pass's rebalance entry, logged with its first transaction: a pass that sends nothing
     /// is not an action (it neither shows in the activity nor counts against the daily cap)
     begun: Option<Value>,
+    /// the cost (bp) of the last swap refused for it, for the refusal's record
+    last_refused_bps: f64,
+    /// the pass left the pool's money waiting for a swap within its limit (summary mode "await_swap"):
+    /// why, the cost, and whether the positions were kept as they are (the withdrawal held back)
+    awaiting: Option<Value>,
 }
 
 impl Executor {
@@ -323,6 +341,8 @@ impl Executor {
             broadcasts: 0,
             was_blocked: false,
             begun: None,
+            last_refused_bps: 0.0,
+            awaiting: None,
             cfg,
         })
     }
@@ -463,6 +483,7 @@ impl Executor {
             match f(self) {
                 Ok(v) => return Ok(v),
                 Err(StepErr::Abort(m)) => return Err(StepErr::Abort(m)),
+                Err(StepErr::Refused(m)) => return Err(StepErr::Refused(m)),
                 Err(StepErr::Fail(e)) if self.broadcasts > sent_before => {
                     // A transaction of this step was broadcast: repeating the step could do it twice.
                     let msg = format!("{what}: failed after its transaction was sent ({e}); not retrying");
@@ -533,6 +554,12 @@ impl Executor {
 
     // -- checks ------------------------------------------------------------------------------------
     fn checks(&self, m: &Market, tick: i64) -> Res<Vec<String>> {
+        self.checks_as(m, tick, false)
+    }
+
+    /// The checks before acting; a top-up (`topup`) counts against the daily top-up cap instead of
+    /// the rebalance cap.
+    fn checks_as(&self, m: &Market, tick: i64, topup: bool) -> Res<Vec<String>> {
         let mut problems = vec![];
         if crate::paths::stop_file().exists() || std::env::var("ALM_DISABLED").as_deref() == Ok("1") {
             problems.push("kill switch is on (STOP file or ALM_DISABLED=1)".to_string());
@@ -548,7 +575,12 @@ impl Executor {
         if gas < c.min_gas_wei {
             problems.push(format!("wallet has < {} {} for gas", c.min_gas_wei / 1e18, c.gas_symbol));
         }
-        if actions_today(self.cid, &self.cfg.pool) >= self.cfg.max_actions_per_day {
+        if topup {
+            let cap = self.settings["max_topups_per_day"].as_f64().unwrap_or(12.0) as i64;
+            if topups_today(self.cid, &self.cfg.pool) >= cap {
+                problems.push("daily top-up cap reached".into());
+            }
+        } else if actions_today(self.cid, &self.cfg.pool) >= self.cfg.max_actions_per_day {
             problems.push("daily rebalance cap reached".into());
         }
         // experimental features: safety locks, emergency exits, engine caps, the risk controller's heartbeat
@@ -557,7 +589,11 @@ impl Executor {
     }
 
     fn blocked(&mut self, m: &Market, tick: i64, exit_only: bool) -> Res<bool> {
-        let mut problems = self.checks(m, tick)?;
+        self.blocked_as(m, tick, exit_only, false)
+    }
+
+    fn blocked_as(&mut self, m: &Market, tick: i64, exit_only: bool, topup: bool) -> Res<bool> {
+        let mut problems = self.checks_as(m, tick, topup)?;
         if exit_only {
             problems.retain(|x| x.contains("kill switch") || x.contains("for gas"));
         }
@@ -575,7 +611,7 @@ impl Executor {
     /// daily cap are this pool's rebalance's, but the gas floor and the agent's locks hold for it too.
     fn parking_blocked(&mut self, m: &Market, tick: i64) -> Res<bool> {
         let mut problems = self.checks(m, tick)?;
-        problems.retain(|x| !x.starts_with("spot tick") && x != "daily rebalance cap reached");
+        problems.retain(|x| !x.starts_with("spot tick") && x != "daily rebalance cap reached" && x != "daily top-up cap reached");
         for x in &problems {
             self.say_warn(format!("  parking BLOCKED: {x}"));
         }
@@ -721,7 +757,10 @@ impl Executor {
                 let back = owed - crate::parking::claims_usd(self.execute, self.cid, &self.cfg.pool).1;
                 let budget0 = if back > 0.0 { budget0 + back / prices::usd(self.cid, &self.t0)? } else { budget0 };
                 self.resize(&positions, &t, budget0, sp, p)?;
-                st.moved(now);
+                // a withdrawal held back by the swap pre-check: the move is still to make
+                if !self.kept_positions() {
+                    st.moved(now);
+                }
                 save(self, &st);
             }
             crate::custom::Decision::Exit(reason) => {
@@ -781,11 +820,20 @@ impl Executor {
                 save(self, &st);
                 let idle_usable = idle0.min((budget0 - pos_val).max(0.0));
                 let thr = budget0 * self.settings["idle_redeploy_pct"].as_f64().unwrap_or(2.0) / 100.0;
-                if !st.exited && !positions.is_empty() && idle_usable > thr.max(self.cfg.min_swap_value) {
+                let wait = refusal_wait(self.refusal(), now as u64);
+                if !st.exited && !positions.is_empty() && idle_usable > thr.max(self.cfg.min_swap_value) && wait > 0 {
+                    // the last ratio swap was refused for its cost: no quote again until the backoff
+                    // is out, and nothing deposited in part meanwhile
+                    let r = self.refusal().unwrap();
+                    let msg = format!("{} idle waits for a swap within {} bp (the last quote {:.2} bp, {} refused in a row); next try in {} min",
+                                      commas(idle_usable), self.cfg.max_swap_cost_bps, r.cost_bps, r.n, wait.div_ceil(60));
+                    self.say(format!("  {msg}"));
+                    self.wait_for_swap(&msg, false);
+                } else if !st.exited && !positions.is_empty() && idle_usable > thr.max(self.cfg.min_swap_value) {
                     summary["mode"] = json!("topup");
                     let t = self.current_as_target(&positions, sp, p).unwrap();
                     self.say(format!("  {} idle (> {}): deploying into the current range", commas(idle_usable), commas(thr)));
-                    if self.blocked(m, tick, false)? {
+                    if self.blocked_as(m, tick, false, true)? {
                         return Ok(summary);
                     }
                     self.begin("topup", Some(&t));
@@ -819,7 +867,16 @@ impl Executor {
                 }
             }
         }
+        if let Some(a) = self.awaiting.clone() {
+            summary["mode"] = json!("await_swap");
+            summary["await_swap"] = a;
+        }
         Ok(summary)
+    }
+
+    /// The pass held a withdrawal back (the swap pre-check): the positions are as they were.
+    pub fn kept_positions(&self) -> bool {
+        self.awaiting.as_ref().map(|a| a["kept_positions"] == true).unwrap_or(false)
     }
 
     // -- targets -----------------------------------------------------------------------------------
@@ -884,12 +941,82 @@ impl Executor {
         // the share of the pool's capital this move redeploys (the engine caps count it per day)
         let turnover = if budget0 > 0.0 { adds.iter().map(|x| x.2).sum::<f64>() / budget0 } else { 0.0 };
         log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "plan", "burns": bj, "adds": aj, "tolerance": tol, "turnover": turnover, "live": self.execute}));
+        if target.swap && !burns.is_empty() && !adds.is_empty() {
+            if let Some((est, earning)) = self.swap_precheck(&burns, &adds, budget0)? {
+                if earning {
+                    let msg = format!("the ratio swap after the withdrawal would cost about {est:.2} bp > max {} bp, and the positions it withdraws are still in range",
+                                      self.cfg.max_swap_cost_bps);
+                    self.say_warn(format!("  withdrawal held back: {msg}; they stay as they are and the move is tried again next cycle"));
+                    if self.note_refusal(est).n == 1 {
+                        log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "swap_refused", "what": "pre-check", "cost_bps": est,
+                                   "max_bps": self.cfg.max_swap_cost_bps, "live": self.execute}));
+                    }
+                    self.wait_for_swap(&msg, true);
+                    return Ok(());
+                }
+                // out of range they earn nothing as they are: withdrawn all the same, and the deploy
+                // swaps what fits the limit and puts the rest one-sided (or waits)
+                self.say_warn(format!("  the ratio swap after the withdrawal would cost about {est:.2} bp > max {} bp; the positions are out of range, so they are withdrawn anyway",
+                                      self.cfg.max_swap_cost_bps));
+            }
+        }
         self.burn_all(&burns)?;
         if adds.is_empty() {
             self.say("  nothing to deposit; withdrawn tokens stay in the wallet");
             return Ok(());
         }
         self.deploy(&Target { ranges: adds, swap: target.swap }, budget0)
+    }
+
+    /// Before anything is withdrawn: what the deploy's ratio swap would cost with the burns' tokens in
+    /// the wallet. The quote is taken now, while our own liquidity may carry part of its route, and
+    /// the burns take that liquidity away: the cost is scaled by 1 / (1 - share), the share of the
+    /// pool's active liquidity they remove (a swap's price impact in the pool grows so). The pool's fee
+    /// is scaled with it, which only errs on the safe side. None: within the limit (or no swap needed);
+    /// else the estimated cost and whether any of the burns is in range (earning).
+    fn swap_precheck(&mut self, burns: &[(i64, i64, i128)], adds: &[(i64, i64, f64)], budget0: f64) -> Res<Option<(f64, bool)>> {
+        let (sp, tick, _, p) = self.price()?;
+        let (mut x, mut y) = (self.bal(&self.t0)?.max(0) as f64, self.bal(&self.t1)?.max(0) as f64);
+        let (mut b0, mut b1, mut leaving) = (0.0, 0.0, 0i128);
+        for (tl, tu, liq) in burns {
+            let (a0, a1) = amounts_at(&sp, *tl, *tu, &big(*liq));
+            (b0, b1) = (b0 + to_f64(&a0), b1 + to_f64(&a1));
+            if *tl <= tick && tick < *tu {
+                leaving += liq;
+            }
+        }
+        (x, y) = (x + b0, y + b1);
+        // what the deploy may use: the budget less what stays deployed
+        let room = budget0 - (self.deployed_value()? - self.value0(b0, b1, p));
+        let have = self.value0(x, y, p);
+        if have <= 0.0 || room <= 0.0 {
+            return Ok(None);
+        }
+        let k = (room / have).min(1.0);
+        (x, y) = (x * k, y * k);
+        let ws: f64 = adds.iter().map(|a| a.2).sum::<f64>().max(1e-300);
+        let ranges: Vec<(i64, i64, f64)> = adds.iter().map(|(a, b, w)| (*a, *b, w / ws)).collect();
+        let f = self.need0_fraction(&ranges, &sp, p);
+        let diff0 = f * (x + y / p) - x;
+        if diff0.abs() / self.unit <= self.cfg.min_swap_value {
+            return Ok(None);
+        }
+        let zero_for_one = diff0 < 0.0;
+        let (tin, tout) = if zero_for_one { (self.t0.clone(), self.t1.clone()) } else { (self.t1.clone(), self.t0.clone()) };
+        let amount_in = (if zero_for_one { -diff0 } else { diff0 * p }) as i128;
+        let fair = if zero_for_one { amount_in as f64 * p } else { amount_in as f64 / p };
+        let (_, _, cost) = self.quote_cost(&tin, &tout, amount_in, fair)?;
+        let active = to_f64(&chain::pool_liquidity(self.cid, &self.cfg.pool)?);
+        let share = if active > 0.0 { (leaving as f64 / active).clamp(0.0, 1.0) } else { 0.0 };
+        let est = precheck_cost(cost, share);
+        let max = self.cfg.max_swap_cost_bps;
+        self.say(format!("  pre-check: the ratio swap after the withdrawal ({} in) quotes {cost:.2} bp now; {:.0}% of the pool's active liquidity leaves with the withdrawal: about {est:.2} bp then (max {max} bp)",
+                         commas(diff0.abs() / self.unit), share * 100.0));
+        if est <= max {
+            self.clear_refusal();
+            return Ok(None);
+        }
+        Ok(Some((est, leaving > 0)))
     }
 
     pub fn burn_all(&mut self, positions: &[(i64, i64, i128)]) -> Res<()> {
@@ -954,10 +1081,26 @@ impl Executor {
         let thr = budget0 * self.settings["idle_redeploy_pct"].as_f64().unwrap_or(2.0) / 100.0;
         let mut minted_any = false;
         for rnd in 0..2 {
+            let mut swapped = RatioSwap::Done;
             if target.swap {
                 let r = ranges.clone();
-                if let Err(e) = self.retry("ratio swap", |s| s.ratio_swap(&r, budget0)) {
-                    self.say_warn(format!("  swap skipped: {e}; minting with the balances on hand"));
+                match self.retry("ratio swap", |s| s.ratio_swap(&r, budget0)) {
+                    Ok(o) => swapped = o,
+                    Err(e) => self.say_warn(format!("  swap skipped: {e}; minting with the balances on hand")),
+                }
+            }
+            // the ratio swap was refused, whole or in part: the balances are off the ranges' mix. What
+            // they cannot pair goes one-sided into the ranges' side of the price that holds it alone;
+            // with no room there, a deposit that takes too little of the money is not made at all
+            let offside = if swapped == RatioSwap::Done { None } else { Some(self.offside(&ranges, budget0)?) };
+            if let Some(o) = &offside {
+                let floor = self.settings["min_deploy_share_pct"].as_f64().unwrap_or(50.0) / 100.0;
+                if o.range.is_none() && o.main < floor {
+                    let msg = format!("the balances fit only {:.0}% of the usable value into the ranges without the swap (< {:.0}%), and the ranges have no room beside the price for the rest",
+                                      o.main * 100.0, floor * 100.0);
+                    self.say_warn(format!("  nothing deposited: {msg}; the tokens wait for a swap within the limit"));
+                    self.wait_for_swap(&msg, false);
+                    break;
                 }
             }
             for i in 0..ranges.len() {
@@ -973,6 +1116,16 @@ impl Executor {
                     Err(e) => self.say_err(format!("  mint [{tl},{tu}) gave up: {e}; tokens stay idle for the next pass")),
                 }
             }
+            if let Some(o) = offside {
+                if let Some((tl, tu)) = o.range {
+                    if self.mint_one_sided(tl, tu, o.token0, budget0)? {
+                        minted_any = true;
+                        UNMINTED_SWAP.lock().unwrap().get_or_insert_with(HashMap::new).remove(&unminted_key(self.cid, &self.cfg.pool));
+                    }
+                }
+                // another round would quote the same refused swap again
+                break;
+            }
             if !self.execute {
                 break;
             }
@@ -984,7 +1137,7 @@ impl Executor {
             }
             self.say(format!("  {} usable left over (> {}): top-up round {}", commas(left), commas(thr), rnd + 2));
         }
-        if !minted_any {
+        if !minted_any && self.awaiting.is_none() {
             self.say_warn("  nothing minted this pass; tokens are idle and the next pass will redeploy them");
         }
         let (t0, t1) = (self.t0.clone(), self.t1.clone());
@@ -999,7 +1152,58 @@ impl Executor {
         ranges.iter().map(|(tl, tu, wi)| wi * mint_mix(sp, &sqrt_ratio_at_tick(*tl), &sqrt_ratio_at_tick(*tu), p)).sum()
     }
 
-    fn ratio_swap(&mut self, ranges: &[(i64, i64, f64)], budget0: f64) -> Res<()> {
+    /// The balances against the ranges' mix after a refused ratio swap: the share of the usable value
+    /// the ranges take as it is, which token is left over, and where it can go without a swap.
+    fn offside(&self, ranges: &[(i64, i64, f64)], budget0: f64) -> Res<Offside> {
+        let (sp, tick, _, p) = self.price()?;
+        let (x, y) = self.usable(budget0, p)?;
+        let (v0, v1) = (x as f64, y as f64 / p);
+        let f = self.need0_fraction(ranges, &sp, p);
+        let token0 = v0 > f * (v0 + v1);
+        let lo = ranges.iter().map(|r| r.0).min().unwrap_or(tick);
+        let hi = ranges.iter().map(|r| r.1).max().unwrap_or(tick);
+        Ok(Offside { main: deployable_share(v0, v1, f), token0, range: one_sided_range(tick, self.spacing, lo, hi, token0) })
+    }
+
+    /// The token the ranges could not pair (token0 when `token0`), deposited alone into [tl, tu) on
+    /// its side of the price. Whether anything was minted.
+    fn mint_one_sided(&mut self, tl: i64, tu: i64, token0: bool, budget0: f64) -> Res<bool> {
+        let (_, _, _, p) = self.price()?;
+        let (x, y) = self.usable(budget0, p)?;
+        let (x, y) = if token0 { (x, 0) } else { (0, y) };
+        let v = self.value0(x as f64, y as f64, p);
+        if v < self.cfg.min_swap_value.max(1e-9) {
+            return Ok(false);
+        }
+        self.say(format!("  g. the {} left over, {}, goes into [{tl},{tu}) on its side of the price: no swap, it converts as the price crosses it",
+                         if token0 { "token0" } else { "token1" }, commas(v)));
+        match self.retry(&format!("one-sided mint [{tl},{tu})"), |s| s.mint_exact(tl, tu, x, y, "g. one-sided")) {
+            Ok(_) => {
+                if !self.execute {
+                    self.v_deployed += v;
+                }
+                Ok(true)
+            }
+            Err(StepErr::Abort(m)) => Err(StepErr::Abort(m)),
+            Err(e) => {
+                self.say_err(format!("  one-sided mint [{tl},{tu}) gave up: {e}; tokens stay idle for the next pass"));
+                Ok(false)
+            }
+        }
+    }
+
+    /// The pass leaves the pool's money waiting for a swap within its limit: the run's summary says
+    /// so (mode "await_swap"). `kept`: the withdrawal was held back, the positions are as they were.
+    fn wait_for_swap(&mut self, why: &str, kept: bool) {
+        let r = self.refusal();
+        self.awaiting = Some(json!({"why": why, "kept_positions": kept, "cost_bps": r.map(|r| r.cost_bps), "refusals": r.map(|r| r.n),
+                                    "max_bps": self.cfg.max_swap_cost_bps}));
+        if kept {
+            self.was_blocked = true;
+        }
+    }
+
+    fn ratio_swap(&mut self, ranges: &[(i64, i64, f64)], budget0: f64) -> Res<RatioSwap> {
         let (sp, _, _, p) = self.price()?;
         let (x, y) = self.usable(budget0, p)?;
         let (x, y) = (x as f64, y as f64);
@@ -1007,7 +1211,15 @@ impl Executor {
         let diff0 = f * (x + y / p) - x;
         if diff0.abs() / self.unit <= self.cfg.min_swap_value {
             self.say("  e. ratio already close enough; no swap");
-            return Ok(());
+            self.clear_refusal();
+            return Ok(RatioSwap::Done);
+        }
+        let wait = refusal_wait(self.refusal(), now());
+        if wait > 0 {
+            let r = self.refusal().unwrap();
+            self.say_warn(format!("  e. ratio swap not quoted: the last one was refused ({:.2} bp > max {} bp, {} in a row); next quote in {} min",
+                                  r.cost_bps, self.cfg.max_swap_cost_bps, r.n, wait.div_ceil(60)));
+            return Ok(RatioSwap::Refused);
         }
         let zero_for_one = diff0 < 0.0;
         let key = unminted_key(self.cid, &self.cfg.pool);
@@ -1016,7 +1228,7 @@ impl Executor {
             let at = earlier.map(|x| x.0).unwrap_or(0);
             self.say_warn(format!("  e. ratio swap skipped: it would undo the swap of {} min ago, after which nothing was minted; minting with the balances on hand",
                                   now().saturating_sub(at) / 60));
-            return Ok(());
+            return Ok(RatioSwap::Done);
         }
         let (tin, tout) = if zero_for_one { (self.t0.clone(), self.t1.clone()) } else { (self.t1.clone(), self.t0.clone()) };
         let mut amount_in = if zero_for_one { -diff0 } else { diff0 * p };
@@ -1031,20 +1243,103 @@ impl Executor {
             };
             amount_in = s.max(0.0);
         }
-        let amount_in = ((amount_in.floor() * 0.999) as i128).min(self.bal(&tin)?.max(0));
+        let mut amount_in = ((amount_in.floor() * 0.999) as i128).min(self.bal(&tin)?.max(0));
         if amount_in <= 0 {
-            return Ok(());
+            return Ok(RatioSwap::Done);
         }
-        let fair = if zero_for_one { amount_in as f64 * p } else { amount_in as f64 / p };
+        let fair_of = |a: i128| if zero_for_one { a as f64 * p } else { a as f64 / p };
+        let value0_of = |a: i128| if zero_for_one { a as f64 } else { a as f64 / p };
         let max_cost = self.cfg.max_swap_cost_bps;
-        self.swap(&tin, &tout, amount_in, fair, max_cost, "e. ratio swap")?;
+        // the whole swap over the limit: the largest part within it, when that is worth a swap (the
+        // rest of the mix is left to the deploy: a one-sided deposit, or waiting)
+        let (_, _, whole) = self.quote_cost(&tin, &tout, amount_in, fair_of(amount_in))?;
+        let mut partial = false;
+        if whole > max_cost {
+            let part = self.affordable_part(&tin, &tout, amount_in, &fair_of, max_cost)?;
+            if value0_of(part) / self.unit < self.cfg.min_swap_value.max(1e-9) {
+                self.say_warn(format!("  e. ratio swap refused: {} would cost {whole:.2} bp > max {max_cost} bp, and no part worth a swap fits the limit",
+                                      commas(value0_of(amount_in) / self.unit)));
+                log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "swap_refused", "what": "e. ratio swap", "cost_bps": whole, "max_bps": max_cost,
+                           "token_in": prices::meta(self.cid, &tin)?.symbol, "amount_in": amount_in as f64 / 10f64.powi(din as i32), "live": self.execute}));
+                self.note_refusal(whole);
+                return Ok(RatioSwap::Refused);
+            }
+            self.say(format!("  e. ratio swap: the whole {} would cost {whole:.2} bp > max {max_cost} bp; swapping the {:.0}% that fits",
+                             commas(value0_of(amount_in) / self.unit), part as f64 / amount_in as f64 * 100.0));
+            (amount_in, partial) = (part, true);
+        }
+        match self.swap(&tin, &tout, amount_in, fair_of(amount_in), max_cost, "e. ratio swap") {
+            Ok(_) => {}
+            Err(StepErr::Refused(m)) => {
+                // the quote moved over the limit between the sizing and the swap
+                self.say_warn(format!("  e. ratio swap refused: {m}"));
+                let c = self.last_refused_bps;
+                self.note_refusal(c);
+                return Ok(RatioSwap::Refused);
+            }
+            Err(e) => return Err(e),
+        }
         // pending until a mint follows (deploy clears it)
         UNMINTED_SWAP.lock().unwrap().get_or_insert_with(HashMap::new).insert(key, (now(), zero_for_one, f));
-        Ok(())
+        if partial {
+            return Ok(RatioSwap::Partial);
+        }
+        self.clear_refusal();
+        Ok(RatioSwap::Done)
     }
 
-    /// Quote, cost check, exact approval, build, simulate, send. Returns the amount received.
-    pub fn swap(&mut self, tin: &str, tout: &str, amount_in: i128, fair_out: f64, max_cost_bps: f64, label: &str) -> Res<i128> {
+    /// The largest part of `amount_in` whose swap costs at most `max_cost` bp: a swap's cost grows
+    /// with its size, so a bisection over quotes (six: within 1/64 of the whole). Quotes send nothing.
+    fn affordable_part(&self, tin: &str, tout: &str, amount_in: i128, fair_of: &dyn Fn(i128) -> f64, max_cost: f64) -> Res<i128> {
+        let (mut lo, mut hi) = (0i128, amount_in);
+        for _ in 0..6 {
+            let mid = lo + (hi - lo) / 2;
+            if mid <= 0 {
+                break;
+            }
+            let (_, _, c) = self.quote_cost(tin, tout, mid, fair_of(mid))?;
+            if c <= max_cost {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        Ok(lo)
+    }
+
+    /// The pool's ratio swaps refused for their cost, in a row (live and dry runs apart).
+    fn refusal(&self) -> Option<Refusal> {
+        SWAP_REFUSED.lock().unwrap().get_or_insert_with(HashMap::new).get(&refusal_key(self.cid, &self.cfg.pool, self.execute)).copied()
+    }
+
+    /// A ratio swap refused for its cost (`cost_bps`): one more in a row. The first of a run is an
+    /// alert, live: the pool's money waits until a swap fits the limit (or the limit is raised).
+    fn note_refusal(&mut self, cost_bps: f64) -> Refusal {
+        let key = refusal_key(self.cid, &self.cfg.pool, self.execute);
+        let r = {
+            let mut g = SWAP_REFUSED.lock().unwrap();
+            let m = g.get_or_insert_with(HashMap::new);
+            let n = m.get(&key).map(|r| r.n + 1).unwrap_or(1);
+            let r = Refusal { at: now(), n, cost_bps };
+            m.insert(key, r);
+            r
+        };
+        if r.n == 1 && self.execute {
+            crate::agent::notify::alert("normal", &format!("{}: swap over the cost limit", self.cfg.name),
+                &format!("The ratio swap would cost {cost_bps:.2} bp, over the pool's max of {} bp. Until a quote fits (or the limit is raised) the pool deposits what it can without the swap, or waits.",
+                         self.cfg.max_swap_cost_bps));
+        }
+        r
+    }
+
+    fn clear_refusal(&mut self) {
+        SWAP_REFUSED.lock().unwrap().get_or_insert_with(HashMap::new).remove(&refusal_key(self.cid, &self.cfg.pool, self.execute));
+    }
+
+    /// The aggregator's best route for `amount_in` and what it costs (bp below `fair_out`, or below
+    /// the route's own USD values when no fair amount is given): (route, amount out, cost). A quote
+    /// sends nothing.
+    fn quote_cost(&self, tin: &str, tout: &str, amount_in: i128, fair_out: f64) -> Res<(Value, f64, f64)> {
         let (mi, mo) = (prices::meta(self.cid, tin)?, prices::meta(self.cid, tout)?);
         let q = prices::quote(self.cid, tin, tout, &amount_in.to_string(), mi.decimals, mo.decimals)?;
         let best = q["best"].clone();
@@ -1058,6 +1353,13 @@ impl Executor {
             let (iu, ou) = (prices::fnum(&best["amountInUsd"]), prices::fnum(&best["amountOutUsd"]));
             if iu > 0.0 { (1.0 - ou / iu) * 1e4 } else { 1e9 }
         };
+        Ok((best, out, cost))
+    }
+
+    /// Quote, cost check, exact approval, build, simulate, send. Returns the amount received.
+    pub fn swap(&mut self, tin: &str, tout: &str, amount_in: i128, fair_out: f64, max_cost_bps: f64, label: &str) -> Res<i128> {
+        let (mi, mo) = (prices::meta(self.cid, tin)?, prices::meta(self.cid, tout)?);
+        let (best, out, cost) = self.quote_cost(tin, tout, amount_in, fair_out)?;
         let mut venues: Vec<String> = vec![];
         for leg in best["legs"].as_array().cloned().unwrap_or_default() {
             for st in leg["steps"].as_array().cloned().unwrap_or_default() {
@@ -1074,7 +1376,10 @@ impl Executor {
         self.say(format!("  {label}: {:.6} {} -> {:.6} {} via {} ({}), cost {cost:+.2} bp", amount_in as f64 / 10f64.powi(mi.decimals as i32), mi.symbol,
                          out / 10f64.powi(mo.decimals as i32), mo.symbol, best["aggregatorId"].as_str().unwrap_or("?"), venues.join(", ")));
         if cost > max_cost_bps {
-            return Err(StepErr::Fail(format!("swap would cost {cost:.2} bp > max {max_cost_bps} bp")));
+            self.last_refused_bps = cost;
+            log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "swap_refused", "what": label, "cost_bps": cost, "max_bps": max_cost_bps,
+                       "token_in": mi.symbol, "amount_in": amount_in as f64 / 10f64.powi(mi.decimals as i32), "live": self.execute}));
+            return Err(StepErr::Refused(format!("swap would cost {cost:.2} bp > max {max_cost_bps} bp")));
         }
         let spender = best["spender"].as_str().unwrap_or("").to_lowercase();
         let quoted_router = best["routerAddress"].as_str().unwrap_or("").to_lowercase();
@@ -1222,7 +1527,7 @@ impl Executor {
     }
 
     /// Mint exactly `x` token0 + `y` token1 (raw, at most) into [tl, tu); returns the liquidity minted.
-    fn mint_exact(&mut self, tl: i64, tu: i64, x: i128, y: i128) -> Res<i128> {
+    fn mint_exact(&mut self, tl: i64, tu: i64, x: i128, y: i128, label: &str) -> Res<i128> {
         let (sa, sb) = (sqrt_ratio_at_tick(tl), sqrt_ratio_at_tick(tu));
         let (mut x, mut y) = (x, y);
         let mut shrink = 1.0;
@@ -1245,7 +1550,7 @@ impl Executor {
                 "mint(address,int24,int24,uint128,uint256,uint256,uint256)",
                 &[addr(&self.wallet), chain::int(tl), chain::int(tu), u(big(liq)), u(big(b.min0)), u(big(b.min1)), u(now() + DEADLINE_S)],
             );
-            self.say(format!("  park: mint [{tl},{tu}) liquidity {liq} uses {} t0 + {} t1 (floors {floor_bps} bp of price)", self.fmt0(m0 as f64), self.fmt1(m1 as f64)));
+            self.say(format!("  {label}: mint [{tl},{tu}) liquidity {liq} uses {} t0 + {} t1 (floors {floor_bps} bp of price)", self.fmt0(m0 as f64), self.fmt1(m1 as f64)));
             let pool = self.cfg.pool.clone();
             let (h0, h1) = (small(&chain::erc20_balance(self.cid, &t0, &self.wallet)?), small(&chain::erc20_balance(self.cid, &t1, &self.wallet)?));
             let live = h0 >= b.max0
@@ -1609,7 +1914,7 @@ impl Executor {
             }
             let keep = amount - give;
             let (x, y) = if is0 { (keep, got) } else { (got, keep) };
-            match pk.retry("park mint", |s| s.mint_exact(tl, tu, x, y)) {
+            match pk.retry("park mint", |s| s.mint_exact(tl, tu, x, y, "park")) {
                 Ok(liq) => Ok((tl, tu, liq)),
                 Err(e) => {
                     // undo the ratio swap; if that fails too, the next cycle's reconcile does it
@@ -2347,6 +2652,140 @@ fn swaps_back(earlier: Option<(u64, bool, f64)>, now: u64, zero_for_one: bool, n
 
 fn unminted_key(cid: u64, pool: &str) -> (u64, String) {
     (cid, pool.to_lowercase())
+}
+
+struct Offside {
+    /// the share of the usable value the ranges take with the balances as they are
+    main: f64,
+    /// the leftover token is token0
+    token0: bool,
+    /// where the leftover can go alone (one_sided_range)
+    range: Option<(i64, i64)>,
+}
+
+/// A swap's cost quoted now, after `share` of the pool's active liquidity leaves: its price impact in
+/// the pool grows as 1 / (1 - share), at most 20 times (a pool left nearly empty is as good as none).
+/// A quote at or better than the fair price stays as it is.
+fn precheck_cost(cost_bps: f64, share: f64) -> f64 {
+    if cost_bps <= 0.0 {
+        return cost_bps;
+    }
+    cost_bps / (1.0 - share.clamp(0.0, 1.0)).max(0.05)
+}
+
+/// What a ratio swap did: the whole swap (or none needed), the part of it within the cost limit, or
+/// nothing because even a part worth a swap costs more than the limit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RatioSwap {
+    Done,
+    Partial,
+    Refused,
+}
+
+/// Ratio swaps refused for their cost, per (chain, pool, live): when the last was, how many in a row,
+/// and what it would have cost. A top-up waits out a growing backoff before it quotes again, instead
+/// of minting the little the balances on hand fit every cycle. In memory: a restart starts afresh.
+static SWAP_REFUSED: std::sync::Mutex<Option<HashMap<(u64, String, bool), Refusal>>> = std::sync::Mutex::new(None);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Refusal {
+    at: u64,
+    n: u32,
+    cost_bps: f64,
+}
+
+/// How long a top-up waits after the n-th refusal in a row.
+const REFUSAL_BACKOFF_S: [u64; 4] = [300, 900, 3600, 4 * 3600];
+
+fn refusal_key(cid: u64, pool: &str, live: bool) -> (u64, String, bool) {
+    (cid, pool.to_lowercase(), live)
+}
+
+/// Seconds a top-up still waits after `r` (0: it may quote again).
+fn refusal_wait(r: Option<Refusal>, now: u64) -> u64 {
+    match r {
+        Some(r) => (r.at + REFUSAL_BACKOFF_S[(r.n.max(1) as usize - 1).min(REFUSAL_BACKOFF_S.len() - 1)]).saturating_sub(now),
+        None => 0,
+    }
+}
+
+/// The share of the value `v0` + `v1` (both in token0) that ranges wanting `f` of it in token0 take.
+fn deployable_share(v0: f64, v1: f64, f: f64) -> f64 {
+    let v = v0 + v1;
+    if v <= 0.0 {
+        return 0.0;
+    }
+    let by0 = if f > 1e-12 { v0 / f } else { f64::INFINITY };
+    let by1 = if f < 1.0 - 1e-12 { v1 / (1.0 - f) } else { f64::INFINITY };
+    (by0.min(by1) / v).min(1.0)
+}
+
+/// The part of [lo, hi) on the side of the price where it holds one token only: above the price's
+/// tick only token0 (`token0`), below it only token1. A deposit there needs no swap: the token waits
+/// in the strategy's own range as a range order, converted (and earning the fee) as the price
+/// crosses it. None when the range has no whole tick spacing on that side.
+fn one_sided_range(tick: i64, spacing: i64, lo: i64, hi: i64, token0: bool) -> Option<(i64, i64)> {
+    if token0 {
+        let a = ((tick.div_euclid(spacing) + 1) * spacing).max(lo);
+        (a < hi).then_some((a, hi))
+    } else {
+        let b = (tick.div_euclid(spacing) * spacing).min(hi);
+        (lo < b).then_some((lo, b))
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    #[test]
+    fn a_pre_check_counts_the_liquidity_that_leaves() {
+        // a quote of 2 bp with half the pool's active liquidity ours: about 4 bp once it is withdrawn
+        assert!((precheck_cost(2.0, 0.5) - 4.0).abs() < 1e-12);
+        assert_eq!(precheck_cost(2.0, 0.0), 2.0);
+        assert_eq!(precheck_cost(-0.5, 0.9), -0.5);
+        assert!((precheck_cost(1.0, 1.0) - 20.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_top_up_backs_off_further_after_each_refusal() {
+        let at = 1_000_000;
+        let r = |n| Some(Refusal { at, n, cost_bps: 12.0 });
+        assert_eq!(refusal_wait(None, at), 0);
+        assert_eq!(refusal_wait(r(1), at + 60), 240);
+        assert_eq!(refusal_wait(r(2), at + 60), 840);
+        assert_eq!(refusal_wait(r(3), at), 3600);
+        // the backoff stops growing at 4 h
+        assert_eq!(refusal_wait(r(9), at), 4 * 3600);
+        assert_eq!(refusal_wait(r(1), at + 301), 0);
+    }
+
+    #[test]
+    fn lopsided_balances_fill_only_part_of_a_range() {
+        // the reported pass: ~$247 back, nearly all USDT (token1 here), into a range that wants 60%
+        // USDC: what fits is the USDC and the USDT to pair with it, a few percent
+        let s = deployable_share(3.35, 243.6, 0.6);
+        assert!((s * 246.95 - 5.58).abs() < 0.01, "{}", s * 246.95);
+        assert!((deployable_share(50.0, 50.0, 0.5) - 1.0).abs() < 1e-12);
+        assert_eq!(deployable_share(0.0, 100.0, 1.0), 0.0);
+        assert_eq!(deployable_share(0.0, 100.0, 0.0), 1.0);
+        assert_eq!(deployable_share(0.0, 0.0, 0.5), 0.0);
+    }
+
+    #[test]
+    fn the_excess_goes_to_the_side_of_the_range_that_holds_it_alone() {
+        // [-10, 10) at tick 3, spacing 1: token0 alone above the price's tick, token1 alone below it
+        assert_eq!(one_sided_range(3, 1, -10, 10, true), Some((4, 10)));
+        assert_eq!(one_sided_range(3, 1, -10, 10, false), Some((-10, 3)));
+        // spacing 5, tick -3: the spacing boundaries around it are -5 and 0
+        assert_eq!(one_sided_range(-3, 5, -20, 20, true), Some((0, 20)));
+        assert_eq!(one_sided_range(-3, 5, -20, 20, false), Some((-20, -5)));
+        // a one-spacing range around the price has no room on either side
+        assert_eq!(one_sided_range(12, 1, 12, 13, true), None);
+        assert_eq!(one_sided_range(12, 1, 12, 13, false), None);
+        // a range wholly above the price is token0's side as it is
+        assert_eq!(one_sided_range(3, 1, 8, 12, true), Some((8, 12)));
+    }
 }
 
 #[cfg(test)]

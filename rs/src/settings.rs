@@ -27,6 +27,10 @@ pub fn defaults() -> Value {
         "retries": {"attempts": 3, "backoff_s": 10},
         "idle_redeploy_pct": 2.0,
         "resize_tolerance_pct": 1.0,
+        // engine.rs: a deploy whose ratio swap is refused (over the pool's max swap cost) mints only
+        // when at least this % of the usable value goes in; top-ups have their own daily cap
+        "min_deploy_share_pct": 50.0,
+        "max_topups_per_day": 12,
         // parking.rs: tokens a strategy waits in earn in a whitelisted pegged pool meanwhile
         // (pools: [{chain_id, token, pool}]); each strategy opts in with "park": true
         "parking": {"enabled": false, "min_usd": 50.0, "range_pct": 0.5, "pools": []},
@@ -77,7 +81,7 @@ pub fn write_atomic(path: &std::path::Path, v: &Value) -> std::io::Result<()> {
 /// are in config/settings.json with the app's, as they always were; another wallet's are in its own
 /// config/settings.json, merged over the app's.
 pub const WALLET_KEYS: &[&str] = &["execute", "wallet", "claim", "sell_rewards", "funding_by_chain", "solid_lp", "parking",
-                                   "idle_redeploy_pct", "resize_tolerance_pct", "retries"];
+                                   "idle_redeploy_pct", "resize_tolerance_pct", "min_deploy_share_pct", "max_topups_per_day", "retries"];
 
 fn settings_raw() -> Value {
     let _g = LOCK.lock().unwrap();
@@ -338,6 +342,8 @@ const SETTING_RANGES: &[(&str, f64, f64)] = &[
     ("ui_port", 1024.0, 65535.0),
     ("idle_redeploy_pct", 0.0, 100.0),
     ("resize_tolerance_pct", 0.0, 100.0),
+    ("min_deploy_share_pct", 0.0, 100.0),
+    ("max_topups_per_day", 0.0, 1000.0),
     ("claim.every_days", 0.1, 365.0),
     ("sell_rewards.max_impact_pct", 0.0, 50.0),
     ("sell_rewards.min_value_usd", 0.0, 1e9),

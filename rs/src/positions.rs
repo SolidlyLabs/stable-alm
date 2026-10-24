@@ -511,7 +511,7 @@ fn events(wallet: &str, since: u64) -> Vec<Value> {
     for e in crate::engine::log_tail(4_000_000) {
         let ts = e["ts"].as_u64().unwrap_or(0);
         let k = e["kind"].as_str().unwrap_or("");
-        let keep = (k == "rebalance" && e["live"] == true) || k == "error" || k == "park" || k == "park_handover" || k == "capital" || k == "solid_lp";
+        let keep = (k == "rebalance" && e["live"] == true) || k == "error" || k == "park" || k == "park_handover" || k == "capital" || k == "solid_lp" || k == "swap_refused";
         if ts < since || !keep {
             continue;
         }
