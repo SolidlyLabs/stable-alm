@@ -74,7 +74,7 @@ try {
 
   $iscc = @((Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"), "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
   if (-not $iscc) { throw "Inno Setup 6 (ISCC.exe) not found" }
-  Run "the installer" { & $iscc /Q "/DAppVersion=$version" "/DExePath=$exe" (Join-Path $rs "installer\StableALM.iss") }
+  Run "the installer" { & $iscc /Q "/O$dist" "/DAppVersion=$version" "/DExePath=$exe" (Join-Path $rs "installer\StableALM.iss") }
 
   Run "signing" { & pwsh -NoProfile -File (Join-Path $PSScriptRoot "sign.ps1") -Files "$setup,$exe" -Key $Key -Signer $Signer -Out $dist }
   Test-Signed
