@@ -287,6 +287,9 @@ pub struct Executor {
     /// Transactions handed to the network in this pass (counted before broadcasting). A step that
     /// failed after broadcasting is never retried: its transaction may have gone through.
     broadcasts: usize,
+    /// Of those, approvals that went through: an approval only sets an allowance, and this run knows
+    /// the allowance it set (virt_allow), so a step that failed after one may run again.
+    repeatable: usize,
     /// a move of this run was blocked (spot check, cap, lock, gas): the agent does not take it as done
     was_blocked: bool,
     /// the pass's rebalance entry, logged with its first transaction: a pass that sends nothing
@@ -339,6 +342,7 @@ impl Executor {
             is_solid_lp: false,
             solid_pair: None,
             broadcasts: 0,
+            repeatable: 0,
             was_blocked: false,
             begun: None,
             last_refused_bps: 0.0,
@@ -479,12 +483,12 @@ impl Executor {
     pub fn retry<T>(&mut self, what: &str, mut f: impl FnMut(&mut Self) -> Res<T>) -> Res<T> {
         let mut last = String::new();
         for attempt in 1..=self.attempts {
-            let sent_before = self.broadcasts;
+            let sent_before = self.broadcasts - self.repeatable;
             match f(self) {
                 Ok(v) => return Ok(v),
                 Err(StepErr::Abort(m)) => return Err(StepErr::Abort(m)),
                 Err(StepErr::Refused(m)) => return Err(StepErr::Refused(m)),
-                Err(StepErr::Fail(e)) if self.broadcasts > sent_before => {
+                Err(StepErr::Fail(e)) if self.broadcasts - self.repeatable > sent_before => {
                     // A transaction of this step was broadcast: repeating the step could do it twice.
                     let msg = format!("{what}: failed after its transaction was sent ({e}); not retrying");
                     self.say_err(format!("  {msg}"));
@@ -777,8 +781,12 @@ impl Executor {
                 self.burn_all(&all)?;
                 if exit_to == crate::custom::ExitTo::Stable {
                     // both tokens sold for the chain's dollar stable, which waits as a funding token
-                    // (parked below) and buys the pair back on re-entry
-                    self.exit_to_stable(budget0)?;
+                    // (parked below) and buys the pair back on re-entry; what is left is sold on the
+                    // next cycles
+                    if self.exit_to_stable(budget0)? {
+                        let c = self.last_refused_bps;
+                        self.note_refusal(c);
+                    }
                 }
                 let into = match exit_to {
                     crate::custom::ExitTo::Token0 => Some((self.t1.clone(), self.t0.clone(), true)),
@@ -851,6 +859,12 @@ impl Executor {
                     summary["mode"] = json!(if st.exited { "exited" } else { "keep" });
                     self.say(format!("  {label}: {reason}"));
                     log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "keep", "tick": tick}));
+                    // exited to the stable (side 2) with some of the pair still held: sold now
+                    if st.exited && st.exit_side == 2 {
+                        if let Err(e) = self.finish_exit_to_stable(m, tick, budget0, p) {
+                            self.say_warn(format!("  finishing the exit to stable failed: {e}; retried next cycle"));
+                        }
+                    }
                     // what it holds and does not use waits parked until a move needs it
                     let side = if !st.exited || st.exit_side == 0 || st.exit_side == 2 {
                         crate::parking::Side::Both
@@ -1326,7 +1340,7 @@ impl Executor {
         };
         if r.n == 1 && self.execute {
             crate::agent::notify::alert("normal", &format!("{}: swap over the cost limit", self.cfg.name),
-                &format!("The ratio swap would cost {cost_bps:.2} bp, over the pool's max of {} bp. Until a quote fits (or the limit is raised) the pool deposits what it can without the swap, or waits.",
+                &format!("A swap it needs would cost {cost_bps:.2} bp, over the pool's max of {} bp. Until a quote fits (or the limit is raised) the pool deposits what it can without the swap, or waits.",
                          self.cfg.max_swap_cost_bps));
         }
         r
@@ -1582,20 +1596,22 @@ impl Executor {
     /// An exit to the dollar stable: this pool's tokens (up to its budget) sold for the chain's USD
     /// stable through the aggregator. The stable must be a funding token on the chain, or re-entry
     /// could not buy the pair back: then the tokens stay as they are.
-    fn exit_to_stable(&mut self, budget0: f64) -> Res<()> {
+    /// Whether a swap was refused for its cost (the rest is left as it is, and a later cycle sells it).
+    fn exit_to_stable(&mut self, budget0: f64) -> Res<bool> {
         let usd_tok = crate::chains::get(self.cid).usd.to_lowercase();
         if usd_tok.is_empty() || !crate::settings::funding_tokens(&self.settings, self.cid).iter().any(|t| t.eq_ignore_ascii_case(&usd_tok)) {
             self.say_warn("  exit to stable: the chain's USD stable is not a funding token here (Settings, Funding tokens), so re-entry could not buy the pair back: the tokens stay as they are");
-            return Ok(());
+            return Ok(false);
         }
         if usd_tok == self.t0 || usd_tok == self.t1 {
             self.say_warn("  exit to stable: the pool holds the stable itself (use all token0 or all token1): the tokens stay as they are");
-            return Ok(());
+            return Ok(false);
         }
         let (_, _, _, p) = self.price()?;
         let um = prices::meta(self.cid, &usd_tok)?;
         let uu = prices::usd(self.cid, &usd_tok)?;
         let mut left0 = budget0;
+        let mut refused = false;
         for tok in [self.t0.clone(), self.t1.clone()] {
             let is0 = tok == self.t0;
             let cap = self.budget_raw(&tok, left0.max(0.0), p);
@@ -1612,9 +1628,40 @@ impl Executor {
             let fair = usd / uu * 10f64.powi(um.decimals as i32);
             let mc = self.cfg.max_swap_cost_bps;
             let (a, b) = (tok.clone(), usd_tok.clone());
-            if let Err(e) = self.retry("exit swap", |s| s.swap(&a, &b, amt, fair, mc, "exit swap to stable")) {
-                self.say_warn(format!("  exit swap {} -> {} skipped: {e}; kept as it is", m.symbol, um.symbol));
+            match self.retry("exit swap", |s| s.swap(&a, &b, amt, fair, mc, "exit swap to stable")) {
+                Ok(_) => {}
+                Err(e) => {
+                    refused |= matches!(e, StepErr::Refused(_));
+                    self.say_warn(format!("  exit swap {} -> {} skipped: {e}; kept as it is, sold on a later cycle", m.symbol, um.symbol));
+                }
             }
+        }
+        Ok(refused)
+    }
+
+    /// An exit to the stable that did not finish (a swap failed or was refused): the pair's tokens
+    /// still held, worth more than the pool's minimum swap, are sold for the stable now, as the exit
+    /// asked. After a refusal it waits out the same backoff as a top-up.
+    fn finish_exit_to_stable(&mut self, m: &Market, tick: i64, budget0: f64, p: f64) -> Res<()> {
+        let left = self.value0(self.bal(&self.t0)?.max(0) as f64, self.bal(&self.t1)?.max(0) as f64, p).min(budget0);
+        if left <= self.cfg.min_swap_value.max(1e-9) {
+            return Ok(());
+        }
+        let wait = refusal_wait(self.refusal(), now());
+        if wait > 0 {
+            self.say(format!("  exit to stable unfinished: {} of the pair left; the last swap was refused, next try in {} min", commas(left), wait.div_ceil(60)));
+            return Ok(());
+        }
+        self.say(format!("  exit to stable unfinished: {} of the pair is still held; selling it for the stable", commas(left)));
+        if self.blocked(m, tick, true)? {
+            return Ok(());
+        }
+        self.begin("exit", None);
+        if self.exit_to_stable(budget0)? {
+            let c = self.last_refused_bps;
+            self.note_refusal(c);
+        } else {
+            self.clear_refusal();
         }
         Ok(())
     }
@@ -2346,6 +2393,7 @@ impl Executor {
             let what = format!("approve0 {}", m.symbol);
             let tk = token.to_string();
             self.retry("approve reset", |s| s.tx(&tk, &d, &what, true).map_err(StepErr::from))?;
+            self.approved();
         }
         let d = if own {
             self.say(format!("  approve {} -> {} (this pool): unlimited", m.symbol, &spender[..10]));
@@ -2357,8 +2405,16 @@ impl Executor {
         let what = format!("approve {}", m.symbol);
         let tk = token.to_string();
         self.retry("approve", |s| s.tx(&tk, &d, &what, true).map_err(StepErr::from))?;
+        self.approved();
         self.virt_allow.insert(key, if own { i128::MAX } else { amount });
         Ok(())
+    }
+
+    /// An approval went through (sent live): it does not keep the step around it from a retry.
+    fn approved(&mut self) {
+        if self.execute {
+            self.repeatable += 1;
+        }
     }
 
     /// This run's own spend of an allowance (a mint, a swap): what is known of it goes down by `amount`.
