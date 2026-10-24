@@ -760,7 +760,7 @@ function renderOverview(acct, w) {
         <span>Gas balance</span><span class="${lowGas ? "bad" : ""}">${c.gas == null ? "–" : fmt(c.gas, 5) + " " + esc(c.gasSym)}</span>
         <i class="sep"></i>
         <span>Earned</span><span>${usd(c.earned, 2)}</span><span title="claimable now and pending for the next claim snapshot">· unclaimed</span><span>${usd((c.claimable || 0) + (c.pending || 0), 2)}</span>
-        <span>Gas</span><span>${cost(c.gasUsd)}</span><span title="slippage and price paid on rebalancing swaps; + means the swaps came out ahead">Swaps</span><span>${cost(c.swapCost)}</span>
+        <span>Gas</span><span>${cost(c.gasUsd)}</span><span title="fees and slippage paid on swaps, each against a small quote of the same pair taken just before it (never a gain)">Swaps</span><span>${cost(c.swapCost)}</span>
         <span title="impermanent loss: what the positions returned or hold now vs holding the deposited tokens">IL</span><span>${cost(c.il)}</span>
         <span><b style="color:var(--fg)">Profit</b></span><span><b>${c.profit == null ? "–" : sgn(c.profit, 2)}</b></span></div>
       ${lowGas ? `<div class="bad small" style="margin-top:8px">Gas below ${fmt(c.minGas, 4)} ${esc(c.gasSym)}: actions on this chain are blocked.</div>` : ""}</div>`;

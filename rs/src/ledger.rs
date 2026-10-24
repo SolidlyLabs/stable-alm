@@ -6,7 +6,10 @@
 //!   - gas: gasUsed x effectiveGasPrice, plus the L1 data fee on OP-stack chains;
 //!   - token movements in and out of the wallet (ERC-20 Transfer logs).
 //! Per chain: earned = what the claims paid in + what is claimable now + what is pending for the
-//! next claim snapshot; swap cost = value given away by swaps (out minus in); IL = impermanent loss,
+//! next claim snapshot; swap cost = value given away by swaps, each against the small reference quote
+//! of the same pair logged with it (older swaps: out minus in at the pool's price or the tokens' USD
+//! prices), and never below zero: a swap pays fees, so a "gain" is the reference being off the
+//! market, not the swap; IL = impermanent loss,
 //! what the positions returned (or hold now) minus what the deposited tokens would be worth if
 //! held, from the wallet's Mint/Burn history since the app's first transaction on the chain;
 //! profit = earned - gas - swap cost - IL. Tokens are valued at their price
@@ -84,7 +87,7 @@ fn sync(wallet: &str) -> Map<String, Value> {
         }
         let Some(h) = e["hash"].as_str().map(|s| s.to_lowercase()) else { continue };
         if let Some(d) = cache.get_mut(&h) {
-            for k in ["ts", "block", "pool"] {
+            for k in ["ts", "block", "pool", "ref"] {
                 if d.get(k).map(|v| v.is_null()).unwrap_or(true) && !e[k].is_null() {
                     d[k] = e[k].clone();
                     changed = true;
@@ -93,7 +96,7 @@ fn sync(wallet: &str) -> Map<String, Value> {
             continue;
         }
         let cid = e["chain_id"].as_u64().unwrap_or(crate::chains::BASE);
-        todo.entry(cid).or_default().push((h, e["what"].as_str().unwrap_or("").to_string(), json!({"ts": e["ts"], "block": e["block"], "pool": e["pool"]})));
+        todo.entry(cid).or_default().push((h, e["what"].as_str().unwrap_or("").to_string(), json!({"ts": e["ts"], "block": e["block"], "pool": e["pool"], "ref": e["ref"]})));
     }
     for (cid, txs) in todo {
         for part in txs.chunks(25) {
@@ -105,7 +108,7 @@ fn sync(wallet: &str) -> Map<String, Value> {
                         let mut d = digest(&r, wallet);
                         d["chain_id"] = json!(cid);
                         d["what"] = json!(what);
-                        for k in ["ts", "block", "pool"] {
+                        for k in ["ts", "block", "pool", "ref"] {
                             d[k] = ts[k].clone();
                         }
                         cache.insert(h.clone(), d);
@@ -195,6 +198,57 @@ impl PoolPx {
     /// USD value of raw amounts at pool price `p`, with token1's USD price at `ts` setting the level.
     fn usd(&self, cid: u64, hist: &HashMap<(u64, String), Vec<(i64, f64)>>, a0: f64, a1: f64, p: f64, ts: Option<i64>) -> Option<f64> {
         Some((a0 / self.u0 * p + a1 / self.u1) * price_at(hist, cid, &self.t1, ts)?)
+    }
+}
+
+/// A swap's cost (USD) against the reference quote logged with it (`r`, engine `reference_quote`):
+/// what the tokens it gave would have bought at the small quote's rate, less what it got. None for a
+/// swap without one (sent before 0.7.5) or whose tokens the receipt does not show.
+fn ref_cost(r: &Value, moves: &Map<String, Value>, usd: &dyn Fn(&str, f64) -> Option<f64>) -> Option<f64> {
+    let (tin, tout) = (r["token_in"].as_str()?.to_lowercase(), r["token_out"].as_str()?.to_lowercase());
+    let small: f64 = r["in"].as_str()?.parse().ok()?;
+    let small_out = r["out"].as_f64()?;
+    let gave = -moves.get(&tin)?.as_f64()?;
+    let got = moves.get(&tout)?.as_f64()?;
+    if small <= 0.0 || gave <= 0.0 {
+        return None;
+    }
+    usd(&tout, small_out / small * gave - got)
+}
+
+/// What a swap costs in the totals: never less than nothing. Every swap pays fees, so one that seems
+/// to come out ahead was measured against a price off the market (a lagging USD price, a thin pool's
+/// last trade), not a swap that gained.
+fn swap_paid(cost_usd: f64) -> f64 {
+    if cost_usd.is_finite() { cost_usd.max(0.0) } else { 0.0 }
+}
+
+#[cfg(test)]
+mod swap_cost_tests {
+    use super::*;
+
+    #[test]
+    fn a_swap_is_measured_against_its_reference_quote() {
+        // the finished exit: 1.5430 WETH -> 3,596.50 USDC; the reference, 0.0154 WETH -> 35.92 USDC
+        // (2,332.47 a WETH): it would have bought 3,599.07, so it cost $2.57
+        let usdc = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+        let weth = "0x4200000000000000000000000000000000000006";
+        let r = json!({"token_in": weth, "token_out": usdc, "in": "15400000000000000", "out": 35_920_038.0});
+        let moves: Map<String, Value> = serde_json::from_value(json!({usdc: 3_596_499_369.0, weth: -1.5430253694104015e18})).unwrap();
+        let usd = |t: &str, raw: f64| (t == usdc).then_some(raw / 1e6);
+        let c = ref_cost(&r, &moves, &usd).unwrap();
+        assert!((c - 2.57).abs() < 0.01, "{c}");
+        // no reference (an older swap), or its tokens not moved: none
+        assert!(ref_cost(&Value::Null, &moves, &usd).is_none());
+        let other: Map<String, Value> = serde_json::from_value(json!({usdc: 10.0})).unwrap();
+        assert!(ref_cost(&r, &other, &usd).is_none());
+    }
+
+    #[test]
+    fn a_swap_never_counts_as_a_gain() {
+        assert_eq!(swap_paid(-10.45), 0.0);
+        assert_eq!(swap_paid(2.5), 2.5);
+        assert_eq!(swap_paid(f64::NAN), 0.0);
     }
 }
 
@@ -317,22 +371,25 @@ pub fn summary(wallet: &str, chains: &[u64]) -> Value {
                 claimed += val(true);
             } else if what.starts_with("swap") || what.starts_with("sell") || what.contains("swap") {
                 swaps += 1;
-                // A swap between the pool's own tokens is measured against the pool's mid price just
-                // before it: what the swap lost to fees and slippage. Other swaps (SOLID sales,
-                // funding) are valued at the tokens' USD prices of the time.
+                // Against the reference quote logged with the swap (`ref_cost`). An older swap between
+                // the pool's own tokens is measured against the pool's mid price just before it, other
+                // older swaps (SOLID sales, funding) at the tokens' USD prices of the time.
                 let pp = d["pool"].as_str().and_then(|a| px.get(&a.to_lowercase()));
                 let own = pp.filter(|pp| moves.keys().all(|t| *t == pp.t0 || *t == pp.t1));
                 let mid = own.and_then(|pp| d["block"].as_i64().and_then(|b| pp.before(b)).map(|p| (pp, p)));
-                if let Some((pp, p)) = mid {
+                let c = if let Some(c) = ref_cost(&d["ref"], &moves, &|t, raw| usd_of(&hist, cid, t, raw, ts)) {
+                    c
+                } else if let Some((pp, p)) = mid {
                     let m = |t: &str| moves.get(t).and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    swap_cost -= pp.usd(cid, &hist, m(&pp.t0), m(&pp.t1), p, ts).unwrap_or(0.0);
+                    -pp.usd(cid, &hist, m(&pp.t0), m(&pp.t1), p, ts).unwrap_or(0.0)
                 } else {
                     let (inn, out_) = (val(true), val(false));
                     if inn == 0.0 && out_ == 0.0 && !moves.is_empty() {
                         unpriced += 1;
                     }
-                    swap_cost += out_ - inn;
-                }
+                    out_ - inn
+                };
+                swap_cost += swap_paid(c);
             }
             if let Some(p) = d["pool"].as_str() {
                 let g_usd = (gas - gas0) * native_usd.unwrap_or(0.0);

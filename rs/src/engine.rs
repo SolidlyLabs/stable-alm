@@ -297,6 +297,8 @@ pub struct Executor {
     begun: Option<Value>,
     /// the cost (bp) of the last swap refused for it, for the refusal's record
     last_refused_bps: f64,
+    /// fields the next transaction's log entry carries (a swap's reference quote), taken by `tx`
+    tx_extra: Option<Value>,
     /// the pass left the pool's money waiting for a swap within its limit (summary mode "await_swap"):
     /// why, the cost, and whether the positions were kept as they are (the withdrawal held back)
     awaiting: Option<Value>,
@@ -346,6 +348,7 @@ impl Executor {
             was_blocked: false,
             begun: None,
             last_refused_bps: 0.0,
+            tx_extra: None,
             awaiting: None,
             cfg,
         })
@@ -519,6 +522,11 @@ impl Executor {
     /// Simulate, then send if executing. `live` = this step can be simulated on the current chain.
     pub fn tx(&mut self, to: &str, data: &str, what: &str, live: bool) -> Result<Value, TxError> {
         let mut entry = json!({"chain_id": self.cid, "pool": self.cfg.pool, "what": what, "to": to, "data": data});
+        if let Some(Value::Object(x)) = self.tx_extra.take() {
+            for (k, v) in x {
+                entry[k] = v;
+            }
+        }
         let mut gas = 0;
         if live || self.execute {
             gas = chain::simulate(self.cid, &self.wallet, to, data)?;
@@ -1370,9 +1378,33 @@ impl Executor {
         Ok((best, out, cost))
     }
 
+    /// A small quote of the same pair, taken just before a swap: the rate the market gives with next
+    /// to no price impact, from the same source at the same moment as the swap's own quote. (raw in,
+    /// raw out). About 1% of the swap, at least $20 of it; None when it cannot be had.
+    fn reference_quote(&self, tin: &str, tout: &str, amount_in: i128) -> Option<(i128, f64)> {
+        let m = prices::meta(self.cid, tin).ok()?;
+        let usd20 = prices::usd(self.cid, tin).ok().filter(|p| *p > 0.0).map(|p| (20.0 / p * 10f64.powi(m.decimals as i32)) as i128).unwrap_or(0);
+        let small = (amount_in / 100).max(usd20).min(amount_in);
+        if small <= 0 {
+            return None;
+        }
+        let (_, out, _) = self.quote_cost(tin, tout, small, 0.0).ok()?;
+        (out > 0.0).then_some((small, out))
+    }
+
     /// Quote, cost check, exact approval, build, simulate, send. Returns the amount received.
+    /// The cost of a swap between the pool's own two tokens is against `fair_out` (the pool's price:
+    /// what a deposit goes in at); any other swap's (out of the pair: an exit to the stable, funding,
+    /// a reward sale) against a reference quote of the same pair taken just before it, rather than two
+    /// separate USD prices, which disagree with the market by tens of basis points.
     pub fn swap(&mut self, tin: &str, tout: &str, amount_in: i128, fair_out: f64, max_cost_bps: f64, label: &str) -> Res<i128> {
         let (mi, mo) = (prices::meta(self.cid, tin)?, prices::meta(self.cid, tout)?);
+        let own = |t: &str| t.eq_ignore_ascii_case(&self.t0) || t.eq_ignore_ascii_case(&self.t1);
+        let reference = self.reference_quote(tin, tout, amount_in);
+        let fair_out = match reference {
+            Some((ri, ro)) if !(own(tin) && own(tout)) => ro / ri as f64 * amount_in as f64,
+            _ => fair_out,
+        };
         let (best, out, cost) = self.quote_cost(tin, tout, amount_in, fair_out)?;
         let mut venues: Vec<String> = vec![];
         for leg in best["legs"].as_array().cloned().unwrap_or_default() {
@@ -1424,6 +1456,8 @@ impl Executor {
                 None => self.say_warn("    the node cannot trace transfers; relying on the router allowlist and the receipt check"),
             }
         }
+        // the reference goes into the transaction's log entry: the ledger measures the swap's cost by it
+        self.tx_extra = reference.map(|(ri, ro)| json!({"ref": {"token_in": tin.to_lowercase(), "token_out": tout.to_lowercase(), "in": ri.to_string(), "out": ro}}));
         let entry = self.tx(&router, &calldata, &format!("swap via {}", best["aggregatorId"].as_str().unwrap_or("?")), live)?;
         if self.execute {
             // What arrived, from the receipt's transfers (no balance read that could fail after the
