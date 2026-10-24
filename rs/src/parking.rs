@@ -342,8 +342,10 @@ fn finite(x: f64) -> f64 {
 /// whitelisted pegged pools until a move needs it: out of its pool, the token it waits in (both,
 /// when it kept them as they are); in its pool, what its ranges left over; and the share of its
 /// budget it never drew from the funding tokens. All of it within the pool's budget (the wallet's
-/// tokens are shared with other pools), never into the pool itself, never twice for a token
-/// already parked, nothing under the minimum.
+/// tokens are shared with other pools), never into the pool itself, nothing under the minimum. A
+/// token already parked parks again what it holds of it later (an exit that finished on a later
+/// cycle, say), as another lot: what is parked already counts against the budget (a claim is out
+/// of the budget altogether), so nothing is parked twice.
 pub fn decide(s: &Situation) -> Vec<Act> {
     let parks_in = |h: &Held| h.park_pool.as_deref().filter(|p| !p.eq_ignore_ascii_case(&s.pool)).is_some();
     let all: Vec<&Held> = s.own.iter().chain(s.funding.iter()).collect();
@@ -356,7 +358,6 @@ pub fn decide(s: &Situation) -> Vec<Act> {
     if !s.on {
         return vec![];
     }
-    let parked = |t: &str| s.lots.iter().any(|(x, _)| x.eq_ignore_ascii_case(t));
     let lots_usd: f64 = s.lots.iter().map(|l| finite(l.1)).sum();
     let free = (finite(s.budget_usd) - finite(s.deployed_usd) - lots_usd).max(0.0);
     let mut out = vec![];
@@ -366,7 +367,7 @@ pub fn decide(s: &Situation) -> Vec<Act> {
         Side::Token0 => &[0],
         Side::Token1 => &[1],
     };
-    let own: Vec<&Held> = sides.iter().map(|i| &s.own[*i]).filter(|h| parks_in(h) && !parked(&h.token) && finite(h.usd) > 0.0).collect();
+    let own: Vec<&Held> = sides.iter().map(|i| &s.own[*i]).filter(|h| parks_in(h) && finite(h.usd) > 0.0).collect();
     let total: f64 = own.iter().map(|h| finite(h.usd)).sum();
     let k = if total > free { free / total } else { 1.0 };
     for h in own {
@@ -378,7 +379,7 @@ pub fn decide(s: &Situation) -> Vec<Act> {
     // the funding share: the budget less everything it holds of its own tokens (parked now or not)
     let held: f64 = s.own.iter().map(|h| finite(h.usd)).sum();
     let mut left = (free - held).max(0.0);
-    for h in s.funding.iter().filter(|h| parks_in(h) && !parked(&h.token) && !s.own.iter().any(|o| o.token.eq_ignore_ascii_case(&h.token))) {
+    for h in s.funding.iter().filter(|h| parks_in(h) && !s.own.iter().any(|o| o.token.eq_ignore_ascii_case(&h.token))) {
         let take = left.min(finite(h.usd));
         if take >= s.min_usd {
             out.push(Act::Park(h.token.clone(), take));
@@ -684,10 +685,28 @@ mod tests {
         // less USDT than the shortfall: what there is
         s.funding[0].usd = 1000.0;
         assert_eq!(parks(&decide(&s)), vec![(USDT.into(), 1000)]);
-        // once parked, not again (the lot counts against the budget, the token is parked)
+        // $1,000 parked, more USDT later: the rest of the budget parks as another lot, never the
+        // part already parked (the lot counts against the budget)
         s.lots = vec![(USDT.into(), 1000.0)];
         s.funding[0].usd = 2140.0;
+        assert_eq!(parks(&decide(&s)), vec![(USDT.into(), 1992)]);
+        // the budget all parked: nothing
+        s.lots = vec![(USDT.into(), 2992.0)];
         assert!(decide(&s).is_empty());
+    }
+
+    #[test]
+    fn decide_parks_more_of_a_token_whose_claim_is_out_of_the_budget() {
+        // cbeth-weth out to USDC: $1,427 handed to usdc-usdt as a claim (out of its budget, so it
+        // counts 0 here), then the rest of the exit sold later: $3,596 more USDC, a budget of
+        // $3,600 left, $4 of WETH dust
+        let mut s = sit();
+        s.budget_usd = 3600.0;
+        s.own[0].usd = 4.0;
+        s.funding = vec![held(USDC, 3596.0, Some("usdc-usdt"))];
+        s.own[1] = held("cbeth", 0.0, None);
+        s.lots = vec![(USDC.into(), 0.0)];
+        assert_eq!(parks(&decide(&s)), vec![(USDC.into(), 3596)]);
     }
 
     #[test]
