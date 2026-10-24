@@ -1,9 +1,10 @@
 # Build, sign and (with -Publish) upload a release, in one go: the only way a release should be made.
-# The version is Cargo.toml's. Steps: the release build (target-dist), the exe copied to dist\, the
-# installer, SHA256SUMS.txt and its signature (sign.ps1), then a check of the signature against the
-# signer whitelist and of every file against its sum. -Publish checks all of that again right before
+# The version is Cargo.toml's. Steps: the release build (target-dist), the exe copied to
+# dist\<version>\ (a folder of its own: dist\StableALM.exe may be the copy running), the installer,
+# SHA256SUMS.txt and its signature (sign.ps1), then a check of the signature against the signer
+# whitelist and of every file against its sum. -Publish checks all of that again right before
 # it creates the GitHub release, and uploads only those four files: nothing unsigned goes up.
-#   pwsh rs/release/release.ps1                                  build and sign into rs\dist
+#   pwsh rs/release/release.ps1                                  build and sign into rs\dist\<version>
 #   pwsh rs/release/release.ps1 -Publish -Notes notes.md         ... and create the GitHub release
 #   -Key / -Signer: as sign.ps1; -AllowDirty: build with uncommitted changes (never with -Publish)
 param(
@@ -15,10 +16,10 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $rs = Split-Path -Parent $PSScriptRoot
-$dist = Join-Path $rs "dist"
 $allowed = Join-Path $PSScriptRoot "allowed_signers"
 $version = (Select-String -Path (Join-Path $rs "Cargo.toml") -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
 if (-not $version) { throw "no version in Cargo.toml" }
+$dist = Join-Path $rs "dist\$version"
 $exe = Join-Path $dist "StableALM.exe"
 $setup = Join-Path $dist "StableALM-Setup-$version.exe"
 $sums = Join-Path $dist "SHA256SUMS.txt"
@@ -67,7 +68,6 @@ try {
   $env:CARGO_TARGET_DIR = Join-Path $rs "target-dist"
   Run "cargo build" { cargo build --release }
   New-Item -ItemType Directory -Force $dist | Out-Null
-  if (Test-Path $exe) { Copy-Item $exe (Join-Path $dist "StableALM.prev.exe") -Force }
   Copy-Item (Join-Path $rs "target-dist\release\StableALM.exe") $exe -Force
   # stale sums never sit next to fresh files
   Remove-Item $sums, "$sums.sig" -ErrorAction SilentlyContinue

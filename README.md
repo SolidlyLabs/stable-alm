@@ -255,12 +255,12 @@ It is a single file of about 8 MB; copy it anywhere and run it.
 To make a release, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run, from `rs/`:
 
 ```bash
-pwsh release/release.ps1                              # build, installer, sign, verify -> rs/dist/
+pwsh release/release.ps1                              # build, installer, sign, verify -> rs/dist/<version>/
 pwsh release/release.ps1 -Publish -Notes notes.md     # ... and create the GitHub release
 ```
 
 It takes the version from `Cargo.toml`, builds the app and the installer
-(`rs/dist/StableALM-Setup-<version>.exe`), writes `SHA256SUMS.txt` and `SHA256SUMS.txt.sig`, and
+(`rs/dist/<version>/StableALM-Setup-<version>.exe`), writes `SHA256SUMS.txt` and `SHA256SUMS.txt.sig`, and
 checks the signature against `rs/release/allowed_signers` and every file against its sum. It
 refuses uncommitted changes. `-Publish` runs the checks again right before it uploads the four files,
 so an unsigned or changed build never goes up. Do not upload release files by hand: the app's
