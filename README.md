@@ -252,17 +252,20 @@ cargo build --release
 The app is `rs/target/release/StableALM.exe` on Windows, or `rs/target/release/StableALM` on macOS.
 It is a single file of about 8 MB; copy it anywhere and run it.
 
-To build the Windows installer, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run, from `rs/`:
+To make a release, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run, from `rs/`:
 
 ```bash
-ISCC /DAppVersion=0.7.2 installer/StableALM.iss     # -> rs/dist/StableALM-Setup-0.7.2.exe
+pwsh release/release.ps1                              # build, installer, sign, verify -> rs/dist/
+pwsh release/release.ps1 -Publish -Notes notes.md     # ... and create the GitHub release
 ```
 
-To sign a release (writes `SHA256SUMS.txt` and `SHA256SUMS.txt.sig` next to the files; upload both):
-
-```bash
-pwsh release/sign.ps1 -Files dist/StableALM-Setup-0.7.2.exe, dist/StableALM.exe
-```
+It takes the version from `Cargo.toml`, builds the app and the installer
+(`rs/dist/StableALM-Setup-<version>.exe`), writes `SHA256SUMS.txt` and `SHA256SUMS.txt.sig`, and
+checks the signature against `rs/release/allowed_signers` and every file against its sum. It
+refuses uncommitted changes. `-Publish` runs the checks again right before it uploads the four files,
+so an unsigned or changed build never goes up. Do not upload release files by hand: the app's
+updater ignores a release whose signature does not verify. (`release/sign.ps1` alone signs files
+already built.)
 
 Signers are listed in `rs/release/allowed_signers` (OpenSSH format). To let someone else sign
 releases, add their public key there; installed copies trust it from the first release that
