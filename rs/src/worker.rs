@@ -718,7 +718,7 @@ fn pool_value(cid: u64, cfg: &PoolConfig, wallet: &str) -> Result<(Value, f64, S
     }
     let in_range = pos.iter().any(|x| x["in_range"] == true);
     Ok((json!({"chain_id": cid, "tick": tick, "fee_pips": fee, "price": p, "positions": pos, "deployed_usd": val, "pool_liquidity": pool_liq,
-               "symbols": [m0.symbol, m1.symbol], "in_range": in_range, "allocation_pct": cfg.allocation_pct,
+               "symbols": [m0.symbol, m1.symbol], "tokens": [t0, t1], "in_range": in_range, "allocation_pct": cfg.allocation_pct,
                "enabled": cfg.enabled}), val, t0, t1))
 }
 

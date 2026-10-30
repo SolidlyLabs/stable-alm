@@ -820,6 +820,25 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
             let usd = crate::prices::fnum(&body["usd"]);
             let need_usd = || if usd.is_finite() && usd > 0.0 { Ok(()) } else { Err("enter an amount in $ above 0".to_string()) };
             let req = match body["action"].as_str().unwrap_or("") {
+                // chosen tokens ({address, amount} or {address, all}), or a dollar amount
+                "add" if body["tokens"].is_array() => {
+                    let pool = body["pool"].as_str().filter(|a| known(a)).ok_or("unknown pool")?;
+                    let mut toks = vec![];
+                    for t in body["tokens"].as_array().into_iter().flatten() {
+                        let a = t["address"].as_str().filter(|a| crate::agent::is_addr(a)).ok_or("a token address is not valid")?.to_lowercase();
+                        let m = crate::prices::meta(cid, &a).map_err(|e| format!("{a}: not a token on this chain ({e})"))?;
+                        let all = t["all"] == true;
+                        let amount = crate::prices::fnum(&t["amount"]);
+                        if !all && !(amount.is_finite() && amount > 0.0) {
+                            return Err(format!("enter an amount of {} above 0", m.symbol));
+                        }
+                        toks.push(if all { json!({"address": a, "symbol": m.symbol, "all": true}) } else { json!({"address": a, "symbol": m.symbol, "amount": amount}) });
+                    }
+                    if toks.is_empty() {
+                        return Err("choose at least one token".into());
+                    }
+                    json!({"kind": "add", "chain_id": cid, "pool": pool.to_lowercase(), "tokens": toks})
+                }
                 "add" => {
                     need_usd()?;
                     let pool = body["pool"].as_str().filter(|a| known(a)).ok_or("unknown pool")?;

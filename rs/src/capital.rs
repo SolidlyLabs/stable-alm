@@ -493,6 +493,10 @@ pub fn universe(cid: u64, pools: &[&PoolConfig], s: &Value, acct: &Value, book: 
     // must be seen after the release, or it is counted as nothing withdrawn
     for r in requests().iter().filter(|r| r["chain_id"].as_u64() == Some(cid)) {
         add(r["safe"].as_str().unwrap_or(""));
+        // an Add of chosen tokens: a wallet token the book does not follow yet is read from now on
+        for t in r["tokens"].as_array().into_iter().flatten() {
+            add(t["address"].as_str().unwrap_or(""));
+        }
     }
     out.retain(|t| crate::prices::meta(cid, t).is_ok());
     out.sort();
@@ -599,6 +603,22 @@ fn describe(cid: u64, got: &[(String, i128)]) -> String {
     if v.is_empty() { "nothing".into() } else { v.join(" + ") }
 }
 
+/// What an Add of chosen tokens takes from `free`: each token's amount (None: all of it), never more
+/// than is free; a token with nothing free is left out.
+pub fn take_tokens(free: &Tokens, want: &[(String, Option<i128>)]) -> Vec<(String, i128)> {
+    let mut out: Vec<(String, i128)> = vec![];
+    for (t, a) in want {
+        let have = free.get(t).copied().unwrap_or(0).max(0);
+        let n = a.map(|a| a.max(0).min(have)).unwrap_or(have);
+        match out.iter_mut().find(|x| x.0 == *t) {
+            Some(x) => x.1 = (x.1 + n).min(have),
+            None if n > 0 => out.push((t.clone(), n)),
+            None => {}
+        }
+    }
+    out
+}
+
 /// Funds the enabled pools from Unallocated up to their allocation % of the chain's value (what they
 /// manage already counts): how the book starts, and what Reset does. Each pool gets its own tokens
 /// first, then the chain's stables, then anything else.
@@ -681,6 +701,24 @@ pub fn prepare(book: &mut Book, cid: u64, pools: &[&PoolConfig], acct: &Value, w
         let id = r["id"].as_str().unwrap_or("").to_string();
         let usd = r["usd"].as_f64().unwrap_or(0.0);
         match r["kind"].as_str().unwrap_or("") {
+            "add" if r["tokens"].is_array() => {
+                let pool = r["pool"].as_str().unwrap_or("").to_lowercase();
+                let want: Vec<(String, Option<i128>)> = r["tokens"].as_array().into_iter().flatten().filter_map(|t| {
+                    let a = t["address"].as_str()?.to_lowercase();
+                    let raw = if t["all"] == true { None } else {
+                        let d = crate::prices::meta(cid, &a).ok()?.decimals;
+                        Some((t["amount"].as_f64()? * 10f64.powi(d as i32)).floor() as i128)
+                    };
+                    Some((a, raw))
+                }).collect();
+                let free = unallocated(&book.held(cid), wallet);
+                let got = take_tokens(&free, &want);
+                let moved = value(cid, &got.iter().cloned().collect());
+                crate::info!("capital", "[{}] added {} (${}) from Unallocated, as chosen", name_of(pools, &pool), describe(cid, &got), crate::engine::commas(moved));
+                crate::engine::log(json!({"chain_id": cid, "pool": pool, "kind": "capital", "what": "add", "usd": moved, "tokens": describe(cid, &got)}));
+                add_to(book, cid, &pool, &got);
+                remove(&id);
+            }
             "add" => {
                 let pool = r["pool"].as_str().unwrap_or("").to_lowercase();
                 let mut first = vec![crate::chains::get(cid).usd.to_lowercase()];
@@ -776,8 +814,9 @@ pub fn status(book: &Book, cid: u64, pools: &[&PoolConfig], acct: &Value, wallet
     }
     let free = unallocated(&book.held(cid), wallet);
     let pending: Vec<Value> = requests().into_iter().filter(|r| r["chain_id"].as_u64() == Some(cid)).collect();
+    // the tokens the book follows: any other priced wallet token is not managed until added
     json!({"pools": pm, "pools_usd": total, "unallocated_usd": value(cid, &free), "unallocated": toks_json(&free), "pending": pending,
-           "usdc": crate::chains::get(cid).usd.to_lowercase()})
+           "usdc": crate::chains::get(cid).usd.to_lowercase(), "tracked": wallet.keys().collect::<Vec<_>>()})
 }
 
 #[cfg(test)]
@@ -869,6 +908,17 @@ mod tests {
         assert_eq!(after, toks(&[("usdc", 100), ("weth", 3)]));
         // it can never end with more than it was given plus its own gains
         assert_eq!(after_run(&r, &toks(&[("usdc", 600), ("weth", 50)])), toks(&[]));
+    }
+
+    #[test]
+    fn an_add_of_chosen_tokens_takes_each_up_to_what_is_free() {
+        let free = toks(&[("usdc", 700), ("weth", 50), ("aero", 9)]);
+        let want = vec![("weth".to_string(), Some(20)), ("usdc".to_string(), Some(900)), ("aero".to_string(), None), ("cbeth".to_string(), Some(5))];
+        // weth as asked, usdc capped at what is free, all the aero, no cbeth (none free)
+        assert_eq!(take_tokens(&free, &want), vec![("weth".to_string(), 20), ("usdc".to_string(), 700), ("aero".to_string(), 9)]);
+        // the same token twice never takes more than is free
+        assert_eq!(take_tokens(&free, &[("weth".to_string(), Some(40)), ("weth".to_string(), Some(40))]), vec![("weth".to_string(), 50)]);
+        assert!(take_tokens(&free, &[("weth".to_string(), Some(-3))]).is_empty());
     }
 
     #[test]

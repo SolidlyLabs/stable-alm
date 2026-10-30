@@ -2401,10 +2401,18 @@ impl Executor {
     }
 
     fn fund(&mut self, budget0: f64, ranges: &[(i64, i64, f64)]) -> Res<()> {
-        let fts: Vec<String> = crate::settings::funding_tokens(&self.settings, self.cid)
-            .into_iter()
-            .filter(|t| *t != self.t0 && *t != self.t1)
+        let mut fts: Vec<String> = crate::settings::funding_tokens(&self.settings, self.cid);
+        // and any other token the pool was given (an Add of chosen tokens): the book follows it, so the
+        // reserve names it. Reward tokens are the reward seller's
+        let rewards: Vec<String> = std::iter::once(crate::chains::get(self.cid).solid.to_lowercase())
+            .chain(self.settings["sell_rewards"]["tokens"].as_array().into_iter().flatten().filter_map(|t| t.as_str().map(|s| s.to_lowercase())))
             .collect();
+        for t in self.reserve.as_ref().map(|r| r.keys().cloned().collect::<Vec<_>>()).unwrap_or_default() {
+            if !fts.contains(&t) && !rewards.contains(&t) {
+                fts.push(t);
+            }
+        }
+        fts.retain(|t| *t != self.t0 && *t != self.t1);
         if fts.is_empty() {
             return Ok(());
         }

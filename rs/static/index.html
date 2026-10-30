@@ -213,6 +213,12 @@ dialog.agset{width:min(980px,calc(100vw - 32px));max-height:calc(100vh - 48px)}d
 dialog.cap form{padding:18px 18px 16px;display:grid;gap:12px}dialog.cap h3{margin:0;font-size:16px}
 dialog.cap .pick{display:grid;gap:2px;max-height:240px;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:6px}
 dialog.cap .pick label{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:7px;cursor:pointer;font-size:13px}
+dialog.cap .tabs{display:flex;gap:4px;margin:10px 0 6px}dialog.cap .tabs button{padding:4px 10px;font-size:12px}
+dialog.cap .trow{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:3px 9px;padding:7px 8px;border-radius:7px}
+dialog.cap .trow:hover{background:var(--card2)}dialog.cap .trow .q{display:flex;gap:4px;align-items:center}dialog.cap .trow .q input{width:104px}
+dialog.cap .trow .note{grid-column:2/4;font-size:11.5px;color:var(--mute)}dialog.cap .trow.off{opacity:.55}dialog.cap .trow .logo{width:16px;height:16px;vertical-align:-3px}
+.unlist{display:flex;flex-wrap:wrap;gap:5px 6px;margin-top:8px;font-size:12px}.unlist .ut{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:999px;padding:2px 3px 2px 9px}
+.unlist .ut.ext{border-style:dashed}.unlist .ut button{padding:1px 8px;font-size:11px;border-radius:999px}.unlist .ut .logo{width:14px;height:14px}
 dialog.cap .pick label:hover{background:var(--card2)}dialog.cap .pick label.stopopt{align-items:flex-start}dialog.cap .pick label.stopopt select{margin-top:6px;width:100%}dialog.cap .pick label span{flex:1}dialog.cap .pick label.all{border-bottom:1px solid var(--line);border-radius:7px 7px 0 0;margin-bottom:2px}
 dialog.cap .amt{display:flex;gap:8px;align-items:center}dialog.cap .amt input{flex:1;font:600 15px var(--mono)}
 dialog.cap .prev{font-size:12px;color:var(--mute);display:grid;gap:3px}dialog.cap .prev div{display:flex;justify-content:space-between}
@@ -970,7 +976,7 @@ function renderPools() {
       const share = c && cs && cs.pools_usd > 0 ? c.capital_usd / cs.pools_usd * 100 : null;
       alloc = `<div class="alloc"><label class="sw" title="${p.enabled ? "enabled: click to disable (if it holds money, you choose where the money goes)" : "disabled: click to enable"}"><input type=checkbox ${p.enabled ? "checked" : ""} onchange="editPool(${i},'enabled',this.checked)"><span class="t"></span></label>
         <b class="mono" title="${c ? esc(capTip(c)) : ""}">${c ? usd(c.capital_usd, 0) : "–"}</b></div>
-        <div class="mute small">${c ? (share == null ? "" : fmt(share, 0) + "% · ") + usd(c.positions_usd, 0) + " in positions" : dep ? usd(dep, 0) + " deployed" : "nothing deployed"}</div>
+        <div class="mute small">${c ? (share == null ? "" : fmt(share, 0) + "% · ") + usd(c.positions_usd, 0) + " in positions" + ((c.lots_usd || 0) >= 0.5 ? ` · <span title="${esc(parkTip(p))}">${usd(c.lots_usd, 0)} parked</span>` : "") : dep ? usd(dep, 0) + " deployed" : "nothing deployed"}</div>
         ${cs ? `<div class="capbtns"><button class="sec" onclick="capDlg('add',${+id},'${esc(p.pool.toLowerCase())}')" title="move money from Unallocated into this pool">Add</button><button class="sec" onclick="capDlg('withdraw',${+id},'${esc(p.pool.toLowerCase())}')" title="take money out of this pool to Unallocated, as USDC">Withdraw</button></div>` : ""}`;
       act = `<button class="sec sm icon ${open ? "on" : ""}" data-act="open" data-arg="${esc(rk)}" title="strategy, limits, re-solve and remove" aria-expanded="${!!open}">${open ? "▴" : "⚙"}</button>`;
     } else {
@@ -1011,10 +1017,32 @@ const poolCap = p => ((capOf(pchain(p)) || {}).pools || {})[p.name] || null;
 const capTip = c => `positions ${usd(c.positions_usd, 2)} · idle ${usd(c.idle_usd, 2)}` + (c.lots_usd ? ` · parked ${usd(c.lots_usd, 2)}` : "") +
   (c.owed_usd ? ` · held for it by others ${usd(c.owed_usd, 2)}` : "") + (c.hosted_usd ? ` · less held for others ${usd(c.hosted_usd, 2)}` : "") +
   ((c.idle || []).length ? "\nidle: " + c.idle.map(t => `${fmt(t.amount, 4)} ${t.symbol}`).join(", ") : "");
+// what a pool parked elsewhere while its strategy waits (lots, not claims): [{symbol, usd_now, pool}]
+const parkedOf = p => ((((S.worker || {}).account || {}).parked || {})[pchain(p)] || []).filter(l => l.kind !== "claim" && (l.origin || "").toLowerCase() === p.pool.toLowerCase());
+const parkTip = p => parkedOf(p).map(l => `${l.symbol || "?"} ${usd(l.usd_now || 0, 2)} parked in ${pnameOf(pchain(p), l.pool)}`).join(", ") + " · it comes back when the strategy re-enters";
+// a pool's two token addresses (the account snapshot's)
+const poolToks = (id, a) => (((((S.worker || {}).account || {}).pools || {})[(poolByAddr(id, a) || {}).name] || {}).tokens || []).map(x => x.toLowerCase());
+// Unallocated on chain `id`, token by token: the book's tokens, then priced wallet tokens the book
+// does not follow (the wallet's token list), which no pool manages until one is given them
+function unalTokens(id) {
+  const cs = capOf(id) || {}, tracked = new Set((cs.tracked || []).map(a => a.toLowerCase()));
+  const tok = a => (TOKENS || []).find(t => (t.chain_id || 8453) === id && t.address.toLowerCase() === a);
+  const out = (cs.unallocated || []).filter(t => (t.usd || 0) >= 0.01).map(t => { const a = t.address.toLowerCase(); return {...t, address: a, logo: (tok(a) || {}).logo, managed: true}; });
+  for (const t of TOKENS || []) {
+    const a = t.address.toLowerCase();
+    if ((t.chain_id || 8453) !== id || tracked.has(a) || !(t.balance > 0) || !(t.price_usd > 0) || (t.balance_usd || 0) < 0.5) continue;
+    out.push({address: a, symbol: t.symbol, amount: t.balance, usd: t.balance_usd, logo: t.logo, managed: false});
+  }
+  return out.sort((x, y) => (y.usd || 0) - (x.usd || 0));
+}
+// what the pools (but `skip`) hold of token `a` idle: [{name, symbol, amount}]
+const idleElsewhere = (id, a, skip) => Object.entries((capOf(id) || {}).pools || {}).filter(([, c]) => c.pool.toLowerCase() !== skip)
+  .map(([n, c]) => { const t = (c.idle || []).find(t => t.address.toLowerCase() === a) || {}; return {name: n, symbol: t.symbol, amount: t.amount || 0}; }).filter(x => x.amount > 0);
 const poolByAddr = (id, a) => poolsEdit.find(p => pchain(p) === id && p.pool.toLowerCase() === (a || "").toLowerCase());
 const pnameOf = (id, a) => a ? ((poolByAddr(id, a) || {}).name || a.slice(0, 10)) : "Unallocated";
 function pendText(id, r) {
   const amt = usd(r.usd, 2);
+  if (r.kind === "add" && r.tokens) return `Add ${r.tokens.map(t => t.all ? `all the ${esc(t.symbol)}` : `${fmt(t.amount, 6)} ${esc(t.symbol)}`).join(" + ")} to <b>${esc(pnameOf(id, r.pool))}</b> from Unallocated · next cycle`;
   if (r.kind === "add") return `Add ${amt} to <b>${esc(pnameOf(id, r.pool))}</b> from Unallocated · next cycle`;
   if (r.kind === "reset") return `Reset every pool's capital to its allocation % · next cycle`;
   if (r.kind === "withdraw") return `${r.to ? "Move" : "Withdraw"} ${amt} from ${r.pools.map(a => `<b>${esc(pnameOf(id, a))}</b>`).join(", ")} → ${esc(pnameOf(id, r.to))} · being split`;
@@ -1073,7 +1101,8 @@ function updateSum() {
       <div class="alloc-bar">${shown.map(x => `<div title="${esc(x.p.name)} ${usd(capv(x), 0)}" style="width:${pct(capv(x))}%;background:${COLORS[x.i % COLORS.length]}"></div>`).join("")}${un ? `<div class="unal" title="Unallocated ${usd(un, 0)}" style="width:${pct(un)}%"></div>` : ""}</div>
       <div class="legend">${shown.map(x => `<span><span class="swc" style="background:${COLORS[x.i % COLORS.length]}"></span>${esc(x.p.name)} <b class=mono style="color:var(--fg)">${usd(capv(x), 0)}</b> · ${fmt(pct(capv(x)), 0)}%</span>`).join("")}
         ${cs ? `<span title="${esc((cs.unallocated || []).map(t => `${fmt(t.amount, 4)} ${t.symbol}`).join(", ") || "nothing")}"><span class="swc unal" style="border:1px solid var(--line2)"></span>Unallocated <b class=mono style="color:var(--fg)">${usd(un, 0)}</b></span>` : `<span class=mute>capital shows after the next cycle</span>`}</div>
-      ${cs ? `<div class="capacts"><button class="sec sm" onclick="capDlg('add',${+id})">Add from Unallocated</button><button class="sec sm" onclick="capDlg('withdraw',${+id})">Withdraw to USDC</button>
+      ${cs ? unalChips(id) : ""}
+      ${cs ? `<div class="capacts"><button class="sec sm" onclick="capDlg('add',${+id})">Add to a pool…</button><button class="sec sm" onclick="capDlg('withdraw',${+id})">Withdraw to USDC</button>
         <button class="sec sm" onclick="capDlg('move',${+id})">Move between pools</button><button class="sec sm" onclick="capDlg('reset',${+id})" title="one-off: give every pool its allocation % of this chain again">Reset to %…</button></div>` : ""}
       ${pend}
       <div class="small" style="margin-top:8px" data-help="blend">${b == null ? (MARKET ? "" : '<span class="skel"></span>') : `Blended APR <b class="mono">${fmt(b, 2)}%</b> (24h) → about <b class="mono">${usd(total * b / 100)}</b>/year
@@ -1082,6 +1111,14 @@ function updateSum() {
   }).join("");
   $("saveBar").classList.toggle("show", dirtyPools);
   $("allocSum").innerHTML = `<span class=warn>Unsaved changes</span> <span class=mute>· applied on the next cycle</span>`;
+}
+// Unallocated token by token under the chain's bar; a dashed chip is a wallet token no pool manages yet
+function unalChips(id) {
+  // once: the token list redraws this when it comes (or stays away after an error, without a retry loop)
+  if (!TOKENS && !unalChips.asked) { unalChips.asked = true; loadTokens(); }
+  const ts = unalTokens(id);
+  if (!ts.length) return "";
+  return `<div class="unlist">${ts.map(t => `<span class="ut${t.managed ? "" : " ext"}" title="${t.managed ? "unallocated" : "in the wallet, not managed by any pool yet"}">${logo(t)}<span class=mono>${fmt(t.amount, t.usd >= 100 ? 2 : 4)}</span> ${esc(t.symbol)} <span class=mute>${usd(t.usd, t.usd >= 100 ? 0 : 2)}</span><button class="sec" onclick="capDlg('add',${+id},null,'${esc(t.address)}')" title="add ${esc(t.symbol)} to a pool">Add</button></span>`).join("")}</div>`;
 }
 // Equal split, none more than it has; what a small pool cannot give is shared by the others (capital.rs split_equal).
 function splitEqual(caps, total) {
@@ -1092,18 +1129,19 @@ function splitEqual(caps, total) {
   return out;
 }
 let CAPDLG = null;
-function capDlg(kind, id, pool) {
+function capDlg(kind, id, pool, tok) {
   const cs = capOf(id); if (!cs) { toast("Capital shows after the next cycle", true); return; }
   if (kind === "reset" && dirtyPools) { toast("Save or discard the pool changes first", true); return; }
   const mine = poolsEdit.filter(p => pchain(p) === id), capp = p => (cs.pools[p.name] || {}).capital_usd || 0;
-  CAPDLG = {kind, id, pool};
+  CAPDLG = {kind, id, pool, mode: "tok", picks: tok ? {[tok]: {on: true, all: true}} : {}};
   const opts = (sel, skip) => mine.filter(p => p.pool.toLowerCase() !== skip).map(p => `<option value="${esc(p.pool.toLowerCase())}" ${p.pool.toLowerCase() === sel ? "selected" : ""}>${esc(p.name)} · ${usd(capp(p), 0)}</option>`).join("");
   const amt = `<div><label class=f>Amount (USD)</label><div class="amt"><input id="capAmt" type=number min=0 step=any placeholder="0" oninput="capPrev()"><button type=button class="sec sm" onclick="capMax()">Max</button></div></div>`;
   let body = "";
-  if (kind === "add") body = `<h3>Add from Unallocated</h3>
-    <div class="small mute">Unallocated on ${esc(chainOf(id).name)}: <b>${usd(cs.unallocated_usd, 2)}</b> (${esc((cs.unallocated || []).map(t => `${fmt(t.amount, 2)} ${t.symbol}`).join(", ") || "nothing")}). USDC is used first, then the other stables, then the pool's own tokens.</div>
-    <div><label class=f>Into pool</label><select id="capTo">${opts(pool)}</select></div>${amt}
-    <div class="small mute">The pool deploys it on its next run (swapping into its tokens as needed).</div>`;
+  if (kind === "add") body = `<h3>Add to a pool</h3>
+    <div><label class=f>Into pool</label><select id="capTo" onchange="addRows()">${opts(pool)}</select></div>
+    <div class="tabs"><button type=button id="addTabTok" onclick="addMode('tok')">Choose tokens</button><button type=button class="sec" id="addTabUsd" onclick="addMode('usd')">By dollar amount</button></div>
+    <div id="addTok"><div class="pick" id="addList"></div><div class="prev" id="capPrev"></div></div>
+    <div id="addUsd" hidden><div class="small mute">Unallocated on ${esc(chainOf(id).name)}: <b>${usd(cs.unallocated_usd, 2)}</b>. USDC is used first, then the other stables, then the pool's own tokens.</div>${amt}</div>`;
   if (kind === "withdraw") body = `<h3>Withdraw to Unallocated, as USDC</h3>
     <div class="pick"><label class="all"><input type=checkbox id="capAll" onchange="capAllTog(this.checked)" ${pool ? "" : "checked"}><span><b>All pools</b>, split equally</span></label>
       ${mine.filter(p => capp(p) > 0.5).map(p => `<label><input type=checkbox class="capPick" value="${esc(p.pool.toLowerCase())}" ${!pool || p.pool.toLowerCase() === pool ? "checked" : ""} onchange="capPrev()"><span>${esc(p.name)}</span><span class="mono mute">${usd(capp(p), 0)}</span></label>`).join("")}</div>
@@ -1117,7 +1155,44 @@ function capDlg(kind, id, pool) {
     <div class="pick">${mine.map(p => `<label><span>${esc(p.name)}${p.enabled ? "" : " <span class=mute>(off)</span>"}</span><span class="mono mute">${usd(capp(p), 0)} now</span><input type=number class="capPct" data-name="${esc(p.name)}" min=0 max=100 step=1 value="${p.allocation_pct}" style="width:64px" oninput="capPrev()">%</label>`).join("")}</div>
     <div class="prev" id="capPrev"></div>`;
   $("capDlg").innerHTML = `<form method=dialog onsubmit="event.preventDefault();capGo()">${body}<div class="btns"><button type=button class="sec" onclick="$('capDlg').close()">Cancel</button><button type=submit>${{add: "Add", withdraw: "Withdraw", move: "Move", reset: "Reset"}[kind]}</button></div></form>`;
-  $("capDlg").showModal(); capPrev();
+  $("capDlg").showModal();
+  if (kind === "add") { if (!TOKENS) loadTokens(); addRows(); } else capPrev();
+}
+function addMode(m) {
+  CAPDLG.mode = m; $("addTok").hidden = m !== "tok"; $("addUsd").hidden = m !== "usd";
+  $("addTabTok").classList.toggle("sec", m !== "tok"); $("addTabUsd").classList.toggle("sec", m !== "usd");
+  capPrev();
+}
+// the token rows: what is unallocated, whether it goes in as it is or is swapped, and what other pools hold of it
+function addRows() {
+  const d = CAPDLG, el = $("addList"); if (!el || !d || d.kind !== "add") return;
+  const to = $("capTo").value, own = poolToks(d.id, to), rows = unalTokens(d.id);
+  // the pool's own tokens with none unallocated: listed, to say where they are
+  for (const a of own) if (!rows.some(t => t.address === a)) {
+    const e = idleElsewhere(d.id, a, to);
+    if (e.length) rows.push({address: a, symbol: e[0].symbol, amount: 0, usd: 0, managed: true, none: true, logo: ((TOKENS || []).find(t => t.address.toLowerCase() === a) || {}).logo});
+  }
+  el.innerHTML = rows.length ? rows.map(t => {
+    const pk = d.picks[t.address] || {}, a = esc(t.address), e = idleElsewhere(d.id, t.address, to);
+    const how = t.none ? "none unallocated" : own.includes(t.address) ? "one of the pool's tokens: goes in without a swap" : "swapped into the pool's tokens when it runs, within its swap cost limit";
+    const more = (t.managed ? "" : " · not managed yet: the app follows it from now on") + (e.length ? ` · idle in ${e.map(x => `${esc(x.name)} (${fmt(x.amount, 4)})`).join(", ")}: Withdraw or Move there to free it` : "");
+    return `<div class="trow${t.none ? " off" : ""}"><input type=checkbox ${pk.on ? "checked" : ""} ${t.none ? "disabled" : ""} onchange="addPick('${a}',this.checked)">
+      <span>${logo(t)} <b>${esc(t.symbol)}</b> <span class="mono mute small">${t.none ? "" : `${fmt(t.amount, 6)} · ${usd(t.usd, 2)}`}</span></span>
+      <span class="q">${t.none ? "" : `<input type=number min=0 step=any value="${pk.on && !pk.all && pk.amount ? pk.amount : ""}" placeholder="${pk.on && pk.all ? "all" : "amount"}" oninput="addAmt('${a}',this.value)"><button type=button class="sec sm" onclick="addMax('${a}')">Max</button>`}</span>
+      <div class="note">${how}${more}</div></div>`;
+  }).join("") : `<div class="small mute" style="padding:8px">Nothing unallocated on ${esc(chainOf(d.id).name)}${TOKENS ? "" : " (reading the wallet's tokens…)"}.</div>`;
+  capPrev();
+}
+function addPick(a, on) { const pk = CAPDLG.picks[a] = CAPDLG.picks[a] || {}; pk.on = on; if (on && !(pk.amount > 0)) pk.all = true; addRows(); }
+function addMax(a) { CAPDLG.picks[a] = {on: true, all: true}; addRows(); }
+function addAmt(a, v) { const n = parseFloat(v); CAPDLG.picks[a] = {on: n > 0, all: false, amount: n > 0 ? n : 0}; capPrev(); }
+// the chosen tokens: [{address, symbol, amt, usd, swap, all}]
+function addChosen() {
+  const d = CAPDLG, own = poolToks(d.id, $("capTo").value);
+  return unalTokens(d.id).filter(t => (d.picks[t.address] || {}).on).map(t => {
+    const pk = d.picks[t.address], all = pk.all || (pk.amount || 0) >= t.amount, amt = all ? t.amount : pk.amount || 0;
+    return {address: t.address, symbol: t.symbol, amt, all, usd: t.amount > 0 ? t.usd * amt / t.amount : 0, swap: !own.includes(t.address)};
+  }).filter(x => x.amt > 0);
 }
 function capPicked() { return [...document.querySelectorAll(".capPick")].filter(x => x.checked).map(x => x.value); }
 function capAllTog(on) { document.querySelectorAll(".capPick").forEach(x => x.checked = on); capPrev(); }
@@ -1128,6 +1203,13 @@ function capMax() {
 }
 function capPrev() {
   const d = CAPDLG, cs = capOf(d.id), el = $("capPrev"); if (!el) return;
+  if (d.kind === "add") {
+    const sel = addChosen(), swaps = sel.filter(x => x.swap).length, tot = sel.reduce((s, x) => s + x.usd, 0);
+    el.innerHTML = !sel.length ? `<div class="small mute">Tick the tokens to add, or type an amount.</div>` :
+      `<div><span><b>Adds</b></span><span class=mono><b>${usd(tot, 2)}</b></span></div>` + sel.map(x => `<div><span>${x.all ? "all " : ""}${fmt(x.amt, 6)} ${esc(x.symbol)}</span><span class=mono>${usd(x.usd, 2)}${x.swap ? " · swapped" : " · as it is"}</span></div>`).join("") +
+      `<div class="small mute" style="display:block;margin-top:4px">No transaction now: the tokens are assigned to the pool. When it next runs it ${swaps ? `makes ${swaps} swap${swaps > 1 ? "s" : ""} into its tokens, then ` : ""}deposits them in its range (a mint).</div>`;
+    return;
+  }
   if (d.kind === "withdraw") {
     const all = $("capAll"), picked = capPicked(); if (all) all.checked = picked.length === document.querySelectorAll(".capPick").length;
     const caps = picked.map(a => ((cs.pools[pnameOf(d.id, a)] || {}).capital_usd) || 0), parts = splitEqual(caps, parseFloat($("capAmt").value) || 0);
@@ -1141,7 +1223,12 @@ function capPrev() {
 async function capGo() {
   const d = CAPDLG, usdv = parseFloat(($("capAmt") || {}).value);
   try {
-    if (d.kind === "add") await api("/api/capital", {action: "add", chain_id: d.id, pool: $("capTo").value, usd: usdv});
+    if (d.kind === "add" && d.mode === "tok") {
+      const sel = addChosen();
+      if (!sel.length) throw new Error("tick at least one token");
+      await api("/api/capital", {action: "add", chain_id: d.id, pool: $("capTo").value, tokens: sel.map(x => x.all ? {address: x.address, all: true} : {address: x.address, amount: x.amt})});
+    }
+    if (d.kind === "add" && d.mode === "usd") await api("/api/capital", {action: "add", chain_id: d.id, pool: $("capTo").value, usd: usdv});
     if (d.kind === "withdraw") await api("/api/capital", {action: "withdraw", chain_id: d.id, pools: capPicked(), usd: usdv});
     if (d.kind === "move") {
       if ($("capFrom").value === $("capTo").value) throw new Error("choose two different pools");
@@ -1832,6 +1919,8 @@ async function loadTokens() {
   catch (e) { toast("tokens: " + e.message, true); }
   finally { tokensLoading = false; }
   if (fundOpen !== null) filterFund(fundOpen); else renderFunding();
+  if (poolsEdit) updateSum();
+  if (CAPDLG && CAPDLG.kind === "add" && $("capDlg").open) addRows();
 }
 function tokenRow(t, cur, id) {
   return `<div class="opt ${cur ? "cur" : ""}" data-act="fund-pick" data-arg="${id}" data-addr="${esc(t.address)}"><span class="ck">${cur ? "✓" : ""}</span>${logo(t)}<div class="nm"><div><b>${esc(t.symbol)}</b></div><div>${esc(t.name || t.address)}</div></div>
@@ -1953,6 +2042,8 @@ function poolStatus(p) {
   if (!p.enabled) return has ? `<span class="pstat warn">off · withdrawing</span>` : `<span class="pstat mute">off</span>`;
   if (st.mode === "hold") return `<span class="pstat warn" title="${esc(st.error || "")}">holding</span>`;
   if (st.mode === "await_swap") { const w = st.await_swap || {}; return `<span class="pstat warn" title="${esc(w.why || "")}">waiting for a swap${w.cost_bps != null ? ` · ${fmt(w.cost_bps, 1)} bp > ${fmt(w.max_bps, 1)}` : ""}</span>`; }
+  const pk = parkedOf(p);
+  if (!has && pk.length) return `<span class="pstat ok" title="${esc(parkTip(p))}">parked · ${usd(pk.reduce((s, l) => s + (l.usd_now || 0), 0), 0)}</span>`;
   if (!has) return `<span class="pstat mute">no positions yet</span>`;
   return a.in_range ? `<span class="pstat ok">in range · ${usd(a.deployed_usd, 0)}</span>` : `<span class="pstat bad">out of range · ${usd(a.deployed_usd, 0)}</span>`;
 }
