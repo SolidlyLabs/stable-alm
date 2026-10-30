@@ -107,7 +107,7 @@ pub fn claimable(cid: u64, wallet: &str) -> Value {
         let mut by_token: Vec<(String, f64, f64)> = vec![];
         for r in snap["rewards"].as_array().cloned().unwrap_or_default() {
             let t = r["token"].as_str().unwrap_or("").to_lowercase();
-            let (c, p) = (prices::fnum(&r["claimable"]), prices::fnum(&r["pending"]).max(0.0));
+            let (c, p) = split_claimable(&r, &snap["claim"]);
             match by_token.iter_mut().find(|x| x.0 == t) {
                 Some(x) => {
                     x.1 += c;
@@ -154,6 +154,24 @@ pub fn claimable(cid: u64, wallet: &str) -> Value {
     };
     CACHE.lock().unwrap().as_mut().unwrap().insert(key, (Instant::now(), res.clone()));
     res
+}
+
+/// A reward row's (claimable now, pending) in raw units. The API's `claimable` can count a newer
+/// cumulative than its proof, which is checked against the root on chain: a claim pays the proof's
+/// amount less what was claimed, and the rest comes with the next root (a 0.97 dollar claimable
+/// once paid 0.64). So claimable is what the proof pays; the rest is pending. Without a proof (none
+/// built yet) the row's figures stand as they are.
+fn split_claimable(r: &Value, claim: &Value) -> (f64, f64) {
+    let (c, p) = (prices::fnum(&r["claimable"]).max(0.0), prices::fnum(&r["pending"]).max(0.0));
+    let Some(tokens) = claim["tokens"].as_array() else { return (c, p) };
+    let eq = |a: &Value, b: &Value| a.as_str().map(|s| s.to_lowercase()) == b.as_str().map(|s| s.to_lowercase());
+    let ty = |v: &Value| v.as_str().map(String::from).unwrap_or_else(|| v.to_string());
+    let paid = (0..tokens.len())
+        .find(|&i| eq(&tokens[i], &r["token"]) && eq(&claim["pools"][i], &r["pool"]) && ty(&claim["types"][i]) == ty(&r["type"]))
+        .map(|i| (prices::fnum(&claim["amounts"][i]) - prices::fnum(&r["claimed"])).max(0.0))
+        .unwrap_or(0.0);
+    let now = paid.min(c);
+    (now, p + (c - now))
 }
 
 fn root(cid: u64, rewarder: &str, f: &str) -> Result<String, String> {
@@ -327,5 +345,24 @@ mod tests {
         assert!(!same_snapshot(&last, &json!({"tokens": ["0xaa", "0xbb"], "amounts": ["130", "9"]})));
         // a claim from before amounts were recorded is never taken for one
         assert!(!same_snapshot(&json!({"rewards": []}), &json!({"tokens": [], "amounts": []})));
+    }
+
+    #[test]
+    fn claimable_is_what_the_proof_pays_and_the_rest_is_pending() {
+        // the row counts a newer cumulative (130) than the proof (100); 60 claimed before
+        let row = json!({"type": "0", "pool": "0xP", "token": "0xT", "claimed": "60", "claimable": "70", "pending": "5"});
+        let claim = json!({"tokens": ["0xt"], "pools": ["0xp"], "types": [0], "amounts": ["100"]});
+        assert_eq!(split_claimable(&row, &claim), (40.0, 35.0));
+        // a row the proof leaves out waits for the next root
+        let other = json!({"tokens": ["0xt"], "pools": ["0xq"], "types": [0], "amounts": ["100"]});
+        assert_eq!(split_claimable(&row, &other), (0.0, 75.0));
+        // the type tells two rows of one token in one pool apart
+        let typed = json!({"tokens": ["0xt"], "pools": ["0xp"], "types": [1], "amounts": ["100"]});
+        assert_eq!(split_claimable(&row, &typed), (0.0, 75.0));
+        // proof and row agree: all of it claimable
+        let same = json!({"tokens": ["0xT"], "pools": ["0xP"], "types": ["0"], "amounts": ["130"]});
+        assert_eq!(split_claimable(&row, &same), (70.0, 5.0));
+        // no proof: the row as it is
+        assert_eq!(split_claimable(&row, &Value::Null), (70.0, 5.0));
     }
 }

@@ -9,7 +9,12 @@
 //!                             re-solved every `every_hours` (and whenever the rebalance condition
 //!                             holds), moved only when at least `turnover` of the value would move;
 //!                             with a `guard` (ticks, 0 = off) it holds while the price is further
-//!                             than that from its 7-day median (the depeg guard of pegged pairs);
+//!                             than that from its 7-day median (the depeg guard of pegged pairs).
+//!                             Each setting has an input of the same name (hours, span,
+//!                             every_hours, turnover, guard, width): connected, its value at the
+//!                             decision overrides the setting (clamped to the setting's limits; a
+//!                             value still warming up leaves the setting), so other blocks can pick
+//!                             the median window, the span or the re-solve schedule bar by bar;
 //!   rebalance (when)          move to the wanted range when true (default: price left the range),
 //!                             after a delay and not within the cooldown;
 //!   exit      (when, reenter) withdraw everything; deposit again when `reenter` (default: not
@@ -141,7 +146,7 @@ pub const KINDS: &[Spec] = &[
     ("out_of_range", &[], &["out"], &[("below", 0.0, -1e6, 1e6), ("above", 0.0, -1e6, 1e6)]),
     ("range_shift", &[], &["out"], &[("value", 10.0, 0.0, 1e6)]),
     ("range", &["lower", "upper"], &[], &[]),
-    ("ladder", &[], &[], &[("hours", 24.0, 1.0, 168.0), ("span", 3.0, 0.0, 1e6), ("every_hours", 6.0, 0.1, 168.0), ("turnover", 0.4, 0.0, 1.0), ("guard", 0.0, 0.0, 1e6), ("width", 1.0, 1.0, 1e6)]),
+    ("ladder", LADDER_INPUTS, &[], &[("hours", 24.0, 1.0, 168.0), ("span", 3.0, 0.0, 1e6), ("every_hours", 6.0, 0.1, 168.0), ("turnover", 0.4, 0.0, 1.0), ("guard", 0.0, 0.0, 1e6), ("width", 1.0, 1.0, 1e6)]),
     ("rebalance", &["when"], &[], &[("delay_min", 0.0, 0.0, 10080.0), ("cooldown_min", 60.0, 0.0, 43200.0)]),
     // min_out_hours: stay out at least this long after the exit; confirm_hours: the re-entry
     // condition must hold this long without a break before depositing again (0: at once)
@@ -154,8 +159,11 @@ pub const KINDS: &[Spec] = &[
     // volatile token, − short it (a direction, not a hedge; 0: none)
     ("hedge", &["when", "ratio", "size"], &[], &[("ratio", 1.0, 0.0, 1.5), ("band_pct", 10.0, 1.0, 50.0), ("min_usd", 25.0, 0.0, 1e6), ("leverage", 2.0, 1.0, 5.0), ("smooth_h", 0.0, 0.0, 168.0), ("size", 0.0, -2.0, 2.0)]),
 ];
+/// The ladder's inputs: one per setting, overriding it when connected (`ladder_value`).
+const LADDER_INPUTS: &[&str] = &["hours", "span", "every_hours", "turnover", "guard", "width"];
 /// Inputs that may stay unconnected (the sink's default applies).
-const OPTIONAL: &[(&str, &str)] = &[("rebalance", "when"), ("exit", "reenter"), ("exit", "to"), ("hedge", "when"), ("hedge", "ratio"), ("hedge", "size")];
+const OPTIONAL: &[(&str, &str)] = &[("rebalance", "when"), ("exit", "reenter"), ("exit", "to"), ("hedge", "when"), ("hedge", "ratio"), ("hedge", "size"),
+    ("ladder", "hours"), ("ladder", "span"), ("ladder", "every_hours"), ("ladder", "turnover"), ("ladder", "guard"), ("ladder", "width")];
 /// Params measured in ticks (scaled by the node's unit).
 const TICK_PARAMS: &[(&str, &str)] =
     &[("const", "value"), ("offset", "value"), ("distance_gt", "value"), ("out_of_range", "below"), ("out_of_range", "above"), ("range_shift", "value"), ("ladder", "span"), ("ladder", "guard"), ("ladder", "width")];
@@ -451,6 +459,8 @@ fn own_lookback(n: &Node) -> f64 {
             let min_periods = if n.kind == "linreg" { 2.0 } else { 1.0 };
             (p("hours") / step).round().max(min_periods) * step + bar
         }
+        // a window an input sets may be as long as the setting allows
+        "ladder" if n.inputs.contains_key("hours") => 168.0 + bar,
         "sma" | "ema" | "median" | "stdev" | "bollinger" | "keltner" | "highest" | "lowest" | "percentile" | "zscore" | "cci" | "lag" | "change" | "ladder" => p("hours") + bar,
         "atr" | "rsi" | "donchian" | "stochastic" => p("hours") + p("d_hours") + bar,
         "adx" => 2.0 * p("hours") + bar,
@@ -713,7 +723,9 @@ pub fn evaluate_ext(g: &Graph, m: &Market, ext: &Externals) -> Eval {
     // 1-minute outputs on their own minutes, for 1-minute nodes that read them
     let mut fine_s: HashMap<(usize, String), Vec<f64>> = HashMap::new();
     for (i, node) in g.nodes.iter().enumerate() {
-        if g.stateful.contains(&i) || node.inputs.is_empty() && STATEFUL.contains(&node.kind) {
+        // a ladder's own series (its median, the price, the guard's distance) never depend on its
+        // inputs: computed even when an input follows the position
+        if g.stateful.contains(&i) && node.kind != "ladder" || node.inputs.is_empty() && STATEFUL.contains(&node.kind) {
             continue;
         }
         let fr = frames.entry(node.tf_s).or_insert_with(|| frame(m, &close0, &hi0, &lo0, node.tf_s));
@@ -751,8 +763,12 @@ pub fn evaluate_ext(g: &Graph, m: &Market, ext: &Externals) -> Eval {
             // the ladder's centre: the median price over its lookback (what the wanted range is drawn around)
             "ladder" => {
                 put("mid", median(close, bars(hours)));
+                // a window set by an input: the median is taken at the decision, over this
+                if node.inputs.contains_key("hours") {
+                    put("close", close.clone());
+                }
                 // the depeg guard: distance of the bar's tick from its 7-day median, as ladder.rs
-                if par("guard") > 0.0 {
+                if par("guard") > 0.0 || node.inputs.contains_key("guard") {
                     let med = crate::data::rolling_median_trailing(&m.bar_tick, crate::data::week_bars(m), 12);
                     put("guard_dev", m.bar_tick.iter().zip(&med).map(|(t, md)| (*t as f64 - md).abs()).collect());
                 }
@@ -1033,8 +1049,8 @@ pub fn wanted(g: &Graph, ev: &Eval, bar: usize, spacing: i64) -> Option<(i64, i6
         Some(r) => (input(g, ev, r, "lower", &at)?, input(g, ev, r, "upper", &at)?),
         None => {
             let l = g.sink("ladder")?;
-            let mid = ev.series.get(&(l, "mid".to_string())).and_then(|v| v.get(bar).copied())?.trunc();
-            let span = g.param(l, "span").round();
+            let mid = ladder_mid(g, ev, l, &at)?.trunc();
+            let span = ladder_value(g, ev, l, "span", &at).round();
             (mid - span, mid + span + 1.0)
         }
     };
@@ -1049,6 +1065,50 @@ pub fn wanted(g: &Graph, ev: &Eval, bar: usize, spacing: i64) -> Option<(i64, i6
         tu = tl + sp;
     }
     Some((tl.clamp(-887_200, 887_200 - sp), tu.clamp(-887_200 + sp, 887_200)))
+}
+
+/// A ladder setting at a decision: its input when connected and decided (clamped to the setting's
+/// limits), else the block's own.
+fn ladder_value(g: &Graph, ev: &Eval, l: usize, name: &str, at: &At) -> f64 {
+    let own = g.param(l, name);
+    match input(g, ev, l, name, at) {
+        Some(v) if v.is_finite() => {
+            let (lo, hi) = spec("ladder").and_then(|s| s.3.iter().find(|p| p.0 == name)).map(|p| (p.2, p.3)).unwrap_or((f64::MIN, f64::MAX));
+            v.clamp(lo, hi)
+        }
+        _ => own,
+    }
+}
+
+/// The ladder's centre at a decision: the median price over its window, the one its `hours`
+/// input sets when connected (whole 5-minute bars), else the precomputed one.
+fn ladder_mid(g: &Graph, ev: &Eval, l: usize, at: &At) -> Option<f64> {
+    if !g.nodes[l].inputs.contains_key("hours") {
+        return ev.series.get(&(l, "mid".to_string())).and_then(|v| v.get(at.bar).copied()).filter(|v| v.is_finite());
+    }
+    let close = ev.series.get(&(l, "close".to_string()))?;
+    let n = ((ladder_value(g, ev, l, "hours", at) * BARS_PER_HOUR).round() as usize).max(1);
+    if at.bar + 1 < n {
+        return None;
+    }
+    let mut w: Vec<f64> = close[at.bar + 1 - n..=at.bar].iter().copied().filter(|v| v.is_finite()).collect();
+    (w.len() == n).then(|| crate::data::median(&mut w))
+}
+
+/// The ladder's settings at `bar` (ladder.rs terms): each from its input when connected, else the
+/// block's own. None: the graph has no ladder.
+pub fn ladder_at(g: &Graph, ev: &Eval, bar: usize, tick: i64, range: Option<(i64, i64)>) -> Option<crate::ladder::Params> {
+    let l = g.sink("ladder")?;
+    let at = At { bar, tick, range, wanted: None };
+    let v = |name: &str| ladder_value(g, ev, l, name, &at);
+    Some(crate::ladder::Params {
+        lookback: (v("hours") * 3600.0).round() as i64,
+        span: v("span").round().max(0.0) as i64,
+        every: (v("every_hours") * BARS_PER_HOUR).round().max(1.0) as i64,
+        turnover: v("turnover"),
+        guard: Some(v("guard")).filter(|g| *g > 0.0),
+        width: v("width").round().max(1.0) as i64,
+    })
 }
 
 /// A hedge block's settings (the ratio is its default; `hedge_ratio` gives the one at a bar).
@@ -1126,7 +1186,7 @@ pub fn decide(g: &Graph, ev: &Eval, st: &mut State, now: i64, bar: usize, tick: 
         }
     }
     if let Some(l) = g.sink("ladder") {
-        let guard = g.param(l, "guard");
+        let guard = ladder_value(g, ev, l, "guard", &at);
         let dev = ev.series.get(&(l, "guard_dev".to_string())).and_then(|v| v.get(bar).copied()).unwrap_or(f64::NAN);
         // NaN (too little history) never freezes, as in ladder.rs
         if guard > 0.0 && dev > guard {
@@ -1194,7 +1254,7 @@ pub fn decide(g: &Graph, ev: &Eval, st: &mut State, now: i64, bar: usize, tick: 
     let ladder = g.sink("ladder");
     if let Some(l) = ladder {
         // a ladder re-solves on its schedule; the caller moves only when the solve differs enough
-        let every = (g.param(l, "every_hours") * 3600.0) as i64;
+        let every = (ladder_value(g, ev, l, "every_hours", &at) * 3600.0) as i64;
         if now - st.last_move >= every {
             return Decision::Move { tl: wl, tu: wu, reason: format!("ladder re-solve (every {})", mins(every)) };
         }
@@ -1204,7 +1264,7 @@ pub fn decide(g: &Graph, ev: &Eval, st: &mut State, now: i64, bar: usize, tick: 
         // a ladder without a rebalance condition waits for its schedule
         None if ladder.is_some() => {
             st.outside_since = None;
-            return Decision::Keep(format!("ladder: next re-solve in {}", mins((g.param(ladder.unwrap(), "every_hours") * 3600.0) as i64 - (now - st.last_move))));
+            return Decision::Keep(format!("ladder: next re-solve in {}", mins((ladder_value(g, ev, ladder.unwrap(), "every_hours", &at) * 3600.0) as i64 - (now - st.last_move))));
         }
         None => !(tl <= tick && tick < tu),
     };
@@ -1448,6 +1508,58 @@ mod tests {
         }
         assert!((px[0] - 2.0).abs() < 1e-3);
         assert!(to_tick(0.0).is_nan());
+    }
+
+    #[test]
+    fn a_ladders_inputs_override_its_settings_at_the_decision() {
+        // 280 bars at tick 100, then 20 at 140: the 24-hour median is still 100, the last hour's 140
+        let mut ticks = vec![100i64; 280];
+        ticks.extend([140; 20]);
+        let m = market(&ticks);
+        let b = 299;
+        let lad = |inputs: Value, extra: Vec<Value>| {
+            let mut nodes = vec![json!({"id": "lad", "kind": "ladder", "p": {"hours": 24, "span": 3, "every_hours": 6, "turnover": 0.4}, "in": inputs})];
+            nodes.extend(extra);
+            graph(json!({"type": "graph", "nodes": nodes})).unwrap()
+        };
+        let k = |id: &str, v: f64| json!({"id": id, "kind": "const", "p": {"value": v}});
+        // no inputs: the settings as they are
+        let plain = lad(json!({}), vec![]);
+        let ev = evaluate(&plain, &m);
+        assert_eq!(wanted(&plain, &ev, b, 1), Some((97, 104)));
+        let p = ladder_at(&plain, &ev, b, 140, None).unwrap();
+        assert_eq!((p.lookback, p.span, p.turnover), (24 * 3600, 3, 0.4));
+        // a one-hour window from an input: the median follows the price to 140
+        let short = lad(json!({"hours": ["h", "value"], "span": ["s", "value"]}), vec![k("h", 1.0), k("s", 5.0)]);
+        let ev = evaluate(&short, &m);
+        assert_eq!(wanted(&short, &ev, b, 1), Some((135, 146)));
+        let p = ladder_at(&short, &ev, b, 140, None).unwrap();
+        assert_eq!((p.lookback, p.span), (3600, 5));
+        // an input past the setting's limits is clamped to them: 1000 h is the 168 h maximum, which
+        // this history cannot fill yet (no centre), and a turnover of 5 is all of it
+        let long = lad(json!({"hours": ["h", "value"], "turnover": ["t", "value"]}), vec![k("h", 1000.0), k("t", 5.0)]);
+        let ev = evaluate(&long, &m);
+        assert_eq!(wanted(&long, &ev, b, 1), None);
+        let p = ladder_at(&long, &ev, b, 140, None).unwrap();
+        assert_eq!((p.lookback, p.turnover), (168 * 3600, 1.0));
+        // the schedule from an input: half an hour, so an hour after the last move it re-solves
+        let fast = lad(json!({"every_hours": ["e", "value"]}), vec![k("e", 0.5)]);
+        let ev = evaluate(&fast, &m);
+        let now = 10_000_000;
+        let mut st = State::default();
+        st.moved(now - 3600);
+        assert!(matches!(decide(&fast, &ev, &mut st, now, b, 140, Some((97, 104)), 1), Decision::Move { .. }));
+        let ev = evaluate(&plain, &m);
+        assert!(matches!(decide(&plain, &ev, &mut st, now, b, 140, Some((97, 104)), 1), Decision::Keep(_)));
+        // an input that follows the position: a low turnover while the price is out of the range
+        let follow = lad(json!({"turnover": ["sw", "out"]}), vec![
+            json!({"id": "o", "kind": "out_of_range"}), k("lo", 0.1), k("hi", 0.4),
+            json!({"id": "sw", "kind": "switch", "in": {"cond": ["o", "out"], "a": ["lo", "value"], "b": ["hi", "value"]}})]);
+        let ev = evaluate(&follow, &m);
+        assert_eq!(ladder_at(&follow, &ev, b, 140, Some((97, 104))).unwrap().turnover, 0.1);
+        assert_eq!(ladder_at(&follow, &ev, b, 100, Some((97, 104))).unwrap().turnover, 0.4);
+        // and its own centre is still there
+        assert_eq!(wanted(&follow, &ev, b, 1), Some((97, 104)));
     }
 
     #[test]

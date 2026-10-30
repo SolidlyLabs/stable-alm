@@ -713,6 +713,8 @@ impl Executor {
         let now = now() as i64;
         let mut st = crate::custom::load_state(self.cid, &self.cfg.pool, self.execute);
         let range = (!positions.is_empty()).then(|| (positions.iter().map(|x| x.0).min().unwrap(), positions.iter().map(|x| x.1).max().unwrap()));
+        // the ladder's settings at this decision (its inputs may set them)
+        let mut ladder_now: Option<crate::ladder::Params> = None;
         let d = match (&rules, &graph) {
             (Some(r), _) => {
                 let d = crate::custom::decide(r, &mut st, now, tick, range, self.spacing);
@@ -728,6 +730,13 @@ impl Executor {
                 let bar = m.bar_tick.len().checked_sub(1).ok_or_else(|| "no bars in the replay market".to_string())?;
                 let d = crate::graph::decide(g, &ev, &mut st, now, bar, tick, range, self.spacing);
                 exit_to = crate::graph::exit_to(g, &ev, bar, tick, range);
+                ladder_now = crate::graph::ladder_at(g, &ev, bar, tick, range);
+                if let (Some(lp), Some(own)) = (&ladder_now, g.ladder()) {
+                    if lp.lookback != own.lookback || lp.span != own.span || lp.turnover != own.turnover || lp.every != own.every || lp.width != own.width {
+                        self.say(format!("  ladder inputs: window {:.1} h, span {}, every {:.1} h, turnover {:.0}%, width {}",
+                                         lp.lookback as f64 / 3600.0, lp.span, lp.every as f64 / crate::graph::BARS_PER_HOUR, lp.turnover * 100.0, lp.width));
+                    }
+                }
                 summary["custom"] = json!({"decision": format!("{d:?}"), "range": range, "wanted": crate::graph::wanted(g, &ev, bar, self.spacing)});
                 d
             }
@@ -743,7 +752,7 @@ impl Executor {
                 if self.blocked(m, tick, false)? {
                     return Ok(summary);
                 }
-                let ranges = match graph.as_ref().and_then(|g| g.ladder()) {
+                let ranges = match ladder_now.clone() {
                     // a ladder block: the ladder's own solve, taken when it moves enough of the value
                     Some(lp) => {
                         let spf = to_f64(sp) / 2f64.powi(96);
@@ -845,6 +854,16 @@ impl Executor {
                                       commas(idle_usable), self.cfg.max_swap_cost_bps, r.cost_bps, r.n, wait.div_ceil(60));
                     self.say(format!("  {msg}"));
                     self.wait_for_swap(&msg, false);
+                } else if let Some(ago) = (!st.exited && !positions.is_empty() && idle_usable > thr.max(self.cfg.min_swap_value))
+                    .then(|| self.current_as_target(&positions, sp, p)).flatten()
+                    .map(|t| self.leftover_held(&t, sp, p, budget0)).transpose()?.flatten()
+                {
+                    // what the last ratio swap bought and the mint could not take: a top-up would sell it
+                    // back at the same mix, paying both swaps for nothing
+                    summary["mode"] = json!("keep");
+                    self.say(format!("  {} idle is mostly what the ratio swap {ago} min ago bought and the mint could not take: not swapped back while the mix is the same (up to {} h)",
+                                     commas(idle_usable), SWAP_BACK_HOLD_S / 3600));
+                    log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "keep", "tick": tick, "reason": "swap leftover held"}));
                 } else if !st.exited && !positions.is_empty() && idle_usable > thr.max(self.cfg.min_swap_value) {
                     summary["mode"] = json!("topup");
                     let t = self.current_as_target(&positions, sp, p).unwrap();
@@ -1130,21 +1149,21 @@ impl Executor {
                 let rest: f64 = ranges[i..].iter().map(|x| x.2).sum();
                 let share = wi / rest;
                 match self.retry(&format!("mint [{tl},{tu})"), |s| s.mint_one(tl, tu, share, budget0)) {
-                    Ok(true) => {
-                        minted_any = true;
-                        UNMINTED_SWAP.lock().unwrap().get_or_insert_with(HashMap::new).remove(&unminted_key(self.cid, &self.cfg.pool));
-                    }
+                    Ok(true) => minted_any = true,
                     Ok(false) => {}
                     Err(e) => self.say_err(format!("  mint [{tl},{tu}) gave up: {e}; tokens stay idle for the next pass")),
                 }
+            }
+            if offside.is_none() {
+                self.settle_unminted()?;
             }
             if let Some(o) = offside {
                 if let Some((tl, tu)) = o.range {
                     if self.mint_one_sided(tl, tu, o.token0, budget0)? {
                         minted_any = true;
-                        UNMINTED_SWAP.lock().unwrap().get_or_insert_with(HashMap::new).remove(&unminted_key(self.cid, &self.cfg.pool));
                     }
                 }
+                self.settle_unminted()?;
                 // another round would quote the same refused swap again
                 break;
             }
@@ -1245,7 +1264,7 @@ impl Executor {
         }
         let zero_for_one = diff0 < 0.0;
         let key = unminted_key(self.cid, &self.cfg.pool);
-        let earlier = UNMINTED_SWAP.lock().unwrap().get_or_insert_with(HashMap::new).get(&key).copied();
+        let earlier = UNMINTED_SWAP.lock().unwrap().get_or_insert_with(HashMap::new).get(&key).map(|x| (x.0, x.1, x.2));
         if swaps_back(earlier, now(), zero_for_one, f) {
             let at = earlier.map(|x| x.0).unwrap_or(0);
             self.say_warn(format!("  e. ratio swap skipped: it would undo the swap of {} min ago, after which nothing was minted; minting with the balances on hand",
@@ -1290,6 +1309,7 @@ impl Executor {
                              commas(value0_of(amount_in) / self.unit), part as f64 / amount_in as f64 * 100.0));
             (amount_in, partial) = (part, true);
         }
+        let out_before = self.bal(&tout)?;
         match self.swap(&tin, &tout, amount_in, fair_of(amount_in), max_cost, "e. ratio swap") {
             Ok(_) => {}
             Err(StepErr::Refused(m)) => {
@@ -1301,8 +1321,9 @@ impl Executor {
             }
             Err(e) => return Err(e),
         }
-        // pending until a mint follows (deploy clears it)
-        UNMINTED_SWAP.lock().unwrap().get_or_insert_with(HashMap::new).insert(key, (now(), zero_for_one, f));
+        // pending until mints take most of what it bought (deploy clears it)
+        let bought = (self.bal(&tout)? - out_before).max(0) as f64;
+        UNMINTED_SWAP.lock().unwrap().get_or_insert_with(HashMap::new).insert(key, (now(), zero_for_one, f, bought, out_before as f64));
         if partial {
             return Ok(RatioSwap::Partial);
         }
@@ -1327,6 +1348,32 @@ impl Executor {
             }
         }
         Ok(lo)
+    }
+
+    /// After a round's mints: the last ratio swap counts as minted once they took most of what it
+    /// bought (swap_taken); until then a swap back within the hold is refused (swaps_back).
+    fn settle_unminted(&self) -> Res<()> {
+        let key = unminted_key(self.cid, &self.cfg.pool);
+        let Some((_, zero_for_one, _, bought, before)) = UNMINTED_SWAP.lock().unwrap().get_or_insert_with(HashMap::new).get(&key).copied() else { return Ok(()) };
+        let tout = if zero_for_one { self.t1.clone() } else { self.t0.clone() };
+        let left = (self.bal(&tout)? as f64 - before).clamp(0.0, bought);
+        if swap_taken(bought, left) {
+            UNMINTED_SWAP.lock().unwrap().get_or_insert_with(HashMap::new).remove(&key);
+        }
+        Ok(())
+    }
+
+    /// Minutes since the ratio swap whose leftover a top-up of the current ranges would swap back
+    /// (swaps_back), when it is held: a top-up then has nothing to do but undo it.
+    fn leftover_held(&self, t: &Target, sp: &BigUint, p: f64, budget0: f64) -> Res<Option<u64>> {
+        let Some(earlier) = UNMINTED_SWAP.lock().unwrap().get_or_insert_with(HashMap::new).get(&unminted_key(self.cid, &self.cfg.pool)).copied() else { return Ok(None) };
+        let ws: f64 = t.ranges.iter().map(|r| r.2).sum();
+        let ranges: Vec<(i64, i64, f64)> = t.ranges.iter().map(|(a, b, w)| (*a, *b, w / ws.max(1e-300))).collect();
+        let f = self.need0_fraction(&ranges, sp, p);
+        let (x, y) = self.usable(budget0, p)?;
+        // the way a ratio swap would go now: token0 in when there is more of it than the ranges want
+        let zero_for_one = f * (x as f64 + y as f64 / p) - (x as f64) < 0.0;
+        Ok(swaps_back(Some((earlier.0, earlier.1, earlier.2)), now(), zero_for_one, f).then(|| now().saturating_sub(earlier.0) / 60))
     }
 
     /// The pool's ratio swaps refused for their cost, in a row (live and dry runs apart).
@@ -2720,11 +2767,25 @@ mod mint_tests {
     }
 }
 
-/// Ratio swaps that no mint has followed yet, per (chain, pool): when made, which way (true: token0
-/// in) and the share of token0 (by value) the ranges wanted then. While a mint keeps failing, the next pass would otherwise size a new ratio swap from the
-/// balances the last one left, and can swap back the other way, paying the swap cost each time with
-/// nothing deployed. Kept in memory: a restart starts afresh.
-static UNMINTED_SWAP: std::sync::Mutex<Option<HashMap<(u64, String), (u64, bool, f64)>>> = std::sync::Mutex::new(None);
+/// Ratio swaps whose output no mint has taken yet, per (chain, pool): when made, which way (true:
+/// token0 in), the share of token0 (by value) the ranges wanted then, and how much of the other token
+/// it bought (raw) over the balance it had before. While a mint keeps failing, or takes only a little of what was bought (in a
+/// one-tick range the sizing band's headroom buys several times what a mint at the price takes), the
+/// next pass would otherwise size a new ratio swap from the balances the last one left, and swap back
+/// the other way, paying the swap cost each time. Kept in memory: a restart starts afresh.
+static UNMINTED_SWAP: std::sync::Mutex<Option<HashMap<(u64, String), Unminted>>> = std::sync::Mutex::new(None);
+
+/// (when, token0 in, token0 share wanted, raw amount bought, the bought token's balance before the swap)
+type Unminted = (u64, bool, f64, f64, f64);
+
+/// The share of what a ratio swap bought that a mint must take before the swap counts as minted.
+const SWAP_TAKEN_SHARE: f64 = 0.5;
+
+/// Whether the mints since a ratio swap took enough of what it bought (`bought`, raw) that what is
+/// left of it (`left`) may be swapped again.
+fn swap_taken(bought: f64, left: f64) -> bool {
+    left <= bought * (1.0 - SWAP_TAKEN_SHARE)
+}
 /// How long an unminted swap holds back a swap the other way.
 const SWAP_BACK_HOLD_S: u64 = 6 * 3600;
 
@@ -2880,7 +2941,18 @@ mod refusal_tests {
 
 #[cfg(test)]
 mod swap_back_tests {
-    use super::swaps_back;
+    use super::{swap_taken, swaps_back};
+
+    #[test]
+    fn a_swap_counts_as_minted_only_once_the_mints_took_most_of_it() {
+        // cbETH/WETH, one tick: 0.00133 cbETH bought, the mint took 0.0003 of it; swapping the rest
+        // back was the loop
+        assert!(!swap_taken(1_329_879.0, 1_030_557.0));
+        assert!(swap_taken(1_329_879.0, 600_000.0));
+        assert!(swap_taken(1_329_879.0, 0.0));
+        // nothing bought (a dry run's balances): nothing to hold back
+        assert!(swap_taken(0.0, 0.0));
+    }
 
     #[test]
     fn a_ratio_swap_does_not_undo_an_earlier_one_that_no_mint_followed() {

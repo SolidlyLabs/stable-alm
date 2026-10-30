@@ -1310,7 +1310,9 @@ pub fn run_carry(c: &Ctx, strat: &Strategy, cost: &Costs, capital: f64, b0: usiz
                     Decision::Move { .. } if !spot_ok(i) => spot_blocked += 1,
                     Decision::Move { .. } if !sim.may_move(cost, t) => sim.cap_blocked += 1,
                     Decision::Move { tl, tu, reason } => {
-                        match &glad {
+                        // the ladder's settings at the decision (its inputs may set them)
+                        let lad = glad.as_ref().and_then(|_| crate::graph::ladder_at(g, gev.as_ref().unwrap(), bd, tick_d, range));
+                        match &lad {
                             // a ladder block: the ladder's own solve, taken when it moves enough of the value
                             Some(p) => {
                                 sim.from_usd(c, cost);
@@ -3667,6 +3669,54 @@ mod tests {
                 out.push(row);
                 if let Ok(p) = std::env::var("OUT") {
                     std::fs::write(p, serde_json::to_string_pretty(&out).unwrap()).unwrap();
+                }
+            }
+        }
+    }
+
+    /// Strategies (SPEC: [{name, strategy}]) on pools (POOLS: "name=address,…" on Base) over periods
+    /// (PERIODS: "days@days_ago,…": 90@0 is the last 90 days, 90@90 the 90 before), each run's
+    /// result a line on stderr and all of them in OUT.
+    #[test]
+    #[ignore]
+    fn strategy_study() {
+        let home = std::env::var("ALM_HOME").expect("set ALM_HOME to a copy of the data");
+        let live = std::env::var("LOCALAPPDATA").map(|l| format!("{l}\\StableALM").to_lowercase()).unwrap_or_default();
+        assert!(!live.is_empty() && !home.to_lowercase().replace('/', "\\").starts_with(&live), "ALM_HOME is the live folder");
+        let spec: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(std::env::var("SPEC").expect("SPEC")).unwrap()).unwrap();
+        let pools: Vec<(String, String)> = std::env::var("POOLS").expect("POOLS").split(',').filter_map(|x| x.split_once('=')).map(|(a, b)| (a.to_string(), b.to_string())).collect();
+        let periods: Vec<(i64, i64)> = std::env::var("PERIODS").unwrap_or("90@0".into()).split(',')
+            .filter_map(|x| x.split_once('@')).filter_map(|(d, a)| Some((d.parse().ok()?, a.parse().ok()?))).collect();
+        let now = crate::engine::now() as i64;
+        let mut out = vec![];
+        for (name, pool) in &pools {
+            for (days, ago) in &periods {
+                for x in &spec {
+                    let mut req = json!({"chain_id": 8453, "pool": pool, "days": days, "capital_usd": 10000, "strategy": x["strategy"], "compare": false, "hold": false});
+                    if *ago > 0 {
+                        req["until"] = json!(now - ago * 86400);
+                    }
+                    if let Some(c) = x.get("costs") {
+                        req["costs"] = c.clone();
+                    }
+                    let t = std::time::Instant::now();
+                    let mut row = json!({"pool": name, "days": days, "ago": ago, "name": x["name"]});
+                    match execute(0, 8453, pool, *days, &req, "") {
+                        Ok(v) => {
+                            let m = &v["runs"]["main"];
+                            for k in ["value", "hodl_value", "pnl", "vs_hodl", "fees", "emissions", "il", "swap_costs", "gas", "actions", "time_in_range", "watch_errors", "capital"] {
+                                row[k] = m[k].clone();
+                            }
+                            row["span_days"] = v["span_days"].clone();
+                        }
+                        Err(e) => row["error"] = json!(e),
+                    }
+                    row["secs"] = json!(t.elapsed().as_secs_f64());
+                    eprintln!("{row}");
+                    out.push(row);
+                    if let Ok(p) = std::env::var("OUT") {
+                        std::fs::write(p, serde_json::to_string_pretty(&out).unwrap()).unwrap();
+                    }
                 }
             }
         }

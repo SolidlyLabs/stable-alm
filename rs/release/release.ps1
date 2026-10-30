@@ -66,9 +66,15 @@ try {
   }
 
   $env:CARGO_TARGET_DIR = Join-Path $rs "target-dist"
+  # source paths in panic messages and debug info name the builder's home folder: mapped to neutral
+  # names (a change of RUSTFLAGS rebuilds everything, so target-dist keeps to these)
+  $repo = Split-Path -Parent $rs
+  $env:RUSTFLAGS = "--remap-path-prefix=$(Join-Path $HOME '.cargo')=cargo --remap-path-prefix=$repo=src --remap-path-prefix=$(Join-Path $HOME '.rustup')=rustup"
   Run "cargo build" { cargo build --release }
   New-Item -ItemType Directory -Force $dist | Out-Null
   Copy-Item (Join-Path $rs "target-dist\release\StableALM.exe") $exe -Force
+  $leak = [regex]::Matches([Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe)), [regex]::Escape($HOME), "IgnoreCase").Count
+  if ($leak) { throw "the exe names the home folder $leak times: a path is not remapped" }
   # stale sums never sit next to fresh files
   Remove-Item $sums, "$sums.sig" -ErrorAction SilentlyContinue
 
