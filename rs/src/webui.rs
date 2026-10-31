@@ -829,10 +829,20 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
                         let m = crate::prices::meta(cid, &a).map_err(|e| format!("{a}: not a token on this chain ({e})"))?;
                         let all = t["all"] == true;
                         let amount = crate::prices::fnum(&t["amount"]);
+                        // from another pool's idle, as it is (absent: from Unallocated)
+                        let from = match t["from"].as_str() {
+                            Some(f) if known(f) && !f.eq_ignore_ascii_case(pool) => Some(f.to_lowercase()),
+                            Some(_) => return Err("the pool to take it from is unknown, or the pool it goes to".into()),
+                            None => None,
+                        };
                         if !all && !(amount.is_finite() && amount > 0.0) {
                             return Err(format!("enter an amount of {} above 0", m.symbol));
                         }
-                        toks.push(if all { json!({"address": a, "symbol": m.symbol, "all": true}) } else { json!({"address": a, "symbol": m.symbol, "amount": amount}) });
+                        let mut row = if all { json!({"address": a, "symbol": m.symbol, "all": true}) } else { json!({"address": a, "symbol": m.symbol, "amount": amount}) };
+                        if let Some(f) = from {
+                            row["from"] = json!(f);
+                        }
+                        toks.push(row);
                     }
                     if toks.is_empty() {
                         return Err("choose at least one token".into());

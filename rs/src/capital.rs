@@ -585,6 +585,13 @@ fn ordered(cid: u64, avail: &Tokens, first: &[String]) -> Vec<(String, i128, f64
     out
 }
 
+/// `ordered`, but only the tokens in `first`: an automatic fill (a dollar Add, Reset) gives a pool its
+/// own tokens and the stables, never another pool's kind of token, which it could only hold idle
+/// or sell (a USDC/USDT pool was once given WETH it never used). Chosen tokens are added by name.
+fn ordered_only(cid: u64, avail: &Tokens, first: &[String]) -> Vec<(String, i128, f64)> {
+    ordered(cid, avail, first).into_iter().filter(|x| first.contains(&x.0)).collect()
+}
+
 fn add_to(book: &mut Book, cid: u64, pool: &str, got: &[(String, i128)]) {
     let mut own = book.pool(cid, pool);
     for (t, a) in got {
@@ -619,9 +626,52 @@ pub fn take_tokens(free: &Tokens, want: &[(String, Option<i128>)]) -> Vec<(Strin
     out
 }
 
+/// What a pool may give of its idle to an Add, as it is: not its own two tokens (its working money,
+/// and what a parking claim on it is paid back in), and of any other token only what is left over
+/// the claims it hosts in that token.
+fn givable(idle: &Tokens, own: &[String], hosted: &[(String, i128)]) -> Tokens {
+    idle.iter()
+        .filter(|(t, _)| !own.contains(t))
+        .map(|(t, a)| (t.clone(), a - hosted.iter().filter(|h| h.0 == *t).map(|h| h.1).sum::<i128>()))
+        .filter(|(_, a)| *a > 0)
+        .collect()
+}
+
+/// An Add of chosen tokens into `pool`: what comes from Unallocated (`free`, source None), and what
+/// another pool gives of its idle as it is (source Some), at most what `rooms` says that pool may
+/// give (givable; a pool not in it gives nothing), taken out of its book. What `pool` gets, one
+/// entry per token (not yet added: the caller adds it).
+fn add_chosen(book: &mut Book, cid: u64, pool: &str, free: &Tokens, want: &[(Option<String>, String, Option<i128>)], rooms: &BTreeMap<String, Tokens>) -> Vec<(String, i128)> {
+    let of = |src: &Option<String>| want.iter().filter(|w| w.0 == *src).map(|w| (w.1.clone(), w.2)).collect::<Vec<_>>();
+    let mut got = take_tokens(free, &of(&None));
+    let mut sources: Vec<String> = want.iter().filter_map(|w| w.0.clone()).filter(|s| !s.eq_ignore_ascii_case(pool)).collect();
+    sources.sort();
+    sources.dedup();
+    for src in &sources {
+        let Some(room) = rooms.get(src) else { continue };
+        let mut theirs = book.pool(cid, src);
+        let part = take_tokens(room, &of(&Some(src.clone())));
+        for (t, a) in &part {
+            *theirs.entry(t.clone()).or_default() -= a;
+        }
+        book.set_pool(cid, src, theirs);
+        crate::info!("capital", "{} gives {} token(s) of its idle, as they are", &src[..10.min(src.len())], part.len());
+        got.extend(part);
+    }
+    // one entry per token: the same token from Unallocated and from a pool is one amount (valued once)
+    let mut merged: Vec<(String, i128)> = vec![];
+    for (t, a) in got {
+        match merged.iter_mut().find(|x| x.0 == t) {
+            Some(x) => x.1 += a,
+            None => merged.push((t, a)),
+        }
+    }
+    merged
+}
+
 /// Funds the enabled pools from Unallocated up to their allocation % of the chain's value (what they
 /// manage already counts): how the book starts, and what Reset does. Each pool gets its own tokens
-/// first, then the chain's stables, then anything else.
+/// first, then the chain's stables; nothing else (ordered_only).
 fn fill_from_allocations(book: &mut Book, cid: u64, pools: &[&PoolConfig], acct: &Value, wallet: &Tokens, live: bool) {
     let total = acct["chains"][cid.to_string()]["total_usd"].as_f64().unwrap_or(0.0);
     for cfg in pools.iter().filter(|c| c.enabled && c.allocation_pct > 0.0) {
@@ -636,7 +686,7 @@ fn fill_from_allocations(book: &mut Book, cid: u64, pools: &[&PoolConfig], acct:
         first.push(crate::chains::get(cid).usd.to_lowercase());
         first.extend(crate::chains::default_funding(cid));
         let free = unallocated(&book.held(cid), wallet);
-        let got = take(&ordered(cid, &free, &first), need);
+        let got = take(&ordered_only(cid, &free, &first), need);
         crate::info!("capital", "[{}] given {} (${}) from Unallocated, to reach its {}%", cfg.name, describe(cid, &got), crate::engine::commas(value(cid, &got.iter().cloned().collect())), cfg.allocation_pct);
         add_to(book, cid, &cfg.pool, &got);
     }
@@ -703,31 +753,51 @@ pub fn prepare(book: &mut Book, cid: u64, pools: &[&PoolConfig], acct: &Value, w
         match r["kind"].as_str().unwrap_or("") {
             "add" if r["tokens"].is_array() => {
                 let pool = r["pool"].as_str().unwrap_or("").to_lowercase();
-                let want: Vec<(String, Option<i128>)> = r["tokens"].as_array().into_iter().flatten().filter_map(|t| {
+                // (source: None for Unallocated, else the pool whose idle it comes from; token; raw or all)
+                let want: Vec<(Option<String>, String, Option<i128>)> = r["tokens"].as_array().into_iter().flatten().filter_map(|t| {
                     let a = t["address"].as_str()?.to_lowercase();
                     let raw = if t["all"] == true { None } else {
                         let d = crate::prices::meta(cid, &a).ok()?.decimals;
                         Some((t["amount"].as_f64()? * 10f64.powi(d as i32)).floor() as i128)
                     };
-                    Some((a, raw))
+                    Some((t["from"].as_str().map(|f| f.to_lowercase()).filter(|f| *f != pool), a, raw))
                 }).collect();
+                // a pool with a transaction in flight has its book settled first (settle_dirty_chain):
+                // writing it now would drop that mark, so the request waits for the next cycle
+                if book.is_dirty(cid, &pool) || want.iter().any(|w| w.0.as_ref().map(|f| book.is_dirty(cid, f)).unwrap_or(false)) {
+                    crate::info!("capital", "[{}] add waits: a pool it touches has a transaction to settle", name_of(pools, &pool));
+                    continue;
+                }
                 let free = unallocated(&book.held(cid), wallet);
-                let got = take_tokens(&free, &want);
+                // what each source pool may give; one whose tokens cannot be read gives nothing
+                let rooms: BTreeMap<String, Tokens> = want.iter().filter_map(|w| w.0.clone())
+                    .filter(|s| pools.iter().any(|c| c.pool.eq_ignore_ascii_case(s)))
+                    .filter_map(|s| {
+                        let (a, b) = crate::chain::pool_tokens(cid, &s).ok()?;
+                        let room = givable(&book.pool(cid, &s), &[a.to_lowercase(), b.to_lowercase()], &crate::parking::hosted_tokens(live, cid, &s));
+                        Some((s, room))
+                    })
+                    .collect();
+                let got = add_chosen(book, cid, &pool, &free, &want, &rooms);
                 let moved = value(cid, &got.iter().cloned().collect());
-                crate::info!("capital", "[{}] added {} (${}) from Unallocated, as chosen", name_of(pools, &pool), describe(cid, &got), crate::engine::commas(moved));
+                crate::info!("capital", "[{}] added {} (${}), as chosen", name_of(pools, &pool), describe(cid, &got), crate::engine::commas(moved));
                 crate::engine::log(json!({"chain_id": cid, "pool": pool, "kind": "capital", "what": "add", "usd": moved, "tokens": describe(cid, &got)}));
                 add_to(book, cid, &pool, &got);
                 remove(&id);
             }
             "add" => {
                 let pool = r["pool"].as_str().unwrap_or("").to_lowercase();
+                if book.is_dirty(cid, &pool) {
+                    crate::info!("capital", "[{}] add waits: the pool has a transaction to settle", name_of(pools, &pool));
+                    continue;
+                }
                 let mut first = vec![crate::chains::get(cid).usd.to_lowercase()];
                 first.extend(crate::chains::default_funding(cid));
                 if let Ok((a, b)) = crate::chain::pool_tokens(cid, &pool) {
                     first.extend([a, b]);
                 }
                 let free = unallocated(&book.held(cid), wallet);
-                let got = take(&ordered(cid, &free, &first), usd);
+                let got = take(&ordered_only(cid, &free, &first), usd);
                 let moved = value(cid, &got.iter().cloned().collect());
                 crate::info!("capital", "[{}] added {} (${}) from Unallocated (asked ${})", name_of(pools, &pool), describe(cid, &got), crate::engine::commas(moved), crate::engine::commas(usd));
                 crate::engine::log(json!({"chain_id": cid, "pool": pool, "kind": "capital", "what": "add", "usd": moved, "asked_usd": usd}));
@@ -908,6 +978,57 @@ mod tests {
         assert_eq!(after, toks(&[("usdc", 100), ("weth", 3)]));
         // it can never end with more than it was given plus its own gains
         assert_eq!(after_run(&r, &toks(&[("usdc", 600), ("weth", 50)])), toks(&[]));
+    }
+
+    #[test]
+    fn an_add_can_take_a_token_stuck_in_another_pool_as_it_is() {
+        let (stable, eth) = ("0xstable", "0xeth");
+        let mut b = Book::default();
+        // the stable pool was once given WETH it cannot use
+        b.set_pool(8453, stable, toks(&[("usdc", 500), ("weth", 38)]));
+        let free = toks(&[("usdc", 100)]);
+        // what the stable pool may give: not its own usdc/usdt
+        let rooms = |b: &Book| -> BTreeMap<String, Tokens> {
+            [(stable.to_string(), super::givable(&b.pool(8453, stable), &["usdc".to_string(), "usdt".to_string()], &[]))].into_iter().collect()
+        };
+        let want = vec![(None, "usdc".to_string(), Some(40)), (Some(stable.to_string()), "weth".to_string(), None),
+                        (Some(stable.to_string()), "usdc".to_string(), None)];
+        let r = rooms(&b);
+        let got = super::add_chosen(&mut b, 8453, eth, &free, &want, &r);
+        assert_eq!(got, vec![("usdc".to_string(), 40), ("weth".to_string(), 38)]);
+        // the stable pool keeps its own USDC (asked for, refused); its WETH is gone from its book
+        assert_eq!(b.pool(8453, stable), toks(&[("usdc", 500)]));
+        // never more than the source holds, never from an unknown pool or from the pool itself
+        b.set_pool(8453, stable, toks(&[("weth", 10)]));
+        let r = rooms(&b);
+        let got = super::add_chosen(&mut b, 8453, eth, &Tokens::new(), &[(Some(stable.to_string()), "weth".to_string(), Some(99)),
+                                                                          (Some("0xother".to_string()), "weth".to_string(), None),
+                                                                          (Some(eth.to_string()), "weth".to_string(), None)], &r);
+        assert_eq!(got, vec![("weth".to_string(), 10)]);
+        assert!(b.pool(8453, stable).is_empty());
+        // one source named twice, apart in the request: taken once, capped at what it holds
+        b.set_pool(8453, stable, toks(&[("weth", 10), ("aero", 5)]));
+        let r = rooms(&b);
+        let got = super::add_chosen(&mut b, 8453, eth, &Tokens::new(), &[(Some(stable.to_string()), "weth".to_string(), Some(6)),
+                                                                          (None, "usdc".to_string(), Some(1)),
+                                                                          (Some(stable.to_string()), "weth".to_string(), Some(6))], &r);
+        assert_eq!(got, vec![("weth".to_string(), 10)]);
+        assert_eq!(b.pool(8453, stable), toks(&[("aero", 5)]));
+        // the same token from Unallocated and from a pool: one entry, the sum
+        b.set_pool(8453, stable, toks(&[("weth", 7)]));
+        let r = rooms(&b);
+        let got = super::add_chosen(&mut b, 8453, eth, &toks(&[("weth", 3)]), &[(None, "weth".to_string(), None), (Some(stable.to_string()), "weth".to_string(), None)], &r);
+        assert_eq!(got, vec![("weth".to_string(), 10)]);
+    }
+
+    #[test]
+    fn a_pool_gives_neither_its_own_tokens_nor_what_backs_the_claims_it_hosts() {
+        let idle = toks(&[("usdc", 1000), ("weth", 50), ("aero", 9)]);
+        let own = ["usdc".to_string(), "usdt".to_string()];
+        // 30 weth backs a claim another pool parked with it: 20 may go
+        assert_eq!(super::givable(&idle, &own, &[("weth".to_string(), 30)]), toks(&[("weth", 20), ("aero", 9)]));
+        // a claim larger than the idle: none of that token
+        assert_eq!(super::givable(&idle, &own, &[("aero".to_string(), 12)]), toks(&[("weth", 50)]));
     }
 
     #[test]

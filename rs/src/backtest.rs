@@ -1323,11 +1323,17 @@ pub fn run_carry(c: &Ctx, strat: &Strategy, cost: &Costs, capital: f64, b0: usiz
                                 );
                                 if sim.ranges.is_empty() || turnover(c, &sim, &target, s) >= p.turnover {
                                     sim.rebalance(c, cost, i, t, &target, &reason);
+                                    cst.moved(t);
+                                } else {
+                                    // a solve that kept the ranges, as live (engine.rs): no move
+                                    cst.solved(t);
                                 }
                             }
-                            None => sim.rebalance(c, cost, i, t, &[(tl, tu, 1.0)], &reason),
+                            None => {
+                                sim.rebalance(c, cost, i, t, &[(tl, tu, 1.0)], &reason);
+                                cst.moved(t);
+                            }
                         }
-                        cst.moved(t);
                     }
                     Decision::Exit(reason) => {
                         let to = crate::graph::exit_to(g, gev.as_ref().unwrap(), bd, tick_d, range);

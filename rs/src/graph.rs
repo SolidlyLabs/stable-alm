@@ -55,6 +55,9 @@ use crate::data::Market;
 use crate::ta;
 
 pub const BARS_PER_HOUR: f64 = 12.0;
+/// A ladder whose rebalance condition holds re-solves at most this often while each solve keeps the
+/// ranges: it reads 5-minute bars, so a sooner solve gives the same answer.
+pub const LADDER_RECHECK_S: i64 = 300;
 const MAX_NODES: usize = 60;
 
 /// (kind, inputs, outputs, number params with (default, min, max)). Units of a "ticks" param
@@ -1252,10 +1255,16 @@ pub fn decide(g: &Graph, ev: &Eval, st: &mut State, now: i64, bar: usize, tick: 
     };
     let reb = g.sink("rebalance");
     let ladder = g.sink("ladder");
+    // the schedule below returns before the rebalance condition is read: a condition that no longer
+    // holds still clears its delay here, or a solve that keeps the ranges would leave the old start
+    // for the next time it holds
+    if reb.and_then(|r| input(g, ev, r, "when", &at)).map(truth) == Some(false) {
+        st.outside_since = None;
+    }
     if let Some(l) = ladder {
         // a ladder re-solves on its schedule; the caller moves only when the solve differs enough
         let every = (ladder_value(g, ev, l, "every_hours", &at) * 3600.0) as i64;
-        if now - st.last_move >= every {
+        if now - st.last_move.max(st.last_solve) >= every {
             return Decision::Move { tl: wl, tu: wu, reason: format!("ladder re-solve (every {})", mins(every)) };
         }
     }
@@ -1264,7 +1273,7 @@ pub fn decide(g: &Graph, ev: &Eval, st: &mut State, now: i64, bar: usize, tick: 
         // a ladder without a rebalance condition waits for its schedule
         None if ladder.is_some() => {
             st.outside_since = None;
-            return Decision::Keep(format!("ladder: next re-solve in {}", mins((ladder_value(g, ev, ladder.unwrap(), "every_hours", &at) * 3600.0) as i64 - (now - st.last_move))));
+            return Decision::Keep(format!("ladder: next re-solve in {}", mins((ladder_value(g, ev, ladder.unwrap(), "every_hours", &at) * 3600.0) as i64 - (now - st.last_move.max(st.last_solve)))));
         }
         None => !(tl <= tick && tick < tu),
     };
@@ -1281,6 +1290,11 @@ pub fn decide(g: &Graph, ev: &Eval, st: &mut State, now: i64, bar: usize, tick: 
         return Decision::Wait(format!("cooldown: next move allowed in {}", mins(cool - (now - st.last_move))));
     }
     if ladder.is_some() {
+        // the last solve kept the ranges (under the turnover): the condition still holds, so look
+        // again on the next bar, not after a new delay and cooldown
+        if st.last_solve > st.last_move && now - st.last_solve < LADDER_RECHECK_S {
+            return Decision::Wait(format!("rebalance condition true; the ladder kept its ranges {} ago, re-solving in {}", mins(now - st.last_solve), mins(LADDER_RECHECK_S - (now - st.last_solve))));
+        }
         return Decision::Move { tl: wl, tu: wu, reason: "rebalance condition true: re-solving the ladder".into() };
     }
     if (wl, wu) == (tl, tu) {
@@ -1628,6 +1642,48 @@ mod tests {
         st.moved(now);
         assert!(matches!(decide(&g2, &ev2, &mut st, now + 3600, b, 120, Some((97, 104)), 1), Decision::Move { .. }));
         assert!(matches!(decide(&g2, &ev2, &mut st, now + 3600, b, 100, Some((97, 104)), 1), Decision::Keep(_)));
+        // OOR15: out of range for 15 min, 60 min cooldown. A re-solve that keeps the ranges (under the
+        // turnover) is no move: the delay and the cooldown do not start again, and while still out
+        // of range the ladder looks again on the next bar
+        let g3 = lad(vec![json!({"id": "oor", "kind": "out_of_range"}),
+                          json!({"id": "m", "kind": "rebalance", "p": {"delay_min": 15, "cooldown_min": 60}, "in": {"when": ["oor", "out"]}})]).unwrap();
+        let ev3 = evaluate(&g3, &m);
+        let mut st = State::default();
+        st.moved(now);
+        let at = now + 2 * 3600;
+        assert!(matches!(decide(&g3, &ev3, &mut st, at, b, 120, Some((97, 104)), 1), Decision::Wait(_)), "out of range: the 15 min delay starts");
+        assert!(matches!(decide(&g3, &ev3, &mut st, at + 15 * 60, b, 120, Some((97, 104)), 1), Decision::Move { .. }), "after 15 min: re-solve");
+        st.solved(at + 15 * 60);
+        assert_eq!((st.last_move, st.outside_since), (now, Some(at)), "a kept solve leaves the move and the trigger as they were");
+        assert!(matches!(decide(&g3, &ev3, &mut st, at + 16 * 60, b, 120, Some((97, 104)), 1), Decision::Wait(_)), "a minute later: the same bar's answer");
+        assert!(matches!(decide(&g3, &ev3, &mut st, at + 20 * 60, b, 120, Some((97, 104)), 1), Decision::Move { .. }),
+                "next bar: re-solve again, not after another 15 min delay or 60 min cooldown");
+        // back in range: the trigger clears as before
+        assert!(matches!(decide(&g3, &ev3, &mut st, at + 21 * 60, b, 100, Some((97, 104)), 1), Decision::Keep(_)));
+        assert_eq!(st.outside_since, None);
+        // a real move: cooldown from it, as before
+        st.moved(at + 25 * 60);
+        assert!(matches!(decide(&g3, &ev3, &mut st, at + 26 * 60, b, 120, Some((97, 104)), 1), Decision::Wait(_)), "out again: the delay starts");
+        assert!(matches!(decide(&g3, &ev3, &mut st, at + 42 * 60, b, 120, Some((97, 104)), 1), Decision::Wait(r) if r.starts_with("cooldown")),
+                "past the delay, 17 min after the move: the cooldown holds");
+        assert!(matches!(decide(&g3, &ev3, &mut st, at + 86 * 60, b, 120, Some((97, 104)), 1), Decision::Move { .. }), "after the cooldown: re-solve");
+        // the plain ladder's schedule counts from a kept solve: no solve every cycle once due
+        let mut st = State::default();
+        st.moved(now);
+        st.solved(now + 6 * 3600);
+        assert!(matches!(decide(&g, &ev, &mut st, now + 7 * 3600, b, 120, Some((97, 104)), 1), Decision::Keep(_)), "schedule from the kept solve");
+        assert!(matches!(decide(&g, &ev, &mut st, now + 12 * 3600, b, 120, Some((97, 104)), 1), Decision::Move { .. }));
+        // the schedule falls due while the condition has just stopped holding: its delay starts afresh
+        // the next time it holds (the price out at 05:50, back in at 06:00 when the schedule solves)
+        let mut st = State::default();
+        st.moved(now);
+        let due = now + 6 * 3600;
+        assert!(matches!(decide(&g3, &ev3, &mut st, due - 600, b, 120, Some((97, 104)), 1), Decision::Wait(_)), "out at 05:50");
+        assert!(matches!(decide(&g3, &ev3, &mut st, due, b, 100, Some((97, 104)), 1), Decision::Move { .. }), "06:00: back in, the schedule solves");
+        st.solved(due);
+        assert_eq!(st.outside_since, None, "the condition no longer held: its delay was cleared");
+        assert!(matches!(decide(&g3, &ev3, &mut st, due + 300, b, 120, Some((97, 104)), 1), Decision::Wait(_)), "06:05 out again: a new 15 min delay");
+        assert_eq!(st.outside_since, Some(due + 300));
         // one output to place liquidity: a range or a ladder, not both
         let both = lad(vec![json!({"id": "p", "kind": "price"}), json!({"id": "r", "kind": "range", "in": {"lower": ["p", "tick"], "upper": ["p", "tick"]}})]);
         assert!(both.is_err());

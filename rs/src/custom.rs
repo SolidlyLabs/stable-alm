@@ -188,6 +188,9 @@ pub struct State {
     /// since when the re-entry condition has held without a break (graph exits' confirm_hours)
     #[serde(default)]
     pub back_since: Option<i64>,
+    /// a ladder's last solve, moved or kept: its schedule counts from it (`solved`)
+    #[serde(default)]
+    pub last_solve: i64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -266,11 +269,19 @@ use Decision::Keep;
 impl State {
     pub fn moved(&mut self, now: i64) {
         self.last_move = now;
+        self.last_solve = now;
         self.force_solve = false;
         self.outside_since = None;
         self.exited = false;
         self.out_since = None;
         self.back_since = None;
+    }
+    /// A ladder re-solve whose target was too close to the ranges to move them (under its
+    /// turnover): the schedule counts from now, but nothing moved, so the cooldown and the
+    /// out-of-range delay still count from the last real move and trigger.
+    pub fn solved(&mut self, now: i64) {
+        self.last_solve = now;
+        self.force_solve = false;
     }
     /// An exit that waits in `to` is done.
     pub fn exited_to(&mut self, to: ExitTo) {

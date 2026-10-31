@@ -761,7 +761,8 @@ impl Executor {
                         if moved < lp.turnover {
                             self.say(format!("  ladder target differs by {:.0}% < turnover {:.0}%: keep", moved * 100.0, lp.turnover * 100.0));
                             summary["mode"] = json!("keep");
-                            st.moved(now);
+                            // a solve, not a move: the cooldown and the out-of-range delay keep running
+                            st.solved(now);
                             save(self, &st);
                             return Ok(summary);
                         }

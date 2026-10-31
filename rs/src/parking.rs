@@ -187,6 +187,25 @@ fn claim_usd(cid: u64, x: &Value) -> f64 {
 
 /// Claims on chain `cid` that `pool` holds for others and that it owes (as their origin), in USD:
 /// (hosted, parked by it). A pool's budget is its share plus what it hosts less what it parked.
+/// What `pool` holds for pools that parked with it (claims not yet repaid), raw per token: its idle
+/// must keep that much of each to pay them back.
+pub fn hosted_tokens(live: bool, cid: u64, pool: &str) -> Vec<(String, i128)> {
+    hosted_of(&lots(live), cid, pool)
+}
+
+fn hosted_of(lots: &[Value], cid: u64, pool: &str) -> Vec<(String, i128)> {
+    let mut out: Vec<(String, i128)> = vec![];
+    for x in lots.iter().filter(|x| is_claim(x) && x["chain_id"].as_u64() == Some(cid) && x["stage"] != "repaid"
+                                  && x["pool"].as_str().map(|p| p.eq_ignore_ascii_case(pool)).unwrap_or(false)) {
+        let (t, a) = (x["token"].as_str().unwrap_or("").to_lowercase(), x["amount"].as_str().and_then(|s| s.parse::<i128>().ok()).unwrap_or(0));
+        match out.iter_mut().find(|y| y.0 == t) {
+            Some(y) => y.1 += a,
+            None => out.push((t, a)),
+        }
+    }
+    out
+}
+
 pub fn claims_usd(live: bool, cid: u64, pool: &str) -> (f64, f64) {
     split_claims(&lots(live), cid, pool, &|x| claim_usd(cid, x))
 }

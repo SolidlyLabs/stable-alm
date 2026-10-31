@@ -1141,7 +1141,7 @@ function capDlg(kind, id, pool, tok) {
     <div><label class=f>Into pool</label><select id="capTo" onchange="addRows()">${opts(pool)}</select></div>
     <div class="tabs"><button type=button id="addTabTok" onclick="addMode('tok')">Choose tokens</button><button type=button class="sec" id="addTabUsd" onclick="addMode('usd')">By dollar amount</button></div>
     <div id="addTok"><div class="pick" id="addList"></div><div class="prev" id="capPrev"></div></div>
-    <div id="addUsd" hidden><div class="small mute">Unallocated on ${esc(chainOf(id).name)}: <b>${usd(cs.unallocated_usd, 2)}</b>. USDC is used first, then the other stables, then the pool's own tokens.</div>${amt}</div>`;
+    <div id="addUsd" hidden><div class="small mute">Unallocated on ${esc(chainOf(id).name)}: <b>${usd(cs.unallocated_usd, 2)}</b>. USDC is used first, then the other stables, then the pool's own tokens; other tokens only when chosen on the first tab.</div>${amt}</div>`;
   if (kind === "withdraw") body = `<h3>Withdraw to Unallocated, as USDC</h3>
     <div class="pick"><label class="all"><input type=checkbox id="capAll" onchange="capAllTog(this.checked)" ${pool ? "" : "checked"}><span><b>All pools</b>, split equally</span></label>
       ${mine.filter(p => capp(p) > 0.5).map(p => `<label><input type=checkbox class="capPick" value="${esc(p.pool.toLowerCase())}" ${!pool || p.pool.toLowerCase() === pool ? "checked" : ""} onchange="capPrev()"><span>${esc(p.name)}</span><span class="mono mute">${usd(capp(p), 0)}</span></label>`).join("")}</div>
@@ -1163,35 +1163,53 @@ function addMode(m) {
   $("addTabTok").classList.toggle("sec", m !== "tok"); $("addTabUsd").classList.toggle("sec", m !== "usd");
   capPrev();
 }
-// the token rows: what is unallocated, whether it goes in as it is or is swapped, and what other pools hold of it
+// What the Add dialog offers for pool `to`, each with a `key` (its pick): the unallocated tokens, then
+// tokens stuck idle in another pool (not one of that pool's two, so it can only hold them), taken
+// from it as they are (`from`); last, the target's own tokens with none to take, to say where they are.
+function addCandidates(id, to) {
+  const rows = unalTokens(id).map(t => ({...t, key: t.address}));
+  for (const [n, c] of Object.entries((capOf(id) || {}).pools || {})) {
+    const src = c.pool.toLowerCase(), theirs = poolToks(id, src);
+    if (src === to || theirs.length < 2) continue;
+    for (const t of c.idle || []) {
+      const a = t.address.toLowerCase();
+      if (theirs.includes(a) || !((t.usd || 0) >= 0.01)) continue;
+      rows.push({address: a, symbol: t.symbol, amount: t.amount, usd: t.usd || 0, managed: true, from: src, fromName: n, key: a + "@" + src,
+                 logo: ((TOKENS || []).find(x => x.address.toLowerCase() === a) || {}).logo});
+    }
+  }
+  for (const a of poolToks(id, to)) if (!rows.some(t => t.address === a)) {
+    const e = idleElsewhere(id, a, to);
+    if (e.length) rows.push({address: a, symbol: e[0].symbol, amount: 0, usd: 0, managed: true, none: true, key: a + "@none",
+                             logo: ((TOKENS || []).find(t => t.address.toLowerCase() === a) || {}).logo});
+  }
+  return rows;
+}
+// the token rows: what can go in, whether it goes in as it is or is swapped, and where else the token is
 function addRows() {
   const d = CAPDLG, el = $("addList"); if (!el || !d || d.kind !== "add") return;
-  const to = $("capTo").value, own = poolToks(d.id, to), rows = unalTokens(d.id);
-  // the pool's own tokens with none unallocated: listed, to say where they are
-  for (const a of own) if (!rows.some(t => t.address === a)) {
-    const e = idleElsewhere(d.id, a, to);
-    if (e.length) rows.push({address: a, symbol: e[0].symbol, amount: 0, usd: 0, managed: true, none: true, logo: ((TOKENS || []).find(t => t.address.toLowerCase() === a) || {}).logo});
-  }
+  const to = $("capTo").value, own = poolToks(d.id, to), rows = addCandidates(d.id, to);
   el.innerHTML = rows.length ? rows.map(t => {
-    const pk = d.picks[t.address] || {}, a = esc(t.address), e = idleElsewhere(d.id, t.address, to);
+    const pk = d.picks[t.key] || {}, k = esc(t.key), e = idleElsewhere(d.id, t.address, to).filter(x => (capOf(d.id).pools[x.name] || {}).pool.toLowerCase() !== t.from);
     const how = t.none ? "none unallocated" : own.includes(t.address) ? "one of the pool's tokens: goes in without a swap" : "swapped into the pool's tokens when it runs, within its swap cost limit";
-    const more = (t.managed ? "" : " · not managed yet: the app follows it from now on") + (e.length ? ` · idle in ${e.map(x => `${esc(x.name)} (${fmt(x.amount, 4)})`).join(", ")}: Withdraw or Move there to free it` : "");
-    return `<div class="trow${t.none ? " off" : ""}"><input type=checkbox ${pk.on ? "checked" : ""} ${t.none ? "disabled" : ""} onchange="addPick('${a}',this.checked)">
-      <span>${logo(t)} <b>${esc(t.symbol)}</b> <span class="mono mute small">${t.none ? "" : `${fmt(t.amount, 6)} · ${usd(t.usd, 2)}`}</span></span>
-      <span class="q">${t.none ? "" : `<input type=number min=0 step=any value="${pk.on && !pk.all && pk.amount ? pk.amount : ""}" placeholder="${pk.on && pk.all ? "all" : "amount"}" oninput="addAmt('${a}',this.value)"><button type=button class="sec sm" onclick="addMax('${a}')">Max</button>`}</span>
-      <div class="note">${how}${more}</div></div>`;
+    const src = t.from ? ` · from ${esc(t.fromName)}'s idle, which cannot use it: moved as it is, no transaction` : "";
+    const more = (t.managed ? "" : " · not managed yet: the app follows it from now on") + (e.length && !t.from ? ` · idle in ${e.map(x => `${esc(x.name)} (${fmt(x.amount, 4)})`).join(", ")}` : "");
+    return `<div class="trow${t.none ? " off" : ""}"><input type=checkbox ${pk.on ? "checked" : ""} ${t.none ? "disabled" : ""} onchange="addPick('${k}',this.checked)">
+      <span>${logo(t)} <b>${esc(t.symbol)}</b>${t.from ? ` <span class="small mute">in ${esc(t.fromName)}</span>` : ""} <span class="mono mute small">${t.none ? "" : `${fmt(t.amount, 6)} · ${usd(t.usd, 2)}`}</span></span>
+      <span class="q">${t.none ? "" : `<input type=number min=0 step=any value="${pk.on && !pk.all && pk.amount ? pk.amount : ""}" placeholder="${pk.on && pk.all ? "all" : "amount"}" oninput="addAmt('${k}',this.value)"><button type=button class="sec sm" onclick="addMax('${k}')">Max</button>`}</span>
+      <div class="note">${how}${src}${more}</div></div>`;
   }).join("") : `<div class="small mute" style="padding:8px">Nothing unallocated on ${esc(chainOf(d.id).name)}${TOKENS ? "" : " (reading the wallet's tokens…)"}.</div>`;
   capPrev();
 }
-function addPick(a, on) { const pk = CAPDLG.picks[a] = CAPDLG.picks[a] || {}; pk.on = on; if (on && !(pk.amount > 0)) pk.all = true; addRows(); }
-function addMax(a) { CAPDLG.picks[a] = {on: true, all: true}; addRows(); }
-function addAmt(a, v) { const n = parseFloat(v); CAPDLG.picks[a] = {on: n > 0, all: false, amount: n > 0 ? n : 0}; capPrev(); }
-// the chosen tokens: [{address, symbol, amt, usd, swap, all}]
+function addPick(k, on) { const pk = CAPDLG.picks[k] = CAPDLG.picks[k] || {}; pk.on = on; if (on && !(pk.amount > 0)) pk.all = true; addRows(); }
+function addMax(k) { CAPDLG.picks[k] = {on: true, all: true}; addRows(); }
+function addAmt(k, v) { const n = parseFloat(v); CAPDLG.picks[k] = {on: n > 0, all: false, amount: n > 0 ? n : 0}; capPrev(); }
+// the chosen tokens: [{address, symbol, amt, usd, swap, all, from}]
 function addChosen() {
-  const d = CAPDLG, own = poolToks(d.id, $("capTo").value);
-  return unalTokens(d.id).filter(t => (d.picks[t.address] || {}).on).map(t => {
-    const pk = d.picks[t.address], all = pk.all || (pk.amount || 0) >= t.amount, amt = all ? t.amount : pk.amount || 0;
-    return {address: t.address, symbol: t.symbol, amt, all, usd: t.amount > 0 ? t.usd * amt / t.amount : 0, swap: !own.includes(t.address)};
+  const d = CAPDLG, to = $("capTo").value, own = poolToks(d.id, to);
+  return addCandidates(d.id, to).filter(t => !t.none && (d.picks[t.key] || {}).on).map(t => {
+    const pk = d.picks[t.key], all = pk.all || (pk.amount || 0) >= t.amount, amt = all ? t.amount : pk.amount || 0;
+    return {address: t.address, symbol: t.symbol, amt, all, usd: t.amount > 0 ? t.usd * amt / t.amount : 0, swap: !own.includes(t.address), from: t.from, fromName: t.fromName};
   }).filter(x => x.amt > 0);
 }
 function capPicked() { return [...document.querySelectorAll(".capPick")].filter(x => x.checked).map(x => x.value); }
@@ -1206,7 +1224,7 @@ function capPrev() {
   if (d.kind === "add") {
     const sel = addChosen(), swaps = sel.filter(x => x.swap).length, tot = sel.reduce((s, x) => s + x.usd, 0);
     el.innerHTML = !sel.length ? `<div class="small mute">Tick the tokens to add, or type an amount.</div>` :
-      `<div><span><b>Adds</b></span><span class=mono><b>${usd(tot, 2)}</b></span></div>` + sel.map(x => `<div><span>${x.all ? "all " : ""}${fmt(x.amt, 6)} ${esc(x.symbol)}</span><span class=mono>${usd(x.usd, 2)}${x.swap ? " · swapped" : " · as it is"}</span></div>`).join("") +
+      `<div><span><b>Adds</b></span><span class=mono><b>${usd(tot, 2)}</b></span></div>` + sel.map(x => `<div><span>${x.all ? "all " : ""}${fmt(x.amt, 6)} ${esc(x.symbol)}${x.from ? ` <span class=mute>from ${esc(x.fromName)}</span>` : ""}</span><span class=mono>${usd(x.usd, 2)}${x.swap ? " · swapped" : " · as it is"}</span></div>`).join("") +
       `<div class="small mute" style="display:block;margin-top:4px">No transaction now: the tokens are assigned to the pool. When it next runs it ${swaps ? `makes ${swaps} swap${swaps > 1 ? "s" : ""} into its tokens, then ` : ""}deposits them in its range (a mint).</div>`;
     return;
   }
@@ -1226,7 +1244,7 @@ async function capGo() {
     if (d.kind === "add" && d.mode === "tok") {
       const sel = addChosen();
       if (!sel.length) throw new Error("tick at least one token");
-      await api("/api/capital", {action: "add", chain_id: d.id, pool: $("capTo").value, tokens: sel.map(x => x.all ? {address: x.address, all: true} : {address: x.address, amount: x.amt})});
+      await api("/api/capital", {action: "add", chain_id: d.id, pool: $("capTo").value, tokens: sel.map(x => ({...(x.all ? {address: x.address, all: true} : {address: x.address, amount: x.amt}), ...(x.from ? {from: x.from} : {})}))});
     }
     if (d.kind === "add" && d.mode === "usd") await api("/api/capital", {action: "add", chain_id: d.id, pool: $("capTo").value, usd: usdv});
     if (d.kind === "withdraw") await api("/api/capital", {action: "withdraw", chain_id: d.id, pools: capPicked(), usd: usdv});
