@@ -1091,13 +1091,13 @@ impl Executor {
             return Ok(None);
         }
         let (sp, _, _, p) = self.price()?;
-        let slip = self.cfg.slippage_bps / 1e4;
         let (a0, a1) = amounts_at(&sp, tl, tu, &big(liq));
         let (a0, a1) = (small(&a0), small(&a1));
+        let (min0, min1) = burn_floors(&sp, tl, tu, liq, self.cfg.slippage_bps.max(DEPOSIT_FLOOR_BPS[0]));
         let data = calldata(
             "burnAndCollect(address,int24,int24,uint128,uint256,uint256,uint128,uint128,uint256)",
-            &[addr(&self.wallet), chain::int(tl), chain::int(tu), u(big(liq)), u(big((a0 as f64 * (1.0 - slip)) as i128)),
-              u(big((a1 as f64 * (1.0 - slip)) as i128)), Tok::Uint(chain::max_u128()), Tok::Uint(chain::max_u128()), u(now() + DEADLINE_S)],
+            &[addr(&self.wallet), chain::int(tl), chain::int(tu), u(big(liq)), u(big(min0)),
+              u(big(min1)), Tok::Uint(chain::max_u128()), Tok::Uint(chain::max_u128()), u(now() + DEADLINE_S)],
         );
         let part = if liq < have { format!(" ({:.0}% of the position)", liq as f64 / have as f64 * 100.0) } else { String::new() };
         self.say(format!("  a. burnAndCollect [{tl},{tu}) liquidity {liq}{part} -> ~{} t0 + {} t1", commas(a0 as f64 / self.unit), commas(a1 as f64 / self.unit1)));
@@ -2209,10 +2209,16 @@ impl Executor {
         let mut pk = self.parking_executor(&host)?;
         let mut keep = false;
         // the host pays back from its own idle tokens first (the book's: this executor's balance is
-        // the origin's own), then from its positions
-        let host_idle = crate::capital::load(true).pool(self.cid, &host).get(&token).copied().unwrap_or(0).max(0);
+        // the origin's own), then from its positions; claims paid back earlier in this run took their
+        // part of that idle already (the book is settled after the run): two claims once both took it
+        let book = crate::capital::load(true);
+        let used = crate::parking::idle_repaid(&crate::parking::lots(true), self.cid, &host, &token, &book.applied);
+        let host_idle = (book.pool(self.cid, &host).get(&token).copied().unwrap_or(0) - used).max(0);
         let have = host_idle.min(amount);
         let before_tok = pk.bal(&token)?;
+        let is0 = token == pk.t0;
+        let other = if is0 { pk.t1.clone() } else { pk.t0.clone() };
+        let before_other = pk.bal(&other)?;
         // once any of the host's liquidity is withdrawn the claim counts as paid back (what came out is
         // this pool's in the book after the run): trying again would withdraw the host's share twice
         let mut burned = false;
@@ -2221,8 +2227,6 @@ impl Executor {
                 return Ok(());
             }
             let (_, _, _, p) = pk.price()?;
-            let is0 = token == pk.t0;
-            let other = if is0 { pk.t1.clone() } else { pk.t0.clone() };
             let short = amount - have;
             // in token0 units, as value0 counts the positions (raw / unit): raw against units made every
             // claim, however small, withdraw all of the host's positions
@@ -2244,7 +2248,6 @@ impl Executor {
                 }
                 let f = (short0 * 1.01 / held0).min(1.0);
                 self.say(format!("    {:.1}% of {name}'s positions withdrawn to pay it back", f * 100.0));
-                let before = pk.bal(&other)?;
                 for (tl, tu, l) in &positions {
                     let take = (to_f64(l) * f) as i128;
                     if take > 0 {
@@ -2253,7 +2256,7 @@ impl Executor {
                         burned = true;
                     }
                 }
-                let got = pk.bal(&other)? - before;
+                let got = pk.bal(&other)? - before_other;
                 if got > 0 {
                     let fair = if other == pk.t0 { got as f64 * p } else { got as f64 / p };
                     let mc = pk.cfg.floored_cost();
@@ -2280,8 +2283,47 @@ impl Executor {
                 crate::parking::update(true, lot.clone());
                 return Err(e);
             }
-            Err(e) if !burned => self.say_warn(format!("    a withdrawal for the claim was sent but its outcome is not known ({e}): counted as paid back")),
-            Err(e) => self.say_warn(format!("    paying the claim back stopped after part was withdrawn ({e}): counted as paid back")),
+            Err(e) if !e.to_string().contains("reverted on-chain") => {
+                // a receipt not seen: the withdrawal may still be mined, so the claim is taken as paid
+                // back rather than withdrawn twice
+                self.say_warn(format!("    a withdrawal for the claim was sent but its outcome is not known ({e}): counted as paid back"));
+            }
+            Err(e) => {
+                // the last withdrawal reverted (final; each one before it was mined). None before it:
+                // nothing was taken, and the claim is still owed. A claim once counted as paid back on
+                // a revert left its whole value with the host
+                if !burned {
+                    self.say_warn(format!("    the withdrawal for the claim reverted and took nothing ({e}): still owed, paid back on a later unpark"));
+                    crate::parking::update(true, lot.clone());
+                    return Err(e);
+                }
+                let seen = (|| -> Res<(i128, i128, f64)> {
+                    let (_, _, _, p) = pk.price()?;
+                    Ok(((pk.bal(&token)? - before_tok).max(0), (pk.bal(&other)? - before_other).max(0), p))
+                })();
+                match seen {
+                    Ok((dt, dother, p)) => {
+                        // in the claim's token at the price now (p: token1 per token0, raw)
+                        let got = dt + (if is0 { dother as f64 / p } else { dother as f64 * p }) as i128;
+                        let rest = amount - have - got;
+                        if rest * 100 > amount {
+                            // part came out: that much is paid back (it is this pool's now), the rest is
+                            // still owed, the host's idle untouched
+                            let mut l = lot.clone();
+                            l["amount"] = json!((amount - got).to_string());
+                            if let Some(u) = lot["usd"].as_f64() {
+                                l["usd"] = json!(u * (amount - got) as f64 / amount.max(1) as f64);
+                            }
+                            self.say_warn(format!("    paying the claim back stopped after part was withdrawn ({e}): {} of {} raw still owed", amount - got, amount));
+                            log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "unpark", "live": true, "lot": lot, "back": dt.to_string(), "partial": true}));
+                            crate::parking::update(true, l);
+                            return Err(e);
+                        }
+                        self.say_warn(format!("    the claim's withdrawal stopped on an error ({e}) after what it needed came out: paid back"));
+                    }
+                    Err(e2) => self.say_warn(format!("    a withdrawal for the claim was sent but what it took cannot be read ({e}; {e2}): counted as paid back")),
+                }
+            }
             Ok(()) => {}
         }
         if keep {
@@ -2607,6 +2649,19 @@ fn price_band(sp: &BigUint, sa: &BigUint, sb: &BigUint, bps: f64) -> (BigUint, B
     (lo, hi)
 }
 
+/// The least of each token a withdrawal of `liq` from [tl, tu) pays anywhere within `bps` of price:
+/// token0 as at the band's top, token1 as at its bottom. Floors of today's amounts less slippage
+/// reverted a claim's withdrawal from a one-tick range in range, where a move of a fraction of a basis
+/// point trades much of one token for the other (the value it pays hardly changes).
+fn burn_floors(sp: &BigUint, tl: i64, tu: i64, liq: i128, bps: f64) -> (i128, i128) {
+    let e18 = BigUint::from(10u64.pow(18));
+    let k = |f: f64| BigUint::from((f.sqrt() * 1e18) as u128);
+    let lo = sp * k(1.0 - bps / 1e4) / &e18;
+    let hi = sp * k(1.0 + bps / 1e4) / &e18 + 1u8;
+    let l = big(liq.max(0));
+    (small(&amounts_at(&hi, tl, tu, &l).0), small(&amounts_at(&lo, tl, tu, &l).1))
+}
+
 /// The liquidity that `x` token0 + `y` token1 pay for wherever in the sizing band the price is.
 fn mint_liquidity(sp: &BigUint, sa: &BigUint, sb: &BigUint, x: &BigUint, y: &BigUint) -> BigUint {
     let (lo, hi) = price_band(sp, sa, sb, sizing_bps(sa, sb));
@@ -2672,6 +2727,25 @@ mod mint_tests {
 
     fn sq(s: &str) -> BigUint {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn a_withdrawal_from_a_one_tick_range_in_range_goes_through_when_the_mix_moves() {
+        // a claim's withdrawal: 37% of a USDC/USDT [17,18) position, the price inside the tick
+        let (sa, sb) = (sqrt_ratio_at_tick(17), sqrt_ratio_at_tick(18));
+        let at = |f: u32| &sa + (&sb - &sa) * BigUint::from(f) / BigUint::from(100u32);
+        let liq: i128 = 25_089_203_748_818;
+        let (sent, mined) = (at(20), at(45));
+        let (min0, min1) = burn_floors(&sent, 17, 18, liq, 5.0f64.max(DEPOSIT_FLOOR_BPS[0]));
+        let (g0, g1) = amounts_at(&mined, 17, 18, &big(liq));
+        let (g0, g1) = (small(&g0), small(&g1));
+        assert!(g0 >= min0 && g1 >= min1, "pays {g0} + {g1}, below the floors {min0} + {min1}");
+        // the old floors (each amount when sent, less 5 bp) were over what it paid in the block
+        let a0 = small(&amounts_at(&sent, 17, 18, &big(liq)).0);
+        assert!(g0 < (a0 as f64 * (1.0 - 5e-4)) as i128, "the old token0 floor would have held");
+        // out of range the floors stay the amounts it holds (the band moves no amount there)
+        let below = sqrt_ratio_at_tick(5);
+        assert_eq!(burn_floors(&below, 17, 18, liq, 10.0).0, small(&amounts_at(&below, 17, 18, &big(liq)).0));
     }
 
     #[test]

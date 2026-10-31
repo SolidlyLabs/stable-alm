@@ -135,6 +135,7 @@ th.sort .ar{display:inline-block;width:10px;margin-left:3px;opacity:.35}th.sort.
 tr.mine td:first-child{box-shadow:inset 3px 0 0 var(--acc)}
 tr.mine{background:color-mix(in srgb,var(--acc) 4%,transparent)}
 .mute{color:var(--mute)}.small{font-size:12px}.ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}
+.parkd{color:var(--ok)}
 /* controls */
 button{background:var(--acc);color:var(--acc-ink);border:0;border-radius:9px;padding:8px 13px;font:600 13px var(--sans);cursor:pointer;white-space:nowrap;transition:transform .08s,filter .15s,background .15s}
 button:hover{filter:brightness(1.08)}button:active{transform:translateY(1px)}button:disabled{opacity:.45;cursor:default}
@@ -976,7 +977,7 @@ function renderPools() {
       const share = c && cs && cs.pools_usd > 0 ? c.capital_usd / cs.pools_usd * 100 : null;
       alloc = `<div class="alloc"><label class="sw" title="${p.enabled ? "enabled: click to disable (if it holds money, you choose where the money goes)" : "disabled: click to enable"}"><input type=checkbox ${p.enabled ? "checked" : ""} onchange="editPool(${i},'enabled',this.checked)"><span class="t"></span></label>
         <b class="mono" title="${c ? esc(capTip(c)) : ""}">${c ? usd(c.capital_usd, 0) : "–"}</b></div>
-        <div class="mute small">${c ? (share == null ? "" : fmt(share, 0) + "% · ") + usd(c.positions_usd, 0) + " in positions" + ((c.lots_usd || 0) >= 0.5 ? ` · <span title="${esc(parkTip(p))}">${usd(c.lots_usd, 0)} parked</span>` : "") : dep ? usd(dep, 0) + " deployed" : "nothing deployed"}</div>
+        <div class="mute small">${c ? (share == null ? "" : fmt(share, 0) + "% · ") + capWhere(p, c) : dep ? usd(dep, 0) + " deployed" : "nothing deployed"}</div>
         ${cs ? `<div class="capbtns"><button class="sec" onclick="capDlg('add',${+id},'${esc(p.pool.toLowerCase())}')" title="move money from Unallocated into this pool">Add</button><button class="sec" onclick="capDlg('withdraw',${+id},'${esc(p.pool.toLowerCase())}')" title="take money out of this pool to Unallocated, as USDC">Withdraw</button></div>` : ""}`;
       act = `<button class="sec sm icon ${open ? "on" : ""}" data-act="open" data-arg="${esc(rk)}" title="strategy, limits, re-solve and remove" aria-expanded="${!!open}">${open ? "▴" : "⚙"}</button>`;
     } else {
@@ -1017,9 +1018,27 @@ const poolCap = p => ((capOf(pchain(p)) || {}).pools || {})[p.name] || null;
 const capTip = c => `positions ${usd(c.positions_usd, 2)} · idle ${usd(c.idle_usd, 2)}` + (c.lots_usd ? ` · parked ${usd(c.lots_usd, 2)}` : "") +
   (c.owed_usd ? ` · held for it by others ${usd(c.owed_usd, 2)}` : "") + (c.hosted_usd ? ` · less held for others ${usd(c.hosted_usd, 2)}` : "") +
   ((c.idle || []).length ? "\nidle: " + c.idle.map(t => `${fmt(t.amount, 4)} ${t.symbol}`).join(", ") : "");
-// what a pool parked elsewhere while its strategy waits (lots, not claims): [{symbol, usd_now, pool}]
-const parkedOf = p => ((((S.worker || {}).account || {}).parked || {})[pchain(p)] || []).filter(l => l.kind !== "claim" && (l.origin || "").toLowerCase() === p.pool.toLowerCase());
+// the chain's parked money not yet paid back: lots (its own positions in another pool) and claims
+// (tokens handed to another pool's strategy, inside that pool's positions): [{kind, symbol, usd_now, origin, pool}]
+const parkedAll = p => ((((S.worker || {}).account || {}).parked || {})[pchain(p)] || []).filter(l => l.stage !== "repaid");
+// what a pool parked elsewhere while its strategy waits
+const parkedOf = p => parkedAll(p).filter(l => (l.origin || "").toLowerCase() === p.pool.toLowerCase());
+// what other pools parked with it: in its positions, but theirs
+const heldFor = p => parkedAll(p).filter(l => l.kind === "claim" && (l.pool || "").toLowerCase() === p.pool.toLowerCase());
+const sumUsd = ls => ls.reduce((s, l) => s + (l.usd_now || 0), 0);
+// per other pool, largest first: [[name, usd]]
+const byPool = (p, ls, key) => Object.entries(ls.reduce((o, l) => { const n = pnameOf(pchain(p), l[key]); o[n] = (o[n] || 0) + (l.usd_now || 0); return o; }, {})).sort((a, b) => b[1] - a[1]);
 const parkTip = p => parkedOf(p).map(l => `${l.symbol || "?"} ${usd(l.usd_now || 0, 2)} parked in ${pnameOf(pchain(p), l.pool)}`).join(", ") + " · it comes back when the strategy re-enters";
+const heldTip = p => heldFor(p).map(l => `${l.symbol || "?"} ${usd(l.usd_now || 0, 2)} parked by ${pnameOf(pchain(p), l.origin)}`).join(", ") + " · in this pool's positions or idle tokens, not its own: paid back when that pool needs it";
+// where a pool's money is: its positions, what it parked elsewhere, and what it holds for other pools
+function capWhere(p, c) {
+  const out = [usd(c.positions_usd, 0) + " in positions"];
+  const pk = byPool(p, parkedOf(p), "pool").filter(x => x[1] >= 0.5);
+  if (pk.length) out.push(`<span class="parkd" title="${esc(parkTip(p))}">${pk.map(([n, u]) => `${usd(u, 0)} parked in ${esc(n)}`).join(" · ")}</span>`);
+  const hf = byPool(p, heldFor(p), "origin").filter(x => x[1] >= 0.5);
+  if (hf.length) out.push(`<span class="mute" title="${esc(heldTip(p))}">${hf.map(([n, u]) => `${usd(u, 0)} held for ${esc(n)}`).join(" · ")}</span>`);
+  return out.join(" · ");
+}
 // a pool's two token addresses (the account snapshot's)
 const poolToks = (id, a) => (((((S.worker || {}).account || {}).pools || {})[(poolByAddr(id, a) || {}).name] || {}).tokens || []).map(x => x.toLowerCase());
 // Unallocated on chain `id`, token by token: the book's tokens, then priced wallet tokens the book
@@ -2061,7 +2080,7 @@ function poolStatus(p) {
   if (st.mode === "hold") return `<span class="pstat warn" title="${esc(st.error || "")}">holding</span>`;
   if (st.mode === "await_swap") { const w = st.await_swap || {}; return `<span class="pstat warn" title="${esc(w.why || "")}">waiting for a swap${w.cost_bps != null ? ` · ${fmt(w.cost_bps, 1)} bp > ${fmt(w.max_bps, 1)}` : ""}</span>`; }
   const pk = parkedOf(p);
-  if (!has && pk.length) return `<span class="pstat ok" title="${esc(parkTip(p))}">parked · ${usd(pk.reduce((s, l) => s + (l.usd_now || 0), 0), 0)}</span>`;
+  if (!has && pk.length) return `<span class="pstat ok" title="${esc(parkTip(p))}">parked · ${usd(sumUsd(pk), 0)}</span>`;
   if (!has) return `<span class="pstat mute">no positions yet</span>`;
   return a.in_range ? `<span class="pstat ok">in range · ${usd(a.deployed_usd, 0)}</span>` : `<span class="pstat bad">out of range · ${usd(a.deployed_usd, 0)}</span>`;
 }

@@ -193,6 +193,18 @@ pub fn hosted_tokens(live: bool, cid: u64, pool: &str) -> Vec<(String, i128)> {
     hosted_of(&lots(live), cid, pool)
 }
 
+/// What claims on `host` paid back this run took from its idle `token` (raw): repaid, their `from_idle`
+/// not yet taken from the host in the book (capital::settle_repaid, after the run, marks it "repay:<id>").
+pub fn idle_repaid(lots: &[Value], cid: u64, host: &str, token: &str, applied: &std::collections::BTreeSet<String>) -> i128 {
+    lots.iter()
+        .filter(|x| is_claim(x) && x["chain_id"].as_u64() == Some(cid) && x["stage"] == "repaid")
+        .filter(|x| x["pool"].as_str().map(|p| p.eq_ignore_ascii_case(host)).unwrap_or(false))
+        .filter(|x| x["token"].as_str().map(|t| t.eq_ignore_ascii_case(token)).unwrap_or(false))
+        .filter(|x| !applied.contains(&format!("repay:{}", x["id"].as_str().unwrap_or(""))))
+        .filter_map(|x| x["from_idle"].as_str()?.parse::<i128>().ok())
+        .sum()
+}
+
 fn hosted_of(lots: &[Value], cid: u64, pool: &str) -> Vec<(String, i128)> {
     let mut out: Vec<(String, i128)> = vec![];
     for x in lots.iter().filter(|x| is_claim(x) && x["chain_id"].as_u64() == Some(cid) && x["stage"] != "repaid"
@@ -492,6 +504,24 @@ pub fn range(tick: i64, spacing: i64, range_pct: f64) -> (i64, i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hosts_idle_paid_back_once_is_not_paid_again_in_the_run() {
+        let c = |id: &str, stage: Option<&str>, idle: &str| {
+            let mut x = json!({"id": id, "kind": "claim", "chain_id": 8453, "origin": "0xo", "pool": "0xH", "token": "0xUSDC", "amount": "100", "from_idle": idle});
+            if let Some(s) = stage {
+                x["stage"] = json!(s);
+            }
+            x
+        };
+        let lots = vec![c("a", Some("repaid"), "4655644"), c("b", None, "0"), c("d", Some("repaid"), "10")];
+        let mut applied = std::collections::BTreeSet::new();
+        assert_eq!(idle_repaid(&lots, 8453, "0xh", "0xusdc", &applied), 4655654);
+        // settled in the book already (the ledger's removal still to come): not counted again
+        applied.insert("repay:d".to_string());
+        assert_eq!(idle_repaid(&lots, 8453, "0xh", "0xusdc", &applied), 4655644);
+        assert_eq!(idle_repaid(&lots, 8453, "0xother", "0xusdc", &applied), 0);
+    }
 
     #[test]
     fn whitelist_needs_parking_on_and_the_token() {
