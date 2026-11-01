@@ -593,10 +593,18 @@ pub fn send(cid: u64, acct: &Account, to: &str, data: &str, gas: u64) -> Result<
         while t0.elapsed() < speed.bump_after() {
             for h in &hashes {
                 if let Some(rc) = receipt(cid, h) {
-                    pending_clear(cid, &from, nonce);
-                    if rc["status"].as_str() != Some("0x1") {
-                        return Err(err(format!("transaction {h} reverted on-chain"), "reverted"));
+                    match rc["status"].as_str() {
+                        Some("0x1") => {}
+                        // a revert only when the receipt says so: an engine retries a step on it
+                        Some("0x0") => {
+                            pending_clear(cid, &from, nonce);
+                            return Err(err(format!("transaction {h} reverted on-chain"), "reverted"));
+                        }
+                        // a receipt without a status says nothing of its outcome: it stays pending
+                        // (the next pass reconciles it before sending anything)
+                        s => return Err(err(format!("transaction {h} has a receipt with status {s:?}: its outcome is not known"), "pending")),
                     }
+                    pending_clear(cid, &from, nonce);
                     let block = hex_u64(&rc["blockNumber"]);
                     note_mined(cid, block);
                     crate::ledger::invalidate();

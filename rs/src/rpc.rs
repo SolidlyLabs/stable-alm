@@ -35,6 +35,30 @@ fn host(url: &str) -> String {
     url.split("://").nth(1).unwrap_or(url).split('/').next().unwrap_or("").to_lowercase()
 }
 
+/// `text` with every URL in it cut to its host: the path of an RPC URL can be its key (dRPC's is),
+/// and an error may print the URL normalized (its host lowercased), so no exact text is looked for.
+fn without_url_path(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("://") {
+        let (head, tail) = rest.split_at(i + 3);
+        out.push_str(head);
+        let host_end = tail.find(|c: char| c == '/' || c.is_whitespace() || c == '"').unwrap_or(tail.len());
+        out.push_str(&tail[..host_end]);
+        let after = &tail[host_end..];
+        if after.starts_with('/') {
+            // the path and query, up to where the URL ends in the text
+            let end = after.find(|c: char| c.is_whitespace() || matches!(c, ':' | '"' | ')' | ',' | '\'')).unwrap_or(after.len());
+            out.push_str("/…");
+            rest = &after[end..];
+        } else {
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Wait until `n` requests may go to `url`.
 fn pace(cid: u64, url: &str, n: usize) {
     let rate = rate_for(&crate::chains::get(cid), url) as f64;
@@ -307,7 +331,8 @@ fn send_requests(cid: u64, reqs: &[(String, Value)], rounds: usize, timeout: Dur
                     }
                 }
                 Err(e) => {
-                    why = e.to_string().chars().take(160).collect();
+                    // a transport error names the URL, and an RPC URL can hold its key: the host only
+                    why = without_url_path(&e.to_string()).chars().take(160).collect();
                     again.extend(part.iter().copied())
                 }
             }
@@ -334,6 +359,19 @@ fn send_requests(cid: u64, reqs: &[(String, Value)], rounds: usize, timeout: Dur
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_transport_error_does_not_log_the_rpc_key() {
+        let url = "https://lb.drpc.live/base/KEY123";
+        let e = format!("{url}: Network Error: timed out");
+        assert_eq!(without_url_path(&e), "https://lb.drpc.live/…: Network Error: timed out");
+        assert_eq!(without_url_path("no url here"), "no url here");
+        // printed normalized (the host lowercased), with a query, or quoted: the path still goes
+        let e = "https://lb.drpc.live/base/KEY123?x=1: Dns Failed; then \"https://LB.drpc.live/base/KEY123\" (retry)";
+        let r = without_url_path(e);
+        assert!(!r.contains("KEY123"), "{r}");
+        assert_eq!(r, "https://lb.drpc.live/…: Dns Failed; then \"https://LB.drpc.live/…\" (retry)");
+    }
 
     #[test]
     fn only_server_failures_and_rate_limits_are_asked_again() {
@@ -450,7 +488,7 @@ pub fn send_call(cid: u64, method: &str, params: Value) -> Result<R, String> {
                 }
                 return settle(answer(&v, code), unanswered);
             }
-            Err(e) if attempt == 3 => return Err(e.to_string()),
+            Err(e) if attempt == 3 => return Err(without_url_path(&e.to_string())),
             Err(_) => unanswered = true,
         }
         std::thread::sleep(Duration::from_secs(delay));

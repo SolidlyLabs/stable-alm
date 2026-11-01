@@ -297,6 +297,9 @@ pub struct Executor {
     begun: Option<Value>,
     /// the cost (bp) of the last swap refused for it, for the refusal's record
     last_refused_bps: f64,
+    /// the aggregators a swap's quotes are limited to (comma-separated ids), while one whose build
+    /// failed is passed over (swap)
+    aggregators: Option<String>,
     /// fields the next transaction's log entry carries (a swap's reference quote), taken by `tx`
     tx_extra: Option<Value>,
     /// the pass left the pool's money waiting for a swap within its limit (summary mode "await_swap"):
@@ -348,6 +351,7 @@ impl Executor {
             was_blocked: false,
             begun: None,
             last_refused_bps: 0.0,
+            aggregators: None,
             tx_extra: None,
             awaiting: None,
             cfg,
@@ -1047,6 +1051,7 @@ impl Executor {
         let (tin, tout) = if zero_for_one { (self.t0.clone(), self.t1.clone()) } else { (self.t1.clone(), self.t0.clone()) };
         let amount_in = (if zero_for_one { -diff0 } else { diff0 * p }) as i128;
         let fair = if zero_for_one { amount_in as f64 * p } else { amount_in as f64 / p };
+        let fair = strict_fair(fair, amount_in, self.reference_quote(&tin, &tout, amount_in)).0;
         let (_, _, cost) = self.quote_cost(&tin, &tout, amount_in, fair)?;
         let active = to_f64(&chain::pool_liquidity(self.cid, &self.cfg.pool)?);
         let share = if active > 0.0 { (leaving as f64 / active).clamp(0.0, 1.0) } else { 0.0 };
@@ -1126,7 +1131,14 @@ impl Executor {
             let mut swapped = RatioSwap::Done;
             if target.swap {
                 let r = ranges.clone();
-                match self.retry("ratio swap", |s| s.ratio_swap(&r, budget0)) {
+                let mut res = self.retry("ratio swap", |s| s.ratio_swap(&r, budget0));
+                // a swap mined and reverted moved nothing but its gas (a quote that was not there to
+                // fill, often a market maker's at a price better than the market's): quoted afresh once
+                if matches!(&res, Err(e) if e.to_string().contains("reverted on-chain")) {
+                    self.say_warn("  the ratio swap reverted on-chain, which moved nothing but gas: quoting it again");
+                    res = self.retry("ratio swap", |s| s.ratio_swap(&r, budget0));
+                }
+                match res {
                     Ok(o) => swapped = o,
                     Err(e) => self.say_warn(format!("  swap skipped: {e}; minting with the balances on hand")),
                 }
@@ -1289,7 +1301,11 @@ impl Executor {
         if amount_in <= 0 {
             return Ok(RatioSwap::Done);
         }
-        let fair_of = |a: i128| if zero_for_one { a as f64 * p } else { a as f64 / p };
+        // sized against the pool's price and a reference quote both, as the swap itself is checked
+        // (which takes a reference of its own: it is given the pool's price alone)
+        let reference = self.reference_quote(&tin, &tout, amount_in);
+        let spot_of = |a: i128| if zero_for_one { a as f64 * p } else { a as f64 / p };
+        let fair_of = |a: i128| strict_fair(spot_of(a), a, reference).0;
         let value0_of = |a: i128| if zero_for_one { a as f64 } else { a as f64 / p };
         let max_cost = self.cfg.max_swap_cost_bps;
         // the whole swap over the limit: the largest part within it, when that is worth a swap (the
@@ -1311,7 +1327,7 @@ impl Executor {
             (amount_in, partial) = (part, true);
         }
         let out_before = self.bal(&tout)?;
-        match self.swap(&tin, &tout, amount_in, fair_of(amount_in), max_cost, "e. ratio swap") {
+        match self.swap(&tin, &tout, amount_in, spot_of(amount_in), max_cost, "e. ratio swap") {
             Ok(_) => {}
             Err(StepErr::Refused(m)) => {
                 // the quote moved over the limit between the sizing and the swap
@@ -1411,7 +1427,7 @@ impl Executor {
     /// sends nothing.
     fn quote_cost(&self, tin: &str, tout: &str, amount_in: i128, fair_out: f64) -> Res<(Value, f64, f64)> {
         let (mi, mo) = (prices::meta(self.cid, tin)?, prices::meta(self.cid, tout)?);
-        let q = prices::quote(self.cid, tin, tout, &amount_in.to_string(), mi.decimals, mo.decimals)?;
+        let q = prices::quote_from(self.cid, tin, tout, &amount_in.to_string(), mi.decimals, mo.decimals, self.aggregators.as_deref())?;
         let best = q["best"].clone();
         if best.is_null() {
             return Err(StepErr::Fail(format!("no aggregator route: {}", q["failures"])));
@@ -1442,15 +1458,26 @@ impl Executor {
 
     /// Quote, cost check, exact approval, build, simulate, send. Returns the amount received.
     /// The cost of a swap between the pool's own two tokens is against `fair_out` (the pool's price:
-    /// what a deposit goes in at); any other swap's (out of the pair: an exit to the stable, funding,
-    /// a reward sale) against a reference quote of the same pair taken just before it, rather than two
-    /// separate USD prices, which disagree with the market by tens of basis points.
+    /// what a deposit goes in at) and against a reference quote of the same pair taken just before it
+    /// (what the ledger measures it by), the stricter of the two (strict_fair); any other swap's (out
+    /// of the pair: an exit to the stable, funding, a reward sale) against the reference alone, rather
+    /// than two separate USD prices, which disagree with the market by tens of basis points. The
+    /// least it may receive is within the limit too (swap_slippage_bps).
     pub fn swap(&mut self, tin: &str, tout: &str, amount_in: i128, fair_out: f64, max_cost_bps: f64, label: &str) -> Res<i128> {
         let (mi, mo) = (prices::meta(self.cid, tin)?, prices::meta(self.cid, tout)?);
         let own = |t: &str| t.eq_ignore_ascii_case(&self.t0) || t.eq_ignore_ascii_case(&self.t1);
+        let pair = own(tin) && own(tout);
+        let given_fair = fair_out;
         let reference = self.reference_quote(tin, tout, amount_in);
         let fair_out = match reference {
-            Some((ri, ro)) if !(own(tin) && own(tout)) => ro / ri as f64 * amount_in as f64,
+            Some((ri, ro)) if !pair => ro / ri as f64 * amount_in as f64,
+            _ if pair => {
+                let (f, off) = strict_fair(fair_out, amount_in, reference);
+                if let Some(dev) = off {
+                    self.say_warn(format!("    the reference quote is {dev:+.1} bp from the pool's price (more than {REF_MAX_DEV_BPS} bp): measured against the pool's price alone"));
+                }
+                f
+            }
             _ => fair_out,
         };
         let (best, out, cost) = self.quote_cost(tin, tout, amount_in, fair_out)?;
@@ -1485,14 +1512,34 @@ impl Executor {
             }
         }
         self.ensure_allowance(tin, amount_in, Some(&spender))?;
-        let built = prices::build(self.cid, &best, &self.wallet, self.cfg.slippage_bps / 1e4)?;
+        // a swap with no fair amount is measured by the route's own USD values: its slippage is the pool's
+        let slip = if fair_out > 0.0 { swap_slippage_bps(self.cfg.slippage_bps, max_cost_bps, cost) } else { self.cfg.slippage_bps };
+        if slip < self.cfg.slippage_bps {
+            self.say(format!("    slippage {slip:.2} bp (not {} bp): the least it receives stays within the {max_cost_bps} bp limit", self.cfg.slippage_bps));
+        }
+        let built = match prices::build(self.cid, &best, &self.wallet, slip / 1e4) {
+            Ok(b) => b,
+            // the aggregator could not build its route (its API down: Cloudflare 502s skipped two
+            // fundings): the same swap quoted by the others, once
+            Err(e) if self.aggregators.is_none() => {
+                let failed = best["aggregatorId"].as_str().unwrap_or("").to_string();
+                let q = prices::quote(self.cid, tin, tout, &amount_in.to_string(), mi.decimals, mo.decimals)?;
+                let Some(others) = prices::other_aggregators(&q, &failed) else { return Err(StepErr::Fail(e)) };
+                self.say_warn(format!("    {failed} could not build the swap ({}); quoting it from {others}", e.chars().take(80).collect::<String>()));
+                self.aggregators = Some(others);
+                let r = self.swap(tin, tout, amount_in, given_fair, max_cost_bps, label);
+                self.aggregators = None;
+                return r;
+            }
+            Err(e) => return Err(StepErr::Fail(e)),
+        };
         let router = built["routerAddress"].as_str().unwrap_or("").to_lowercase();
         if router != quoted_router {
             return Err(StepErr::Fail("router changed between quote and build; re-quoting".into()));
         }
         let calldata = built["calldata"].as_str().unwrap_or("").to_string();
         // the minimum the wallet must receive: the quote less the slippage tolerance (and a little rounding)
-        let min_out = out * (1.0 - self.cfg.slippage_bps / 1e4) * 0.9995;
+        let min_out = out * (1.0 - slip / 1e4) * 0.9995;
         let live = small(&chain::erc20_balance(self.cid, tin, &self.wallet)?) >= amount_in;
         if self.execute {
             match chain::simulate_transfers(self.cid, &self.wallet, &router, &calldata) {
@@ -1537,6 +1584,7 @@ impl Executor {
         let mut shrink = 1.0;
         let mut floor = 0;
         let mut reapproved = false;
+        let mut mined_reverts = 0;
         for _ in 0..7 {
             // every attempt sizes from the price and the balances as they are now
             let (sp, _, _, p) = self.price()?;
@@ -1577,6 +1625,11 @@ impl Executor {
                 Err(e) if simulation_reverted(&e) => {
                     let w = self.mint_recover(&e.reason, &t0, &t1, &pool, &mut shrink, &mut floor, &mut reapproved);
                     self.say_warn(format!("    simulation failed ({}): {w}", e.reason));
+                    continue;
+                }
+                Err(e) if e.reason == "reverted" && mined_reverts < MINT_MINED_RETRIES => {
+                    mined_reverts += 1;
+                    self.say_warn(format!("    {}: {}", e.message, mint_after_mined_revert(&mut shrink, &mut floor)));
                     continue;
                 }
                 Err(e) => return Err(e.into()),
@@ -1629,6 +1682,7 @@ impl Executor {
         let mut shrink = 1.0;
         let mut floor = 0;
         let mut reapproved = false;
+        let mut mined_reverts = 0;
         for _ in 0..7 {
             let (sp, _, _, _) = self.price()?;
             let liq = (to_f64(&mint_liquidity(&sp, &sa, &sb, &big(x), &big(y))) * 0.999 * shrink) as i128;
@@ -1662,6 +1716,11 @@ impl Executor {
                     }
                     let w = self.mint_recover(&e.reason, &t0, &t1, &pool, &mut shrink, &mut floor, &mut reapproved);
                     self.say_warn(format!("    simulation failed ({}): {w}", e.reason));
+                    continue;
+                }
+                Err(e) if e.reason == "reverted" && mined_reverts < MINT_MINED_RETRIES => {
+                    mined_reverts += 1;
+                    self.say_warn(format!("    {}: {}", e.message, mint_after_mined_revert(&mut shrink, &mut floor)));
                     continue;
                 }
                 Err(e) => return Err(e.into()),
@@ -1814,7 +1873,7 @@ impl Executor {
                 continue;
             }
             let fair = usd_in / uu * 10f64.powi(um.decimals as i32);
-            let mc = max_cost_bps.unwrap_or_else(|| self.cfg.floored_cost());
+            let mc = withdrawal_cost_limit(max_cost_bps.unwrap_or_else(|| self.cfg.floored_cost()), usd_in);
             let (a, c) = (t.clone(), usdc.clone());
             match self.retry("withdrawal swap", |s| s.swap(&a, &c, amt, fair, mc, "withdrawal swap to USDC")) {
                 Ok(_) => left -= usd_in,
@@ -2585,6 +2644,21 @@ enum MintFailure {
 }
 
 /// A mint simulation's revert reason (as revert_reason gives it: the code, then a hint) by what fixes it.
+/// A mint that was mined and reverted moved nothing but its gas, so it is tried again (at most this
+/// many times): the price moved between its sizing and its block, which in a one-tick range in range
+/// a fraction of a basis point does, either past what the wallet holds (TF) or past its floors (AL).
+const MINT_MINED_RETRIES: u32 = 2;
+
+/// What a mint mined and reverted changes for the next attempt (said back for the log): the receipt
+/// gives no reason, so both: 2% smaller, and the floors a step wider.
+fn mint_after_mined_revert(shrink: &mut f64, floor: &mut usize) -> String {
+    *shrink *= 0.98;
+    if *floor + 1 < DEPOSIT_FLOOR_BPS.len() {
+        *floor += 1;
+    }
+    format!("nothing moved but gas; price and balances read again, 2% smaller, floors {} bp", DEPOSIT_FLOOR_BPS[*floor])
+}
+
 fn mint_failure(reason: &str) -> MintFailure {
     let r = reason.trim();
     let is = |c: &str| r == c || r.starts_with(&format!("{c} "));
@@ -2839,6 +2913,19 @@ mod mint_tests {
     }
 
     #[test]
+    fn a_mint_mined_and_reverted_is_tried_again_smaller_with_wider_floors() {
+        let (mut shrink, mut floor) = (1.0, 0);
+        mint_after_mined_revert(&mut shrink, &mut floor);
+        assert!((shrink - 0.98).abs() < 1e-12);
+        assert_eq!(floor, 1);
+        mint_after_mined_revert(&mut shrink, &mut floor);
+        mint_after_mined_revert(&mut shrink, &mut floor);
+        // the floors stop at their widest step
+        assert_eq!(floor, DEPOSIT_FLOOR_BPS.len() - 1);
+        assert!((shrink - 0.98f64.powi(3)).abs() < 1e-12);
+    }
+
+    #[test]
     fn a_mint_revert_is_told_by_what_fixes_it() {
         assert_eq!(mint_failure("STF (token transferFrom failed (balance or allowance too low))"), MintFailure::Allowance);
         assert_eq!(mint_failure("TF (token transfer failed)"), MintFailure::Shortfall);
@@ -2905,6 +2992,46 @@ fn precheck_cost(cost_bps: f64, share: f64) -> f64 {
         return cost_bps;
     }
     cost_bps / (1.0 - share.clamp(0.0, 1.0)).max(0.05)
+}
+
+/// A withdrawal's swap to USDC may always cost this much (USD), whatever its limit in bp comes to: a
+/// few dollars left over cost tens of bp on any route (18 bp for $5 of USDT), and a withdrawal stopped
+/// three times over a hundredth of a cent was listed as failed.
+const WITHDRAWAL_SWAP_FREE_USD: f64 = 0.02;
+
+/// The cost limit (bp) of a withdrawal's swap of `usd_in`: `max_bps`, or what WITHDRAWAL_SWAP_FREE_USD
+/// is of it when that is more.
+fn withdrawal_cost_limit(max_bps: f64, usd_in: f64) -> f64 {
+    if usd_in > 0.0 { max_bps.max(WITHDRAWAL_SWAP_FREE_USD / usd_in * 1e4) } else { max_bps }
+}
+
+/// A reference quote's rate counts only within this many bp of the pool's price. Further apart, one
+/// of the two is not the market (a stale or thin quote), and the pool's price, read on-chain, stays.
+const REF_MAX_DEV_BPS: f64 = 25.0;
+
+/// What a swap of `amount_in` between the pool's own two tokens must be measured against: the pool's
+/// price (`spot_out`, what a deposit goes in at) or the reference quote's rate (`reference`, raw in
+/// and out: what the ledger measures it by), whichever asks more, so a swap passes only within the
+/// limit by both. A reference too far from the pool's price is left out: (fair out, its distance in
+/// bp when it was).
+fn strict_fair(spot_out: f64, amount_in: i128, reference: Option<(i128, f64)>) -> (f64, Option<f64>) {
+    match reference {
+        Some((ri, ro)) if ri > 0 && ro > 0.0 && spot_out > 0.0 && amount_in > 0 => {
+            let by_ref = ro / ri as f64 * amount_in as f64;
+            let dev = (by_ref / spot_out - 1.0) * 1e4;
+            if dev.abs() <= REF_MAX_DEV_BPS { (spot_out.max(by_ref), None) } else { (spot_out, Some(dev)) }
+        }
+        _ => (spot_out, None),
+    }
+}
+
+/// The slippage (bp) a swap quoted at `cost_bps` may be built with: the pool's, but no more than the
+/// room left under the limit, so the least it can receive is within the limit too. Slippage is of
+/// the quoted amount and the cost of the fair one: quote·(1 − s) ≥ fair·(1 − max) gives
+/// s ≤ (max − cost) / (1 − cost). A hundredth of a basis point at least: a route built with none
+/// reverts on any rounding.
+fn swap_slippage_bps(slippage_bps: f64, max_cost_bps: f64, cost_bps: f64) -> f64 {
+    slippage_bps.min((max_cost_bps - cost_bps) / (1.0 - cost_bps / 1e4)).max(0.01)
 }
 
 /// What a ratio swap did: the whole swap (or none needed), the part of it within the cost limit, or
@@ -2979,6 +3106,55 @@ mod refusal_tests {
         assert_eq!(precheck_cost(2.0, 0.0), 2.0);
         assert_eq!(precheck_cost(-0.5, 0.9), -0.5);
         assert!((precheck_cost(1.0, 1.0) - 20.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_swap_within_the_limit_by_the_pool_price_but_not_by_the_reference_is_over_it() {
+        // a reported $250 USDC -> USDT ratio swap: -0.99 bp by the pool's price, 3.796 bp by its
+        // reference quote ($20), as the ledger measured it, over a 3 bp limit
+        let (amount_in, out) = (250_000_000i128, 249_950_000.0);
+        let spot_out = out / (1.0 + 0.99e-4);
+        let by_ref = out / (1.0 - 3.796e-4);
+        let reference = Some((20_000_000i128, by_ref / amount_in as f64 * 20e6));
+        let cost = |fair: f64| (1.0 - out / fair) * 1e4;
+        assert!((cost(spot_out) + 0.99).abs() < 1e-6);
+        let (fair, off) = strict_fair(spot_out, amount_in, reference);
+        assert!(off.is_none());
+        assert!((cost(fair) - 3.796).abs() < 1e-6, "{}", cost(fair));
+        // a reference that gives less than the pool's price leaves the pool's price
+        let worse = Some((20_000_000i128, spot_out / amount_in as f64 * 20e6 * (1.0 - 2e-4)));
+        assert_eq!(strict_fair(spot_out, amount_in, worse), (spot_out, None));
+        // none, or one too far from the pool's price to be the market: the pool's price, with the distance
+        assert_eq!(strict_fair(spot_out, amount_in, None), (spot_out, None));
+        let stale = Some((20_000_000i128, spot_out / amount_in as f64 * 20e6 * 1.004));
+        let (f, off) = strict_fair(spot_out, amount_in, stale);
+        assert_eq!(f, spot_out);
+        assert!((off.unwrap() - 40.0).abs() < 1e-6);
+        assert_eq!(strict_fair(spot_out, amount_in, Some((0, 1.0))), (spot_out, None));
+    }
+
+    #[test]
+    fn a_few_dollars_left_in_a_withdrawal_are_swapped_for_a_cent_or_two() {
+        // $5.04 of USDT at 18 bp ($0.009) against a 10 bp limit: within 2 cents, so it goes
+        assert!(withdrawal_cost_limit(10.0, 5.04) > 18.3);
+        // a large withdrawal keeps its limit
+        assert_eq!(withdrawal_cost_limit(10.0, 4000.0), 10.0);
+        assert_eq!(withdrawal_cost_limit(10.0, 0.0), 10.0);
+    }
+
+    #[test]
+    fn the_least_a_swap_receives_stays_within_the_limit() {
+        // quoted 1 bp under a 3 bp limit: 2 bp of slippage is all the room there is
+        assert_eq!(swap_slippage_bps(2.0, 3.0, 1.0), 2.0);
+        assert!((swap_slippage_bps(2.0, 3.0, 2.5) - 0.5).abs() < 1e-3);
+        // quoted better than the fair price: the pool's own slippage, or the exact room when it is less
+        assert_eq!(swap_slippage_bps(2.0, 3.0, -4.0), 2.0);
+        // fair 100, quoted 101 (−100 bp), limit 0: at most 99 (not 100) bp under the quote
+        let s = swap_slippage_bps(500.0, 0.0, -100.0);
+        assert!((101.0 * (1.0 - s / 1e4) - 100.0).abs() < 1e-9, "{s}");
+        // at the limit (or over it, which is refused before): a hundredth of a basis point
+        assert_eq!(swap_slippage_bps(2.0, 3.0, 3.0), 0.01);
+        assert_eq!(swap_slippage_bps(2.0, 3.0, 5.0), 0.01);
     }
 
     #[test]

@@ -3474,6 +3474,54 @@ mod tests {
         }
     }
 
+    /// A backtest of the days a pool ran live, to set beside what the live app did: POOL (Base), DAYS,
+    /// the strategy in STRAT (JSON) or STRAT_FILE. Prints the main run's time in range, actions and
+    /// money. ALM_HOME as for h0_report.
+    #[test]
+    #[ignore]
+    fn live_window() {
+        let home = std::env::var("ALM_HOME").expect("set ALM_HOME to a copy of the data");
+        let live = std::env::var("LOCALAPPDATA").map(|l| format!("{l}\\StableALM").to_lowercase()).unwrap_or_default();
+        assert!(!live.is_empty() && !home.to_lowercase().replace('/', "\\").starts_with(&live), "ALM_HOME is the live folder");
+        let pool = std::env::var("POOL").expect("POOL");
+        let days: i64 = std::env::var("DAYS").ok().and_then(|d| d.parse().ok()).unwrap_or(13);
+        let text = std::env::var("STRAT").or_else(|_| std::fs::read_to_string(std::env::var("STRAT_FILE").expect("STRAT or STRAT_FILE"))).unwrap();
+        let st: Value = serde_json::from_str(&text).unwrap();
+        let req = json!({"chain_id": 8453, "pool": pool, "days": days, "capital_usd": 10000, "strategy": st, "compare": false, "hold": false});
+        // the wallet that ran it (WALLET): its own liquidity is not counted as the pool's other LPs'
+        let v = execute(0, 8453, &pool, days, &req, &std::env::var("WALLET").unwrap_or_default()).unwrap();
+        let m = &v["runs"]["main"];
+        let row: serde_json::Map<String, Value> = ["time_in_range", "actions", "value", "fees", "swap_costs", "gas", "vs_hodl"].iter().map(|k| (k.to_string(), m[*k].clone())).collect();
+        eprintln!("span {} days: {}", v["span_days"], Value::Object(row));
+        if let Ok(p) = std::env::var("OUT") {
+            std::fs::write(p, serde_json::to_string(&m["events"]).unwrap()).unwrap();
+        }
+    }
+
+    /// The ladder's solve at given moments, from the stored history as it is now, to set beside what
+    /// a live re-solve then did: POOL (Base), WALLET, TS (unix seconds, comma-separated), BUDGET
+    /// (token0 units), the ladder's HOURS, SPAN and GUARD. ALM_HOME as for h0_report.
+    #[test]
+    #[ignore]
+    fn ladder_at() {
+        let home = std::env::var("ALM_HOME").expect("set ALM_HOME to a copy of the data");
+        let live = std::env::var("LOCALAPPDATA").map(|l| format!("{l}\\StableALM").to_lowercase()).unwrap_or_default();
+        assert!(!live.is_empty() && !home.to_lowercase().replace('/', "\\").starts_with(&live), "ALM_HOME is the live folder");
+        let env = |k: &str, d: &str| std::env::var(k).unwrap_or(d.into());
+        let pool = env("POOL", "");
+        let m = data::live_market(8453, &pool, &env("WALLET", ""), 6, 6, 0, 31).unwrap();
+        let p = ladder::Params { lookback: env("HOURS", "8").parse::<i64>().unwrap() * 3600, span: env("SPAN", "3").parse().unwrap(), every: 12, turnover: 0.4,
+                                 guard: env("GUARD", "").parse().ok(), width: 1 };
+        let budget: f64 = env("BUDGET", "10000").parse().unwrap();
+        for ts in env("TS", "").split(',').filter_map(|t| t.parse::<i64>().ok()) {
+            let i1 = m.ts.partition_point(|t| *t <= ts).saturating_sub(1);
+            let r = ladder::decide_at(&m, &p, budget, m.sp[i1], m.tick[i1], i1);
+            let w: f64 = r.iter().map(|x| x.2).sum();
+            let rs: Vec<String> = r.iter().map(|(a, b, x)| format!("[{a},{b}) {:.0}%", x / w * 100.0)).collect();
+            eprintln!("{ts}: last swap {}s before, tick {}: {}", ts - m.ts[i1], m.tick[i1], rs.join(" "));
+        }
+    }
+
     /// Hedge variants from a file: SPEC holds [{pair, chain_id (default Base), pool, numeraire (optional), name, strategy}],
     /// DAYS the periods (default 45,180), OUT where the rows go. ALM_HOME as for h0_report.
     /// An optimization as the Lab runs it, on a copy of the data (ALM_HOME, never the live folder):

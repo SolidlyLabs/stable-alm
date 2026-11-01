@@ -9,9 +9,26 @@ use std::time::{Duration, Instant};
 const BASE: &str = "https://solidly.com/api/swap";
 
 pub fn quote(cid: u64, tin: &str, tout: &str, amount: &str, din: u32, dout: u32) -> Result<Value, String> {
+    quote_from(cid, tin, tout, amount, din, dout, None)
+}
+
+/// A quote from `aggregators` only (comma-separated ids), or from all of them.
+pub fn quote_from(cid: u64, tin: &str, tout: &str, amount: &str, din: u32, dout: u32, aggregators: Option<&str>) -> Result<Value, String> {
+    let only = aggregators.map(|a| format!("&aggregators={a}")).unwrap_or_default();
     crate::rpc::get_json(&format!(
-        "{BASE}/quote/?chainId={cid}&tokenIn={tin}&tokenOut={tout}&amountIn={amount}&decimalsIn={din}&decimalsOut={dout}"
+        "{BASE}/quote/?chainId={cid}&tokenIn={tin}&tokenOut={tout}&amountIn={amount}&decimalsIn={din}&decimalsOut={dout}{only}"
     ))
+}
+
+/// The other aggregators that quoted in `q` (its candidates), besides `failed`: comma-separated ids,
+/// None when there is none.
+pub fn other_aggregators(q: &Value, failed: &str) -> Option<String> {
+    let ids: Vec<String> = q["candidates"].as_array().into_iter().flatten()
+        .filter_map(|c| c["aggregatorId"].as_str())
+        .filter(|a| !a.eq_ignore_ascii_case(failed))
+        .map(str::to_string)
+        .collect();
+    (!ids.is_empty()).then(|| ids.join(","))
 }
 
 pub fn build(cid: u64, best: &Value, wallet: &str, slippage: f64) -> Result<Value, String> {
@@ -119,6 +136,20 @@ mod stale_price {
         assert_eq!(stale_ok(Some((1.0001, Duration::from_secs(3700)))), None);
         assert_eq!(stale_ok(Some((0.0, Duration::from_secs(10)))), None);
         assert_eq!(stale_ok(None), None);
+    }
+}
+
+#[cfg(test)]
+mod other_aggregator_tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_build_is_quoted_again_by_the_other_aggregators() {
+        let q = json!({"best": {"aggregatorId": "velora"},
+                       "candidates": [{"aggregatorId": "velora"}, {"aggregatorId": "kyberswap"}, {"aggregatorId": "odos"}]});
+        assert_eq!(other_aggregators(&q, "velora").as_deref(), Some("kyberswap,odos"));
+        assert_eq!(other_aggregators(&json!({"candidates": [{"aggregatorId": "velora"}]}), "Velora"), None);
+        assert_eq!(other_aggregators(&json!({}), "velora"), None);
     }
 }
 
