@@ -1,8 +1,8 @@
 //! Fee vs loss to arbitrage (F/LVR, trailing 7 days) for every pool of a chain, for Discover pairs.
 //!
 //! The swaps come from the shared event store (history.rs): a background refresh started by the
-//! worker cycle keeps every pool of the chain covered for the last 7 days, in one download per
-//! 10,000 blocks for all pools, and only the new blocks after that. Results are computed from the
+//! worker cycle keeps every pool of the chain covered for the last 7 days, from the processor's
+//! chain-wide pages (up to the block it has synced: no RPC for the last few minutes). Results are computed from the
 //! stored swaps and kept until the next refresh. Configured pools keep their own figure (stored
 //! events and the processor's hourly fee rate); here each swap pays the pool's current fee.
 

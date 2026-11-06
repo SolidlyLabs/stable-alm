@@ -30,8 +30,6 @@ pub struct Chain {
     /// (chain::GasSpeed).
     pub gas_speed: String,
     pub explorer: String,
-    pub genesis_ts: Option<i64>,
-    pub block_time_s: Option<f64>,
     pub gas_symbol: String,
     pub min_gas_wei: f64,
     pub usd: String,
@@ -43,12 +41,12 @@ pub struct Chain {
 fn defaults() -> Value {
     // The chains Solidly V3 runs on (Fantom was retired on 4 Oct 2026). SOLID has the same address
     // everywhere except Ethereum. `wnative` is the wrapped gas token, used to price gas in USD.
-    // RPCs default to dRPC's free public endpoints (batches of up to 3, log ranges up to 10,000
-    // blocks); each chain's `rpc`, `send_rpc` and `batch_size` can be changed in the dashboard.
+    // RPCs default to dRPC's free public endpoints (batches of up to 3, log ranges up to 101 blocks,
+    // though its refusal names 10,000); each chain's `rpc`, `send_rpc` and `batch_size` can be changed in the dashboard.
     json!({
         "8453": {"name": "Base", "enabled": true, "rpc": "https://base.drpc.org",
                  "send_rpc": "https://base.drpc.org", "batch_size": 3, "explorer": "https://basescan.org/",
-                 "block_time_s": 2, "genesis_ts": 1686789347, "gas_symbol": "ETH", "min_gas": 0.0002,
+                 "gas_symbol": "ETH", "min_gas": 0.0002,
                  "usd": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
                  "wnative": "0x4200000000000000000000000000000000000006",
                  "solid": "0x777cf5ba9c291a1a8f57ff14836f6f9dc5c0f9dd",
@@ -60,12 +58,12 @@ fn defaults() -> Value {
                   "solid": "0x777cf5ba9c291a1a8f57ff14836f6f9dc5c0f9dd"},
         "10": {"name": "Optimism", "enabled": false, "rpc": "https://optimism.drpc.org",
                "send_rpc": "https://optimism.drpc.org", "batch_size": 3, "explorer": "https://optimistic.etherscan.io/",
-               "block_time_s": 2, "gas_symbol": "ETH", "min_gas": 0.0002,
+               "gas_symbol": "ETH", "min_gas": 0.0002,
                "usd": "0x0b2c639c533813f4aa9d7837caf62653d097ff85",
                "wnative": "0x4200000000000000000000000000000000000006",
                "solid": "0x777cf5ba9c291a1a8f57ff14836f6f9dc5c0f9dd"},
         "1": {"name": "Ethereum", "enabled": false, "rpc": "https://eth.drpc.org",
-              "send_rpc": "https://eth.drpc.org", "batch_size": 3, "explorer": "https://etherscan.io/", "block_time_s": 12,
+              "send_rpc": "https://eth.drpc.org", "batch_size": 3, "explorer": "https://etherscan.io/",
               "gas_symbol": "ETH", "min_gas": 0.003, "usd": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
               "wnative": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
               "solid": "0x777172d858dc1599914a1c4c6c9fc48c99a60990"},
@@ -110,8 +108,6 @@ fn load_all() -> HashMap<u64, Chain> {
                 rate_per_min: v["rate_per_min"].as_u64().map(|x| x.min(100_000) as u32),
                 gas_speed: crate::chain::GasSpeed::parse(v["gas_speed"].as_str().unwrap_or("")).unwrap_or_default().name().into(),
                 explorer: v["explorer"].as_str().unwrap_or("").to_string(),
-                genesis_ts: v["genesis_ts"].as_i64(),
-                block_time_s: v["block_time_s"].as_f64(),
                 gas_symbol: v["gas_symbol"].as_str().unwrap_or("ETH").to_string(),
                 min_gas_wei: v["min_gas"].as_f64().unwrap_or(0.0002) * 1e18,
                 usd: s("usd"),
@@ -138,8 +134,6 @@ pub fn get(id: u64) -> Chain {
         rate_per_min: None,
         gas_speed: "normal".into(),
         explorer: String::new(),
-        genesis_ts: None,
-        block_time_s: None,
         gas_symbol: "ETH".into(),
         min_gas_wei: 2e14,
         usd: String::new(),
@@ -351,12 +345,109 @@ pub fn as_json() -> Value {
 // -- block timestamps -------------------------------------------------------------------------------
 static ANCHOR: Mutex<Option<HashMap<u64, (i64, i64, f64)>>> = Mutex::new(None); // head block, head ts, s/block
 
-/// Timestamp of a block: exact on chains with a fixed block time since genesis (Base), else
-/// interpolated from the head header and the average block time over the last ~100k blocks.
+/// A stretch of constant block time: its first block, that block's time, seconds per block.
+type Stretch = (i64, i64, f64);
+
+/// Changes of block time found while running (check_block_time), until a release knows them.
+static FOUND: Mutex<Option<HashMap<u64, Vec<Stretch>>>> = Mutex::new(None);
+
+/// The chain's block times where they are known exactly, oldest first; empty: estimated from the head.
+fn stretches(id: u64) -> Vec<Stretch> {
+    let mut s: Vec<Stretch> = if id == BASE {
+        // 2 s from genesis, 0.2 s since 2026-11-05 18:00 UTC
+        vec![(0, 1686789347, 2.0), (53556127, 1793901601, 0.2)]
+    } else {
+        vec![]
+    };
+    if let Some(f) = FOUND.lock().unwrap().as_ref().and_then(|m| m.get(&id)) {
+        s.extend(f.iter().copied());
+    }
+    s
+}
+
+fn stretch_ts(s: &[Stretch], block: i64) -> i64 {
+    let (b, t, bt) = s.iter().rev().find(|x| x.0 <= block).unwrap_or(&s[0]);
+    t + (bt * (block - b) as f64) as i64
+}
+
+fn stretch_block(s: &[Stretch], ts: i64) -> i64 {
+    let (b, t, bt) = s.iter().rev().find(|x| x.1 <= ts).unwrap_or(&s[0]);
+    (b + ((ts - t) as f64 / bt).floor() as i64).max(0)
+}
+
+/// The first block of the chain's latest stretch of block time, where those are known.
+pub fn last_block_time_change(id: u64) -> Option<i64> {
+    stretches(id).last().map(|s| s.0).filter(|b| *b > 0)
+}
+
+/// (number, time) of a block, or the latest one.
+fn header(id: u64, block: Option<i64>) -> Option<(i64, i64)> {
+    let tag = block.map(|b| format!("0x{b:x}")).unwrap_or_else(|| "latest".into());
+    let r = crate::rpc::batch_quick(id, &[("eth_getBlockByNumber", json!([tag, false]))]).ok()?;
+    let h = r[0].as_ref().ok()?;
+    h.get("number")?;
+    Some((crate::rpc::hex_u64(&h["number"]) as i64, crate::rpc::hex_u64(&h["timestamp"]) as i64))
+}
+
+/// A stretch that began where the times stop fitting `s`, or None while they fit (or cannot be read).
+fn find_change(id: u64, s: &[Stretch]) -> Option<Stretch> {
+    let (head, head_ts) = header(id, None)?;
+    if (stretch_ts(s, head) - head_ts).abs() <= 60 {
+        return None;
+    }
+    let (mut lo, mut hi) = (s.last()?.0, head);
+    while hi - lo > 1 {
+        let m = (lo + hi) / 2;
+        let (_, t) = header(id, Some(m))?;
+        if (stretch_ts(s, m) - t).abs() <= 5 {
+            lo = m;
+        } else {
+            hi = m;
+        }
+    }
+    let (_, t) = header(id, Some(hi))?;
+    if head - hi < 100 {
+        return None; // too few blocks to measure yet: the next check
+    }
+    Some((hi, t, ((head_ts - t) as f64 / (head - hi) as f64 * 1000.0).round() / 1000.0))
+}
+
+/// Worker cycle: a chain's block time can change (Base's did, tenfold), and every time and range
+/// derived from it would then be wrong without a word. Compared with the head at most every 10
+/// minutes; a change is logged, used from then on, and what the store holds is put right. Also
+/// repairs a store left by a version that did not know the latest change, once per run.
+pub fn check_block_time(id: u64) {
+    static CHECKED: Mutex<Option<HashMap<u64, std::time::Instant>>> = Mutex::new(None);
+    let s = stretches(id);
+    if s.is_empty() {
+        return;
+    }
+    let first = {
+        let mut g = CHECKED.lock().unwrap();
+        let m = g.get_or_insert_with(HashMap::new);
+        if m.get(&id).map(|t| t.elapsed().as_secs() < 600).unwrap_or(false) {
+            return;
+        }
+        m.insert(id, std::time::Instant::now()).is_none()
+    };
+    let change = find_change(id, &s);
+    if let Some(c) = change {
+        crate::error!("chains", "{}: the block time changed at block {} to {} s; times are corrected, and a release should carry this", get(id).name, c.0, c.2);
+        FOUND.lock().unwrap().get_or_insert_with(HashMap::new).entry(id).or_default().push(c);
+    }
+    if first || change.is_some() {
+        if let Err(e) = crate::history::repair_timestamps(id) {
+            crate::error!("history", "chain {id}: stored times not repaired: {e}");
+        }
+    }
+}
+
+/// Timestamp of a block: exact where the chain's block times are known (Base), else interpolated
+/// from the head header and the average block time over the last ~100k blocks.
 pub fn block_ts(id: u64, block: i64) -> i64 {
-    let c = get(id);
-    if let (Some(g), Some(bt)) = (c.genesis_ts, c.block_time_s) {
-        return g + (bt * block as f64) as i64;
+    let s = stretches(id);
+    if !s.is_empty() {
+        return stretch_ts(&s, block);
     }
     let mut a = ANCHOR.lock().unwrap();
     let m = a.get_or_insert_with(HashMap::new);
@@ -387,12 +478,11 @@ fn measure(id: u64) -> Option<(i64, i64, f64)> {
     Some((head, t1, (t1 - t0) as f64 / (head - back) as f64))
 }
 
-/// Blocks per day (Base: 43,200).
 /// The block at time `ts`, by the same estimate block_ts uses (so the two agree).
 pub fn block_at_ts(id: u64, ts: i64) -> i64 {
-    let c = get(id);
-    if let (Some(g), Some(bt)) = (c.genesis_ts, c.block_time_s) {
-        return (((ts - g) as f64) / bt).floor().max(0.0) as i64;
+    let s = stretches(id);
+    if !s.is_empty() {
+        return stretch_block(&s, ts);
     }
     block_ts(id, 0); // anchors the estimate
     let a = ANCHOR.lock().unwrap();
@@ -402,10 +492,10 @@ pub fn block_at_ts(id: u64, ts: i64) -> i64 {
     }
 }
 
+/// Blocks per day at the chain's current block time (Base: 432,000).
 pub fn blocks_per_day(id: u64) -> i64 {
-    let c = get(id);
-    if let Some(bt) = c.block_time_s {
-        return (86400.0 / bt) as i64;
+    if let Some(s) = stretches(id).last() {
+        return (86400.0 / s.2) as i64;
     }
     block_ts(id, 0);
     let a = ANCHOR.lock().unwrap();
@@ -415,6 +505,28 @@ pub fn blocks_per_day(id: u64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base_block_times_follow_its_change_from_2_s_to_0_2_s() {
+        // real headers
+        assert_eq!(block_ts(BASE, 51_000_000) - 1686789347, 102_000_000);
+        assert_eq!(block_ts(BASE, 53556129), 1793901601);
+        assert_eq!(block_ts(BASE, 53835614), 1793957498);
+        assert_eq!(blocks_per_day(BASE), 432_000);
+        for b in [1_000_000, 53_556_126, 53_556_127, 53_835_614] {
+            assert!((block_at_ts(BASE, block_ts(BASE, b)) - b).abs() <= 5, "{b}");
+        }
+    }
+
+    #[test]
+    fn a_later_stretch_applies_from_its_first_block() {
+        let s = [(0, 1000, 2.0), (100, 1200, 0.5)];
+        assert_eq!(stretch_ts(&s, 99), 1198);
+        assert_eq!(stretch_ts(&s, 100), 1200);
+        assert_eq!(stretch_ts(&s, 110), 1205);
+        assert_eq!(stretch_block(&s, 1198), 99);
+        assert_eq!(stretch_block(&s, 1205), 110);
+    }
 
     #[test]
     fn a_chain_switched_off_is_not_read_and_needs_its_pools_off_first() {

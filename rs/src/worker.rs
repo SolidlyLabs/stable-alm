@@ -464,6 +464,12 @@ impl Worker {
         let (execute, mode) = self.mode(&s, &wallet)?;
         self.set("mode", json!(mode));
 
+        // times first: everything below reads events by them
+        let chain_ids: std::collections::BTreeSet<u64> = raw.iter().map(pool_chain).filter(|c| !chains::is_off(*c)).collect();
+        for cid in chain_ids {
+            chains::check_block_time(cid);
+        }
+
         let mut by_chain: BTreeMap<u64, Vec<(Value, PoolConfig)>> = BTreeMap::new();
         for p in &raw {
             let (cid, cfg) = (pool_chain(p), PoolConfig::from(p));

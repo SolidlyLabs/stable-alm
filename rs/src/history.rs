@@ -16,8 +16,8 @@
 //!    from the same download, and a top-up asks only for rows after the last one stored. Rows are
 //!    used up to the block the processor has fully synced. Once per chain and run a sample range
 //!    is compared with the chain's own logs; on a mismatch the processor is not used for that chain.
-//! 2. RPC getLogs for the few minutes the processor has not synced yet (one request per 10,000
-//!    blocks for up to 100 pools), and for everything when the processor is unreachable, except
+//! 2. RPC getLogs for the few minutes the processor has not synced yet (one request per as many
+//!    blocks as the node accepts, for up to 100 pools), and for everything when the processor is unreachable, except
 //!    for large chain-wide requests (all pools of a chain), which then wait for the processor.
 
 use serde::{Deserialize, Serialize};
@@ -30,12 +30,17 @@ use std::sync::Mutex;
 use crate::data::{self, Ev};
 
 const CHUNK: i64 = 10_000;
+/// Blocks per getLogs on dRPC's free endpoints (they refuse more, in a message that says 10,000).
+const FREE_SPAN: i64 = 100;
 const ADDRS_PER_REQUEST: usize = 100;
 const DAY: i64 = 86_400;
 /// globIndex = block * 10^10 + log index, as the processor numbers events.
 const GLOB: i128 = 10_000_000_000;
-/// Blocks below the processor's synced position taken from a day still in progress.
-const SYNC_MARGIN_BLOCKS: i64 = 64;
+/// Blocks below the processor's synced position taken from a day still in progress: about two
+/// minutes of the chain, at least 64.
+fn sync_margin(cid: u64) -> i64 {
+    (crate::chains::blocks_per_day(cid) / 675).max(64)
+}
 /// Requests for this many pools or more never fall back to a full RPC download.
 const RPC_BACKFILL_MAX_POOLS: usize = 10;
 const DEFAULT_HISTORY_API: &str = "https://solidly.com/api/history";
@@ -55,6 +60,32 @@ static LOCKS: Mutex<Option<HashMap<u64, std::sync::Arc<Mutex<()>>>>> = Mutex::ne
 
 fn chain_lock(cid: u64) -> std::sync::Arc<Mutex<()>> {
     LOCKS.lock().unwrap().get_or_insert_with(HashMap::new).entry(cid).or_default().clone()
+}
+
+/// Requests waiting for a chain's lock that are not a whole-chain refresh. Such a refresh runs in
+/// the background and picks up where it stopped next time, so it gives way between its pieces: a
+/// pool's own top-up, and with it the trading cycle, never waits out a long download.
+static WAITING: Mutex<Option<HashMap<u64, usize>>> = Mutex::new(None);
+
+struct Waiting(u64);
+
+impl Waiting {
+    fn new(cid: u64) -> Waiting {
+        *WAITING.lock().unwrap().get_or_insert_with(HashMap::new).entry(cid).or_default() += 1;
+        Waiting(cid)
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        if let Some(n) = WAITING.lock().unwrap().get_or_insert_with(HashMap::new).get_mut(&self.0) {
+            *n = n.saturating_sub(1);
+        }
+    }
+}
+
+fn gives_way(whole_chain: bool, cid: u64) -> bool {
+    whole_chain && WAITING.lock().unwrap().get_or_insert_with(HashMap::new).get(&cid).copied().unwrap_or(0) > 0
 }
 
 pub fn pool_dir(cid: u64, pool: &str) -> PathBuf {
@@ -209,7 +240,24 @@ pub fn scan_all(cid: u64, pool: &str, f: impl FnMut(Ev)) {
 
 // -- download -------------------------------------------------------------------------------------------
 
-/// Swap/Mint/Burn logs of `addrs` in [a, b]; a range the RPC refuses for size is split in two.
+/// Blocks per getLogs a node has refused more than, by its URL.
+static SPANS: Mutex<Option<HashMap<String, i64>>> = Mutex::new(None);
+
+/// How many blocks to ask a chain's node for in one getLogs.
+fn log_span(cid: u64) -> i64 {
+    let url = crate::chains::get(cid).rpc;
+    let known = SPANS.lock().unwrap().get_or_insert_with(HashMap::new).get(&url).copied();
+    known.unwrap_or(if url.contains(".drpc.org") { FREE_SPAN } else { CHUNK })
+}
+
+/// The node's refusal is about the width of the range, not the number of results in it.
+fn refused_for_range(r: &Result<Value, Value>) -> bool {
+    let m = r.as_ref().err().map(|e| e.to_string().to_lowercase()).unwrap_or_default();
+    m.contains("range") || m.contains("blocks")
+}
+
+/// Swap/Mint/Burn logs of `addrs` in [a, b]; a range the RPC refuses for size is split in two, and
+/// a refusal of its width is remembered, so the next ranges ask for what the node accepts.
 fn fetch(cid: u64, addrs: &[String], a: i64, b: i64, out: &mut Vec<(String, Ev)>) -> Result<(), String> {
     let p = json!([{"address": addrs, "fromBlock": format!("0x{a:x}"), "toBlock": format!("0x{b:x}"),
                     "topics": [[data::SWAP, data::MINT, data::BURN]]}]);
@@ -223,7 +271,14 @@ fn fetch(cid: u64, addrs: &[String], a: i64, b: i64, out: &mut Vec<(String, Ev)>
         }
         Err(e) if crate::rpc::is_rate_limit(&e) => Err(format!("getLogs rate limited for {a}-{b}: {e}")),
         r if b - a < 10 => Err(format!("getLogs failed for {a}-{b}: {r:?}")),
-        _ => {
+        r => {
+            if refused_for_range(&r) {
+                let halved = ((b - a + 1) / 2).max(10);
+                let url = crate::chains::get(cid).rpc;
+                let mut g = SPANS.lock().unwrap();
+                let span = g.get_or_insert_with(HashMap::new).entry(url).or_insert(halved);
+                *span = (*span).min(halved);
+            }
             let m = (a + b) / 2;
             fetch(cid, addrs, a, m, out)?;
             fetch(cid, addrs, m + 1, b, out)
@@ -268,13 +323,20 @@ pub fn ensure_until(cid: u64, pools: &[String], from_ts: i64, to_ts: Option<i64>
     if pools.is_empty() {
         return Ok(Report::default());
     }
+    // a chain's whole refresh (Fee/arb for every pool) runs in the background; nothing waits for it
+    let whole_chain = to_ts.is_none() && pools.len() >= RPC_BACKFILL_MAX_POOLS;
     let lock = chain_lock(cid);
-    let _g = lock.lock().unwrap();
+    let _g = if whole_chain {
+        lock.lock().unwrap()
+    } else {
+        let _w = Waiting::new(cid);
+        lock.lock().unwrap()
+    };
     let pools = norm_pools(&pools);
     let mut rep = Report::default();
     let mut processor_ok = false;
     if processor_enabled(cid) {
-        match ensure_processor(cid, &pools, from_ts) {
+        match ensure_processor(cid, &pools, from_ts, whole_chain) {
             Ok(r) => {
                 processor_ok = true;
                 rep = r;
@@ -294,6 +356,10 @@ pub fn ensure_until(cid: u64, pools: &[String], from_ts: i64, to_ts: Option<i64>
             Err(e) => crate::warn!("history", "chain {cid}: processor history unavailable ({e})"),
         }
     }
+    // the last few minutes of every pool over RPC are not worth it: the next refresh has them
+    if whole_chain && processor_ok {
+        return Ok(rep);
+    }
     let pools: Vec<String> = match to_ts {
         Some(t) => pools.into_iter().filter(|p| !covers(cid, p, from_ts, t)).collect(),
         None => pools,
@@ -305,7 +371,7 @@ pub fn ensure_until(cid: u64, pools: &[String], from_ts: i64, to_ts: Option<i64>
     } else {
         pools
     };
-    let r = ensure_rpc(cid, &rpc_pools, from_ts)?;
+    let r = ensure_rpc(cid, &rpc_pools, from_ts, whole_chain)?;
     let from_block = match (rep.rows > 0, r.rows > 0) {
         (true, true) => rep.from_block.min(r.from_block),
         (true, false) => rep.from_block,
@@ -315,7 +381,7 @@ pub fn ensure_until(cid: u64, pools: &[String], from_ts: i64, to_ts: Option<i64>
 }
 
 /// The RPC download: every pool from `from_ts` (or right after its coverage) to the chain head.
-fn ensure_rpc(cid: u64, pools: &[String], from_ts: i64) -> Result<Report, String> {
+fn ensure_rpc(cid: u64, pools: &[String], from_ts: i64, whole_chain: bool) -> Result<Report, String> {
     let head = crate::rpc::block_number(cid)? as i64;
     // a small margin before from_ts: block times are estimates
     let target = (crate::chains::block_at_ts(cid, from_ts) - crate::chains::blocks_per_day(cid) / 48).max(1);
@@ -331,7 +397,11 @@ fn ensure_rpc(cid: u64, pools: &[String], from_ts: i64) -> Result<Report, String
     rep.from_block = x;
     let mut a = x;
     while a <= head {
-        let b = (a + CHUNK - 1).min(head);
+        if gives_way(whole_chain, cid) {
+            rep.to_block = a - 1;
+            return Ok(rep);
+        }
+        let b = (a + log_span(cid).min(CHUNK) - 1).min(head);
         let mut got: Vec<(String, Ev)> = vec![];
         for group in need.chunks(ADDRS_PER_REQUEST) {
             fetch(cid, group, a, b, &mut got)?;
@@ -600,16 +670,16 @@ fn stream(chain: &str, pool: Option<&str>, day: &str, n: i64, after_block: i64, 
 }
 
 /// Full days from the processor for every pool, up to its synced block less a margin.
-fn ensure_processor(cid: u64, pools: &[String], from_ts: i64) -> Result<Report, String> {
-    let r = ensure_processor_days(cid, pools, from_ts);
+fn ensure_processor(cid: u64, pools: &[String], from_ts: i64, whole_chain: bool) -> Result<Report, String> {
+    let r = ensure_processor_days(cid, pools, from_ts, whole_chain);
     set_progress(cid, None);
     r
 }
 
-fn ensure_processor_days(cid: u64, pools: &[String], from_ts: i64) -> Result<Report, String> {
+fn ensure_processor_days(cid: u64, pools: &[String], from_ts: i64, whole_chain: bool) -> Result<Report, String> {
     let chain = blockchain_name(cid).ok_or("chain not in the processor")?;
     let h = head(chain)?;
-    let cap = h.synced_block - SYNC_MARGIN_BLOCKS;
+    let cap = h.synced_block - sync_margin(cid);
     let mut rep = Report { from_block: i64::MAX, ..Default::default() };
     // per pool: its coverage (kept when it reaches back to from_ts), the first day to read, and the
     // last block already stored
@@ -626,6 +696,10 @@ fn ensure_processor_days(cid: u64, pools: &[String], from_ts: i64) -> Result<Rep
         let mut got: HashMap<String, Vec<Ev>> = HashMap::new();
         let mut complete = true;
         while d <= last {
+            if gives_way(whole_chain, cid) {
+                complete = false;
+                break;
+            }
             set_progress(cid, Some(format!("earlier history: {} ({} of {} days)", day_name(d), (d - first) / DAY + 1, (last - first) / DAY + 1)));
             let n = ((last - d) / DAY + 1).min(RANGE_DAYS);
             let lp: Vec<String> = late.iter().map(|(p, _)| p.clone()).collect();
@@ -736,6 +810,9 @@ fn ensure_processor_days(cid: u64, pools: &[String], from_ts: i64) -> Result<Rep
         }
     }
     while d <= h.synced_ts {
+        if gives_way(whole_chain, cid) {
+            break;
+        }
         set_progress(cid, Some(format!("history: {} ({} of {} days)", day_name(d), (d - first) / DAY + 1, days_total)));
         let whole_days = (h.synced_ts - d) / DAY - 1; // complete days from d on, keeping the last synced day single
         if !ahead.contains_key(&d) && whole_days >= 2 {
@@ -879,6 +956,102 @@ fn spot_check(cid: u64, pools: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Times of events stored while the app assumed an older block time (data::decode estimates them
+/// from the block): filed under days that have not happened yet, where no reader finds them, and
+/// with a coverage that keeps the processor from topping the pool up. For each pool whose coverage
+/// runs ahead of now: its rows from the chain's last block time change get the block's time and
+/// the right day file. Its wallet rows get the same, and take the wallet's mints and burns stored
+/// meanwhile, which the wallet's file missed while they were dated ahead. Coverage goes last, so an
+/// interrupted repair is done again. Returns the pools repaired.
+pub fn repair_timestamps(cid: u64) -> Result<usize, String> {
+    let Some(since) = crate::chains::last_block_time_change(cid) else { return Ok(0) };
+    let now = crate::engine::now() as i64;
+    let root = crate::paths::data().join("history").join(cid.to_string());
+    let Ok(dirs) = std::fs::read_dir(&root) else { return Ok(0) };
+    let lock = chain_lock(cid);
+    let _g = lock.lock().unwrap();
+    let mut repaired = 0;
+    for dir in dirs.flatten() {
+        let pool = dir.file_name().to_string_lossy().to_string();
+        let Some(mut c) = coverage(cid, &pool).filter(|c| c.to_ts > now + 3600) else { continue };
+        let moved = repair_pool(cid, &pool, since)?;
+        for f in std::fs::read_dir(data::pool_dir(cid, &pool)).into_iter().flatten().flatten() {
+            let p = f.path();
+            let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            if let Some(wallet) = name.strip_prefix("wallet_").and_then(|n| n.strip_suffix(".jsonl")) {
+                let mut rows = data::read_jsonl(&p);
+                retime(cid, &mut rows, since);
+                let have: HashSet<(i64, i64)> = rows.iter().map(|e| (e.block, e.log_index)).collect();
+                scan(cid, &pool, crate::chains::block_ts(cid, since) - DAY, now + 3600, |e| {
+                    if e.kind != "swap" && e.owner == wallet && e.block >= since && !have.contains(&(e.block, e.log_index)) {
+                        rows.push(e)
+                    }
+                });
+                rows.sort_by_key(|e| (e.block, e.log_index));
+                data::write_jsonl(&p, &rows).map_err(|e| e.to_string())?;
+            }
+        }
+        c.to_ts = crate::chains::block_ts(cid, c.to_block);
+        c.from_ts = c.from_ts.min(crate::chains::block_ts(cid, c.from_block));
+        save_coverage(cid, &pool, &c)?;
+        crate::info!("history", "chain {cid}: {}: {moved} stored events put at their real time, coverage up to block {}", &pool[..pool.len().min(10)], c.to_block);
+        repaired += 1;
+    }
+    Ok(repaired)
+}
+
+/// The rows at or after block `since` at their block's time; a row within seconds of it (the
+/// processor's real time) stays as it is. Returns how many changed.
+fn retime(cid: u64, rows: &mut [Ev], since: i64) -> usize {
+    let mut n = 0;
+    for e in rows.iter_mut().filter(|e| e.block >= since) {
+        let t = crate::chains::block_ts(cid, e.block);
+        if (e.ts - t).abs() > 2 {
+            e.ts = t;
+            n += 1;
+        }
+    }
+    n
+}
+
+/// One pool's day files from the day of block `since` on, rewritten by the rows' real days.
+fn repair_pool(cid: u64, pool: &str, since: i64) -> Result<usize, String> {
+    let dir = pool_dir(cid, pool);
+    let first = day_name(crate::chains::block_ts(cid, since) - DAY);
+    let mut files: Vec<(String, PathBuf)> = vec![];
+    for f in std::fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
+        let name = f.file_name().to_string_lossy().to_string();
+        if let Some(day) = name.strip_suffix(".jsonl") {
+            if day >= first.as_str() {
+                files.push((day.to_string(), f.path()));
+            }
+        }
+    }
+    let mut rows: Vec<Ev> = files.iter().flat_map(|(_, p)| read_day(p)).collect();
+    let moved = retime(cid, &mut rows, since);
+    let mut by_day: BTreeMap<String, BTreeMap<(i64, i64), Ev>> = BTreeMap::new();
+    for e in rows {
+        by_day.entry(day_name(e.ts)).or_default().insert((e.block, e.log_index), e);
+    }
+    for (day, rows) in &by_day {
+        let p = dir.join(format!("{day}.jsonl"));
+        let tmp = p.with_extension("tmp");
+        let mut f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+        for e in rows.values() {
+            writeln!(f, "{}", serde_json::to_string(e).unwrap()).map_err(|e| e.to_string())?;
+        }
+        f.sync_all().map_err(|e| e.to_string())?;
+        drop(f);
+        std::fs::rename(&tmp, &p).map_err(|e| e.to_string())?;
+    }
+    for (day, p) in &files {
+        if !by_day.contains_key(day) {
+            std::fs::remove_file(p).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(moved)
+}
+
 /// First run after the store was introduced: take over the pool's old events file
 /// (data/raw/<chain>/<pool>/events.jsonl, complete from its first row to synced_to.txt), validated
 /// like any download. The old file is left in place.
@@ -909,6 +1082,65 @@ pub fn import_legacy(cid: u64, pool: &str) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn swap_at(block: i64, ts: i64) -> Ev {
+        Ev { block, log_index: 1, ts, kind: "swap".into(), ..Default::default() }
+    }
+
+    #[test]
+    fn events_dated_ahead_go_back_to_their_real_day_and_nothing_is_lost() {
+        let _d = crate::wallets::tests::temp_home("retime");
+        let (cid, pool) = (8453, "0x00000000000000000000000000000000000000a1");
+        let since = crate::chains::last_block_time_change(cid).unwrap();
+        let later = since + 100_000; // 20,000 s after the change
+        let real = crate::chains::block_ts(cid, later);
+        let old_formula = 1686789347 + 2 * later;
+        // before the change, a real row after it, and one dated ahead
+        let mint = Ev { block: later + 2, log_index: 7, ts: 1686789347 + 2 * (later + 2), kind: "mint".into(), owner: "0xabc".into(), ..Default::default() };
+        let rows = vec![swap_at(since - 100_000, crate::chains::block_ts(cid, since - 100_000)), swap_at(later, real), swap_at(later + 1, old_formula), mint];
+        store_rows(cid, pool, rows).unwrap();
+        let future = pool_dir(cid, pool).join(format!("{}.jsonl", day_name(old_formula)));
+        assert!(future.exists());
+        save_coverage(cid, pool, &Coverage { from_block: since - 100_000, to_block: later + 2, from_ts: 0, to_ts: crate::engine::now() as i64 + 400_000, source: "processor".into() }).unwrap();
+        // the wallet's rows too
+        let wp = data::pool_dir(cid, pool).join("wallet_0xabc.jsonl");
+        std::fs::create_dir_all(wp.parent().unwrap()).unwrap();
+        data::write_jsonl(&wp, &[swap_at(later + 1, old_formula)]).unwrap();
+
+        assert_eq!(repair_timestamps(cid).unwrap(), 1);
+
+        assert!(!future.exists(), "the file of a day that has not come is gone");
+        let all = read(cid, pool, 0, real + 86_400);
+        assert_eq!(all.len(), 4);
+        assert_eq!(all[2].ts, crate::chains::block_ts(cid, later + 1));
+        assert_eq!(all[0].block, since - 100_000, "older rows stay");
+        let w = data::read_jsonl(&wp);
+        assert_eq!(w[0].ts, crate::chains::block_ts(cid, later + 1));
+        assert_eq!((w.len(), w[1].block, w[1].ts), (2, later + 2, crate::chains::block_ts(cid, later + 2)), "the mint the wallet's file missed");
+        let c = coverage(cid, pool).unwrap();
+        assert_eq!(c.to_ts, crate::chains::block_ts(cid, later + 2));
+        // done once: nothing left ahead of now
+        assert_eq!(repair_timestamps(cid).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_refusal_of_the_range_is_told_from_too_many_results() {
+        assert!(refused_for_range(&Err(json!({"code": 35, "message": "ranges over 10000 blocks are not supported on free plan"}))));
+        assert!(refused_for_range(&Err(json!({"message": "block range too large"}))));
+        assert!(!refused_for_range(&Err(json!({"message": "query returned more than 10000 results"}))));
+        assert!(!refused_for_range(&Ok(json!([]))));
+    }
+
+    #[test]
+    fn a_whole_chain_refresh_gives_way_only_while_a_pool_waits() {
+        let cid = 987_654;
+        assert!(!gives_way(true, cid));
+        let w = Waiting::new(cid);
+        assert!(gives_way(true, cid));
+        assert!(!gives_way(false, cid), "a pool's own top-up finishes");
+        drop(w);
+        assert!(!gives_way(true, cid));
+    }
 
     #[test]
     fn days_before_a_pool_existed_do_not_send_it_to_rpc() {

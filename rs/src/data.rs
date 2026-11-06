@@ -69,7 +69,9 @@ pub fn decode(cid: u64, log: &Value) -> Ev {
     let d = log["data"].as_str().unwrap_or("0x").trim_start_matches("0x");
     let w: Vec<&str> = (0..d.len() / 64).map(|i| &d[i * 64..i * 64 + 64]).collect();
     let block = rpc::hex_u64(&log["blockNumber"]) as i64;
-    let mut e = Ev { block, log_index: rpc::hex_u64(&log["logIndex"]) as i64, ts: chains::block_ts(cid, block), ..Default::default() };
+    // the node's own time for the block where it gives one
+    let ts = Some(rpc::hex_u64(&log["blockTimestamp"]) as i64).filter(|t| *t > 0).unwrap_or_else(|| chains::block_ts(cid, block));
+    let mut e = Ev { block, log_index: rpc::hex_u64(&log["logIndex"]) as i64, ts, ..Default::default() };
     let u = |h: &str| crate::eth::parse_uint(&format!("0x{h}")).to_string();
     if t[0] == SWAP {
         e.kind = "swap".into();
@@ -148,7 +150,7 @@ fn append_jsonl(p: &PathBuf, rows: &[Ev]) -> std::io::Result<()> {
     Ok(())
 }
 
-fn write_jsonl(p: &PathBuf, rows: &[Ev]) -> std::io::Result<()> {
+pub fn write_jsonl(p: &PathBuf, rows: &[Ev]) -> std::io::Result<()> {
     let tmp = p.with_extension("tmp");
     let _ = std::fs::remove_file(&tmp);
     append_jsonl(&tmp, rows)?;
@@ -574,6 +576,10 @@ pub fn live_market(cid: u64, pool: &str, wallet: &str, d0: i32, d1: i32, numerai
 pub fn live_market_bars(cid: u64, pool: &str, wallet: &str, d0: i32, d1: i32, numeraire: i64, days: i64, bar_s: i64) -> Result<Market, String> {
     let now = crate::engine::now() as i64;
     let since = now - days * 86400;
+    // events dated after now are not read below: a replay without them is an old market, not to act on
+    if let Some(c) = crate::history::coverage(cid, pool).filter(|c| c.to_ts > now + 3600) {
+        return Err(format!("the stored events of pool {pool} are dated up to {} s ahead of now; holding until their times are repaired", c.to_ts - now));
+    }
     // swaps of the replay window; mints and burns as far back as the store goes (up to 31 days)
     // (filtered as read: the older swaps are most of the 31 days)
     let mut ev: Vec<Ev> = vec![];
