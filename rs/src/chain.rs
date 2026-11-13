@@ -307,7 +307,22 @@ pub fn simulate_transfers(cid: u64, from: &str, to: &str, data: &str) -> Option<
     Some(Ok(crate::prices::transfers(call["logs"].as_array().map(|v| v.as_slice()).unwrap_or(&[]))))
 }
 
-fn receipt(cid: u64, h: &str) -> Option<Value> {
+/// A transaction's receipt once it is mined. One request per look, from the read node or the send
+/// node by turns (a node that lags cannot hide it for long): asking both on every 2 s poll alone took
+/// more than a free endpoint's 40 requests a minute, and starved the cycle's other reads.
+fn receipt(cid: u64, h: &str, from_send_node: bool) -> Option<Value> {
+    let ok = |r: &rpc::R| r.as_ref().ok().filter(|v| !v["blockNumber"].is_null()).cloned();
+    let r = if from_send_node {
+        rpc::send_call(cid, "eth_getTransactionReceipt", json!([h]))
+    } else {
+        rpc::call_quick(cid, "eth_getTransactionReceipt", json!([h]))
+    };
+    r.ok().and_then(|r| ok(&r))
+}
+
+/// A receipt asked of both nodes, with the read node's full retries: for the single look that
+/// decides whether a pending nonce was mined by one of our copies or used by something else.
+fn receipt_any(cid: u64, h: &str) -> Option<Value> {
     let ok = |r: &rpc::R| r.as_ref().ok().filter(|v| !v["blockNumber"].is_null()).cloned();
     rpc::call(cid, "eth_getTransactionReceipt", json!([h]))
         .ok()
@@ -386,7 +401,7 @@ pub fn reconcile_pending(cid: u64, from: &str) -> Result<(), String> {
     for p in mine {
         let nonce = p["nonce"].as_u64().unwrap_or(0);
         let copies = p["copies"].as_array().cloned().unwrap_or_default();
-        if let Some(rc) = copies.iter().find_map(|c| receipt(cid, c["hash"].as_str().unwrap_or(""))) {
+        if let Some(rc) = copies.iter().find_map(|c| receipt_any(cid, c["hash"].as_str().unwrap_or(""))) {
             crate::warn!("chain", "reconciled pending nonce {nonce} on chain {cid}: mined in block {} (status {})",
                          hex_u64(&rc["blockNumber"]), rc["status"].as_str().unwrap_or("?"));
             crate::engine::log(json!({"chain_id": cid, "kind": "reconciled", "nonce": nonce, "hash": rc["transactionHash"], "status": rc["status"],
@@ -533,6 +548,8 @@ pub fn send(cid: u64, acct: &Account, to: &str, data: &str, gas: u64) -> Result<
     let (base, t) = gas_quote(cid)?;
     let (mut tip, mut max_fee) = fees_for(speed, &base, &t);
     let mut hashes: Vec<String> = vec![];
+    // what a send costs in time and requests, for the log (rpc::pace)
+    let (t_send, p_send) = (Instant::now(), rpc::thread_paced());
     let body = eth::unhex(data).map_err(TxError::from)?;
     for attempt in 0..4 {
         // asked right before every signature: the reads before it (pending, nonce, fees) take time
@@ -590,9 +607,11 @@ pub fn send(cid: u64, acct: &Account, to: &str, data: &str, gas: u64) -> Result<
             }
         }
         let t0 = Instant::now();
+        let mut look = 0u64;
         while t0.elapsed() < speed.bump_after() {
+            look += 1;
             for h in &hashes {
-                if let Some(rc) = receipt(cid, h) {
+                if let Some(rc) = receipt(cid, h, look % 2 == 0) {
                     match rc["status"].as_str() {
                         Some("0x1") => {}
                         // a revert only when the receipt says so: an engine retries a step on it
@@ -606,6 +625,9 @@ pub fn send(cid: u64, acct: &Account, to: &str, data: &str, gas: u64) -> Result<
                     }
                     pending_clear(cid, &from, nonce);
                     let block = hex_u64(&rc["blockNumber"]);
+                    let p = rpc::thread_paced().since(p_send);
+                    crate::info!("chain", "mined {h} nonce {nonce}: {:.1}s from the fee quote, {:.1}s after the last broadcast, {} paced RPC requests, {:.1}s waiting for the RPC budget",
+                                 t_send.elapsed().as_secs_f64(), t0.elapsed().as_secs_f64(), p.requests, p.waited_s);
                     note_mined(cid, block);
                     crate::ledger::invalidate();
                     return Ok(Sent { hash: h.clone(), gas_used: hex_u64(&rc["gasUsed"]), block, receipt: rc });

@@ -25,14 +25,14 @@ pub fn refresh_in_background(chains: Vec<u64>, wallet: String) {
     if RUNNING.swap(true, Ordering::SeqCst) {
         return;
     }
-    std::thread::spawn(move || {
+    std::thread::spawn(move || crate::rpc::bulk(|| {
         for cid in chains {
             if let Err(e) = refresh(cid, &wallet) {
                 crate::warn!("market", "fee vs arb for all pools: refresh failed on chain {cid}: {e}");
             }
         }
         RUNNING.store(false, Ordering::SeqCst);
-    });
+    }));
 }
 
 fn refresh(cid: u64, wallet: &str) -> Result<(), String> {

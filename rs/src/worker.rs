@@ -13,7 +13,56 @@ use crate::tickmath::{amounts_at, to_f64};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// A cycle's stages: how long each took, the paced RPC requests it sent and how long it waited for
+/// the RPC budget (rpc::pace). Logged as one line when the cycle ends however it ends, and as a
+/// warning when it took over two minutes, so a slow cycle says which stage held it.
+struct Trace {
+    id: u64,
+    t0: Instant,
+    at: Instant,
+    paced: crate::rpc::Paced,
+    total: crate::rpc::Paced,
+    parts: Vec<String>,
+}
+
+impl Trace {
+    fn new() -> Trace {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let now = Instant::now();
+        let p = crate::rpc::thread_paced();
+        Trace { id: N.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1, t0: now, at: now, paced: p, total: p, parts: vec![] }
+    }
+
+    /// The stage that ends now.
+    fn stage(&mut self, name: &str) {
+        let now = Instant::now();
+        let p = crate::rpc::thread_paced();
+        let d = p.since(self.paced);
+        let s = (now - self.at).as_secs_f64();
+        if s >= 0.5 || d.requests > 0 {
+            self.parts.push(format!("{name} {s:.1}s ({} req, {:.1}s RPC wait)", d.requests, d.waited_s));
+        }
+        self.at = now;
+        self.paced = p;
+    }
+}
+
+impl Drop for Trace {
+    fn drop(&mut self) {
+        self.stage("rest");
+        let all = crate::rpc::thread_paced().since(self.total);
+        let s = self.t0.elapsed().as_secs_f64();
+        let line = format!("cycle {} took {s:.1}s, {} paced RPC requests, {:.1}s waiting for the RPC budget: {}",
+                           self.id, all.requests, all.waited_s, self.parts.join(" | "));
+        if s > 120.0 {
+            crate::warn!("worker", "{line}");
+        } else {
+            crate::info!("worker", "{line}");
+        }
+    }
+}
 
 /// Days of swaps a pool's live replay holds: 10, or what its node strategy needs.
 fn replay_days(cfg: &PoolConfig) -> i64 {
@@ -463,12 +512,14 @@ impl Worker {
         }
         let (execute, mode) = self.mode(&s, &wallet)?;
         self.set("mode", json!(mode));
+        let mut tr = Trace::new();
 
         // times first: everything below reads events by them
         let chain_ids: std::collections::BTreeSet<u64> = raw.iter().map(pool_chain).filter(|c| !chains::is_off(*c)).collect();
         for cid in chain_ids {
             chains::check_block_time(cid);
         }
+        tr.stage("block times");
 
         let mut by_chain: BTreeMap<u64, Vec<(Value, PoolConfig)>> = BTreeMap::new();
         for p in &raw {
@@ -498,8 +549,10 @@ impl Worker {
                 }
             }
         }
+        tr.stage("market data");
         let acct = account_value(&by_chain, &wallet, &s);
         self.set("account", acct.clone());
+        tr.stage("account");
 
         // each pool's capital: kept within the wallet, and the queued Add / Withdraw / Reset requests
         let mut book = capital::load(execute);
@@ -516,6 +569,7 @@ impl Worker {
         }
         capital::save(execute, &book);
         self.publish_capital(&by_chain, &wallet, &acct, execute);
+        tr.stage("capital");
 
         let force = self.force_claim.lock().unwrap().remove(&crate::paths::wallet());
         if s["claim"]["enabled"].as_bool().unwrap_or(true) || force {
@@ -542,12 +596,14 @@ impl Worker {
             let base = claims.get(&chains::BASE.to_string()).cloned().or_else(|| claims.values().next().cloned()).unwrap_or(Value::Null);
             self.set("claim", base);
             self.set("claims", Value::Object(claims));
+            tr.stage("claim");
         }
         if s["solid_lp"]["enabled"].as_bool().unwrap_or(false) {
             let cid = s["solid_lp"]["chain_id"].as_u64().unwrap_or(chains::BASE);
             // the pools' tokens are theirs: it pairs SOLID with Unallocated ones only
             let reserve = capital::load(execute).held(cid);
             self.set("solid_lp", crate::solid_lp::run(cid, &wallet, &s, execute, reserve));
+            tr.stage("solid lp");
         } else {
             self.with_status(|st| st.as_object_mut().map(|o| o.remove("solid_lp")));
         }
@@ -561,6 +617,7 @@ impl Worker {
                     crate::warn!("worker", "chain {cid}: {e}");
                     chain_execute = false;
                 }
+                tr.stage("pending");
             }
             // Unknown value is not zero value: while anything on the chain could not be valued, its
             // allocations are not acted on (a pool switched off or set to 0% is still withdrawn).
@@ -605,6 +662,7 @@ impl Worker {
                 }
                 let entry = self.run_pool(*cid, cfg, &acct, &wallet, &s, chain_execute);
                 self.publish(*cid, cfg, &wallet, entry);
+                tr.stage(&format!("run {}", cfg.name));
             }
         }
 
@@ -616,6 +674,7 @@ impl Worker {
         // Earned, costs and profit per chain, from the app's own transactions.
         let ledger_chains: Vec<u64> = by_chain.keys().copied().collect();
         self.set("ledger", crate::ledger::summary(&wallet, &ledger_chains));
+        tr.stage("ledger");
 
         let mut snap = account_value(&by_chain, &wallet, &s);
         snap["mode"] = json!(mode);

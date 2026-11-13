@@ -529,12 +529,30 @@ fn get(path: &str, w: &Arc<Worker>) -> (u16, Value) {
             (200, json!({"names": names}))
         }
         p if p.starts_with("/api/gas/") => {
-            // /api/gas/<chain>: base fee and the tip, fee cap and bump wait of each gas speed
+            // /api/gas/<chain>: base fee and the tip, fee cap and bump wait of each gas speed. A copy up
+            // to 30 s old is served and refreshed in the background: read on every page view, for every
+            // chain, it took three requests each from a free endpoint's budget (40 a minute) and the
+            // page waited behind the cycle for them. Sending reads its own fees, never this copy.
             match p["/api/gas/".len()..].parse::<u64>() {
-                Ok(cid) => match crate::chain::gas_preview(cid) {
-                    Ok(v) => (200, v),
-                    Err(e) => (502, json!({"error": e})),
-                },
+                Ok(cid) => {
+                    // a failed read is kept as its error, so the page says why instead of waiting
+                    let got = crate::store::background(&format!("gas:{cid}"), 30, std::time::Duration::from_secs(4), || None, move || {
+                        let mut v = crate::chain::gas_preview(cid).unwrap_or_else(|e| json!({"error": e}));
+                        v["read_at"] = json!(crate::engine::now());
+                        Ok(v)
+                    });
+                    // a copy from a visit long ago is not shown as current (the refresh it started is)
+                    let fresh = |v: &Value| crate::engine::now().saturating_sub(v["read_at"].as_u64().unwrap_or(0)) <= 120;
+                    match got {
+                        Some(v) if !fresh(&v) => (503, json!({"error": "gas prices are being read again; they show on the next refresh"})),
+                        Some(v) if v.get("error").is_some() => (502, v),
+                        Some(mut v) => {
+                            v["speed"] = json!(crate::chains::get(cid).gas_speed);
+                            (200, v)
+                        }
+                        None => (503, json!({"error": "gas prices are still being read (the RPC is busy); they show on the next refresh"})),
+                    }
+                }
                 Err(_) => (400, json!({"error": "use /api/gas/<chain id>"})),
             }
         }
@@ -1070,6 +1088,62 @@ mod tests {
         std::fs::write(ui_prefs_path(), r#"{"range_units": 3, "other": "x"}"#).unwrap();
         assert_eq!(ui_prefs(), json!({}));
         let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// The gas page's latency while two cycles run, and how long they take, on a copy of a real app
+    /// folder (never the live one): ALM_HOME=<copy> cargo test --release -- --ignored contention_timings --nocapture
+    #[test]
+    #[ignore]
+    fn contention_timings() {
+        let home = std::env::var("ALM_HOME").expect("set ALM_HOME to a copy of the app folder");
+        assert!(!home.to_lowercase().replace('\\', "/").trim_end_matches('/').ends_with("appdata/local/stablealm"), "not on the live folder");
+        let w = Arc::new(Worker::new());
+        let w2 = w.clone();
+        let t = std::time::Instant::now();
+        let h = std::thread::spawn(move || {
+            let mut at = vec![];
+            for _ in 0..2 {
+                w2.cycle();
+                at.push(t.elapsed().as_secs_f64());
+            }
+            at
+        });
+        let mut lat = vec![];
+        while !h.is_finished() {
+            let t1 = std::time::Instant::now();
+            let (code, _) = get("/api/gas/8453", &w);
+            let s = t1.elapsed().as_secs_f64();
+            println!("t={:>6.1}s gas {code} {s:>6.2}s", t.elapsed().as_secs_f64());
+            lat.push(s);
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        }
+        let at = h.join().unwrap();
+        lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!("cycles ended at {at:?}; gas page n={} median {:.2}s p90 {:.2}s max {:.2}s", lat.len(), lat[lat.len() / 2],
+                 lat[lat.len() * 9 / 10], lat[lat.len() - 1]);
+    }
+
+    /// The gas page from its copy: the first look waits for the read (up to 4 s), later ones are
+    /// answered at once. On a copy of a real app folder: ALM_HOME=<copy> cargo test --release -- --ignored gas_page_copy --nocapture
+    #[test]
+    #[ignore]
+    fn gas_page_copy() {
+        let home = std::env::var("ALM_HOME").expect("set ALM_HOME to a copy of the app folder");
+        assert!(!home.to_lowercase().replace('\\', "/").trim_end_matches('/').ends_with("appdata/local/stablealm"), "not on the live folder");
+        let w = Arc::new(Worker::new());
+        let mut first = None;
+        for i in 0..6 {
+            let t = std::time::Instant::now();
+            let (code, v) = get("/api/gas/8453", &w);
+            let s = t.elapsed().as_secs_f64();
+            println!("look {i}: {code} in {s:.2}s, read_at {}", v["read_at"]);
+            if i == 0 {
+                first = v["read_at"].as_u64();
+            } else if first.is_some() {
+                assert!(s < 0.2 && code == 200, "a later look is served from the copy");
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
     }
 
     /// How long each page request takes on a copy of a real app folder (never the live one):

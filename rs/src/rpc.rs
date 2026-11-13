@@ -8,7 +8,9 @@
 //! a log range that is too large).
 
 use serde_json::{json, Value};
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -59,33 +61,110 @@ fn without_url_path(text: &str) -> String {
     out
 }
 
+/// Whose requests these are. Bulk work (stored events read from the chain, the all-pools refresh)
+/// may use the budget only above a reserve, and not while another request waits for it, so a cycle's
+/// trades, receipts and the dashboard's reads never queue behind it. Alone it has the whole rate.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Lane {
+    Normal,
+    Bulk,
+}
+
+thread_local! {
+    static LANE: Cell<Lane> = const { Cell::new(Lane::Normal) };
+    static PACED: Cell<Paced> = const { Cell::new(Paced { requests: 0, waited_s: 0.0 }) };
+}
+
+/// Paced requests this thread has sent and the time it waited for the budget (all endpoints).
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct Paced {
+    pub requests: u64,
+    pub waited_s: f64,
+}
+
+impl Paced {
+    pub fn since(self, before: Paced) -> Paced {
+        Paced { requests: self.requests - before.requests, waited_s: self.waited_s - before.waited_s }
+    }
+}
+
+/// This thread's totals so far (a stage's share is the difference across it).
+pub fn thread_paced() -> Paced {
+    PACED.with(|p| p.get())
+}
+
+/// Run `f` with this thread's requests in the bulk lane.
+pub fn bulk<T>(f: impl FnOnce() -> T) -> T {
+    struct Back(Lane);
+    impl Drop for Back {
+        fn drop(&mut self) {
+            LANE.with(|l| l.set(self.0));
+        }
+    }
+    let _back = Back(LANE.with(|l| l.replace(Lane::Bulk)));
+    f()
+}
+
+/// Normal-lane requests waiting for the budget now; bulk ones hold back while there are any.
+static NORMAL_WAITING: AtomicUsize = AtomicUsize::new(0);
+
+/// One look at the bucket: Ok when `need` requests may go now (taken from it), else how long to wait.
+fn take(b: &mut Bucket, now: Instant, per_s: f64, cap: f64, need: f64, lane: Lane, others_waiting: bool) -> Result<(), Duration> {
+    b.tokens = (b.tokens + now.duration_since(b.at).as_secs_f64() * per_s).min(cap);
+    b.at = now;
+    if now < b.cool_until {
+        return Err(b.cool_until - now);
+    }
+    let reserve = if lane == Lane::Bulk { (cap / 3.0).max(1.0) } else { 0.0 };
+    let need = need.min(cap - reserve).max(1.0);
+    if lane == Lane::Bulk && others_waiting {
+        return Err(Duration::from_millis(500));
+    }
+    if b.tokens - reserve >= need {
+        b.tokens -= need;
+        return Ok(());
+    }
+    Err(Duration::from_secs_f64((need + reserve - b.tokens) / per_s))
+}
+
 /// Wait until `n` requests may go to `url`.
 fn pace(cid: u64, url: &str, n: usize) {
     let rate = rate_for(&crate::chains::get(cid), url) as f64;
-    if rate <= 0.0 {
-        return;
-    }
-    let per_s = rate / 60.0;
-    let cap = (rate / 4.0).clamp(3.0, 30.0);
-    let need = (n as f64).min(cap);
-    loop {
-        let wait = {
-            let mut g = BUCKETS.lock().unwrap();
-            let now = Instant::now();
-            let b = g.get_or_insert_with(HashMap::new).entry(host(url)).or_insert(Bucket { tokens: cap, at: now, cool_until: now });
-            b.tokens = (b.tokens + now.duration_since(b.at).as_secs_f64() * per_s).min(cap);
-            b.at = now;
-            if now < b.cool_until {
-                b.cool_until - now
-            } else if b.tokens >= need {
-                b.tokens -= need;
-                return;
-            } else {
-                Duration::from_secs_f64((need - b.tokens) / per_s)
+    let lane = LANE.with(|l| l.get());
+    let t0 = Instant::now();
+    let mut counted = false;
+    if rate > 0.0 {
+        let per_s = rate / 60.0;
+        let cap = (rate / 4.0).clamp(3.0, 30.0);
+        loop {
+            let r = {
+                let mut g = BUCKETS.lock().unwrap();
+                let now = Instant::now();
+                let b = g.get_or_insert_with(HashMap::new).entry(host(url)).or_insert(Bucket { tokens: cap, at: now, cool_until: now });
+                take(b, now, per_s, cap, n as f64, lane, lane == Lane::Bulk && NORMAL_WAITING.load(Ordering::SeqCst) > 0)
+            };
+            match r {
+                Ok(()) => break,
+                Err(wait) => {
+                    if lane == Lane::Normal && !counted {
+                        NORMAL_WAITING.fetch_add(1, Ordering::SeqCst);
+                        counted = true;
+                    }
+                    std::thread::sleep(wait.min(Duration::from_secs(30)));
+                }
             }
-        };
-        std::thread::sleep(wait.min(Duration::from_secs(30)));
+        }
     }
+    if counted {
+        NORMAL_WAITING.fetch_sub(1, Ordering::SeqCst);
+    }
+    let waited = t0.elapsed().as_secs_f64();
+    PACED.with(|p| {
+        let mut v = p.get();
+        v.requests += n as u64;
+        v.waited_s += waited;
+        p.set(v)
+    });
 }
 
 /// The endpoint said "too many": nobody sends to it for `secs`, and the budget starts empty.
@@ -428,6 +507,40 @@ mod tests {
     }
 
     #[test]
+    fn bulk_requests_leave_a_reserve_and_give_way_to_a_waiting_request() {
+        let t = Instant::now();
+        let (per_s, cap) = (40.0 / 60.0, 10.0);
+        let mut b = Bucket { tokens: cap, at: t, cool_until: t };
+        // bulk alone: takes down to the reserve (a third of the bucket), then waits
+        let mut n = 0;
+        while take(&mut b, t, per_s, cap, 1.0, Lane::Bulk, false).is_ok() {
+            n += 1;
+        }
+        assert_eq!(n, 6, "10 tokens less a reserve of 3.33");
+        // a normal request still finds tokens at once
+        assert!(take(&mut b, t, per_s, cap, 1.0, Lane::Normal, false).is_ok());
+        // with a normal request waiting, bulk holds back even when the bucket is full again
+        let later = t + Duration::from_secs(60);
+        assert!(take(&mut b, later, per_s, cap, 1.0, Lane::Bulk, true).is_err());
+        assert!(take(&mut b, later, per_s, cap, 1.0, Lane::Bulk, false).is_ok());
+        // a bulk batch larger than the room above the reserve is cut to fit, so it is never stuck
+        let mut full = Bucket { tokens: cap, at: later, cool_until: later };
+        assert!(take(&mut full, later, per_s, cap, 30.0, Lane::Bulk, false).is_ok());
+        // a cool-down after a 429 holds every lane
+        let mut cool = Bucket { tokens: cap, at: t, cool_until: t + Duration::from_secs(15) };
+        assert!(take(&mut cool, t, per_s, cap, 1.0, Lane::Normal, false).is_err());
+    }
+
+    #[test]
+    fn a_thread_counts_its_paced_requests_and_the_lane_comes_back_after_bulk() {
+        let before = thread_paced();
+        assert_eq!(LANE.with(|l| l.get()), Lane::Normal);
+        bulk(|| assert_eq!(LANE.with(|l| l.get()), Lane::Bulk));
+        assert_eq!(LANE.with(|l| l.get()), Lane::Normal);
+        assert_eq!(thread_paced().since(before).requests, 0);
+    }
+
+    #[test]
     fn rate_limit_detection() {
         assert!(is_rate_limit(&json!({"code": 429, "message": "x"})));
         assert!(is_rate_limit(&json!({"code": -1, "message": "Too Many Requests"})));
@@ -437,6 +550,11 @@ mod tests {
 
 pub fn call(cid: u64, method: &str, params: Value) -> Result<R, String> {
     Ok(batch(cid, &[(method, params)])?.remove(0))
+}
+
+/// call() with batch_quick's few, short tries: for a question asked again soon anyway (a receipt).
+pub fn call_quick(cid: u64, method: &str, params: Value) -> Result<R, String> {
+    Ok(batch_quick(cid, &[(method, params)])?.remove(0))
 }
 
 /// call() that turns an RPC error into Err(String).

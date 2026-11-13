@@ -404,7 +404,13 @@ fn ensure_rpc(cid: u64, pools: &[String], from_ts: i64, whole_chain: bool) -> Re
         let b = (a + log_span(cid).min(CHUNK) - 1).min(head);
         let mut got: Vec<(String, Ev)> = vec![];
         for group in need.chunks(ADDRS_PER_REQUEST) {
-            fetch(cid, group, a, b, &mut got)?;
+            // the whole chain's refresh in the bulk lane: a cycle's own top-up, its trades and the
+            // dashboard's reads go first (rpc::Lane)
+            if whole_chain {
+                crate::rpc::bulk(|| fetch(cid, group, a, b, &mut got))?;
+            } else {
+                fetch(cid, group, a, b, &mut got)?;
+            }
             rep.requests += 1;
         }
         for (_, e) in &got {
