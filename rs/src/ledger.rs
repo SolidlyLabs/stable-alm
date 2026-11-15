@@ -203,18 +203,29 @@ impl PoolPx {
 
 /// A swap's cost (USD) against the reference quote logged with it (`r`, engine `reference_quote`):
 /// what the tokens it gave would have bought at the small quote's rate, less what it got. None for a
-/// swap without one (sent before 0.7.5) or whose tokens the receipt does not show.
+/// swap without one (sent before 0.7.5) or whose tokens the receipt does not show, and for one whose
+/// quote is further than `REF_OFF_MARKET` from what the swap itself got: the app does not send a
+/// swap that costs that much, so such a quote was off the market (one that priced USDT at 1.04 USDC
+/// made a $6 swap read as a $230 cost), and the swap is measured the older way instead. Checked
+/// against the swap, not the tokens' USD prices, which lag a fast market by more than that.
 fn ref_cost(r: &Value, moves: &Map<String, Value>, usd: &dyn Fn(&str, f64) -> Option<f64>) -> Option<f64> {
     let (tin, tout) = (r["token_in"].as_str()?.to_lowercase(), r["token_out"].as_str()?.to_lowercase());
     let small: f64 = r["in"].as_str()?.parse().ok()?;
     let small_out = r["out"].as_f64()?;
     let gave = -moves.get(&tin)?.as_f64()?;
     let got = moves.get(&tout)?.as_f64()?;
-    if small <= 0.0 || gave <= 0.0 {
+    if small <= 0.0 || gave <= 0.0 || got <= 0.0 {
         return None;
     }
-    usd(&tout, small_out / small * gave - got)
+    let would = small_out / small * gave;
+    if (would / got - 1.0).abs() > REF_OFF_MARKET {
+        return None;
+    }
+    usd(&tout, would - got)
 }
+
+/// How far a reference quote may be from the swap's own fill and still be trusted (2%).
+const REF_OFF_MARKET: f64 = 0.02;
 
 /// What a swap costs in the totals: never less than nothing. Every swap pays fees, so one that seems
 /// to come out ahead was measured against a price off the market (a lagging USD price, a thin pool's
@@ -242,6 +253,31 @@ mod swap_cost_tests {
         assert!(ref_cost(&Value::Null, &moves, &usd).is_none());
         let other: Map<String, Value> = serde_json::from_value(json!({usdc: 10.0})).unwrap();
         assert!(ref_cost(&r, &other, &usd).is_none());
+    }
+
+    #[test]
+    fn a_reference_quote_off_the_market_is_not_used() {
+        // the 13 Nov swap: 5,405.38 USDT -> 5,399.31 USDC, its reference 54.05 USDT -> 56.29 USDC
+        // (1.0414 a USDT); at $1 each that read as a $230 cost, where the swap gave away $6
+        let usdc = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+        let usdt = "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2";
+        let r = json!({"token_in": usdt, "token_out": usdc, "in": "54053800", "out": 56_293_000.0});
+        let moves: Map<String, Value> = serde_json::from_value(json!({usdc: 5_399_310_000.0, usdt: -5_405_380_000.0})).unwrap();
+        let usd = |_: &str, raw: f64| Some(raw / 1e6);
+        assert!(ref_cost(&r, &moves, &usd).is_none());
+        // a quote on the market is still used: 0.9977 a USDT
+        let r = json!({"token_in": usdt, "token_out": usdc, "in": "81486222", "out": 81_299_775.0});
+        let moves: Map<String, Value> = serde_json::from_value(json!({usdc: 8_129_803_498.0, usdt: -8_148_622_286.0})).unwrap();
+        let c = ref_cost(&r, &moves, &usd).unwrap();
+        assert!((c - 0.17).abs() < 0.01, "{c}");
+        // a good quote is kept even where the USD prices lag it (8 Nov: WETH's snapshot price 2% stale)
+        let usdc_ = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+        let weth = "0x4200000000000000000000000000000000000006";
+        let r = json!({"token_in": weth, "token_out": usdc_, "in": "13000000000000000", "out": 30_650_000.0});
+        let moves: Map<String, Value> = serde_json::from_value(json!({usdc_: 3_045_600_000.0, weth: -1.2925e18})).unwrap();
+        let stale = |t: &str, raw: f64| Some(if t == weth { raw / 1e18 * 2_409.6 } else { raw / 1e6 });
+        let c = ref_cost(&r, &moves, &stale).unwrap();
+        assert!(c > 0.0 && c < 5.0, "{c}");
     }
 
     #[test]

@@ -110,7 +110,10 @@
     $("posTop").innerHTML = `<div class="card"><div class="row" style="align-items:center;margin-bottom:10px"><h2 style="margin:0">Positions</h2><span class="sp"></span>${skl("132px", "28px")}</div><div class="scroll"><table><tbody>${skRows(8, 4)}</tbody></table></div></div>`;
   }
 
-  // the overview's fee cards: live positions only, so any period's answer serves (the newest wins)
+  // the overview's fee cards: the fees of every position in each window, closed ones included (a
+  // ladder replaces its ranges every hour or so, so the open ones hold only the last few hours' fees).
+  // An answer lists the positions closed within its own period, so each window is summed from the
+  // widest period read so far, and one wider than that shows "–" until a wide enough answer is in.
   function kpiSkeleton() {
     const box = $("ovFees");
     if (!box) return;
@@ -120,14 +123,17 @@
   function kpis(d) {
     const box = $("ovFees");
     if (!box || !d) return;
-    const live = (d.chains || []).flatMap(c => c.positions || []).filter(p => !p.closed);
-    const sum = k => live.reduce((s, p) => s + (p[k] || 0), 0);
-    const value = sum("usd"), inR = live.filter(p => p.in_range);
-    const f24 = sum("fees_24h"), f7 = sum("fees_7d"), f30 = sum("fees_30d");
+    const span = Math.max(0, ...Object.keys(P.cache).map(Number).filter(n => P.cache[n]));
+    if (span && P.cache[span]) d = P.cache[span];
+    const all = (d.chains || []).flatMap(c => c.positions || []);
+    const live = all.filter(p => !p.closed);
+    const sum = (ps, k) => ps.reduce((s, p) => s + (p[k] || 0), 0);
+    const value = sum(live, "usd"), inR = live.filter(p => p.in_range);
+    const f24 = span >= 1 ? sum(all, "fees_24h") : null, f7 = span >= 7 ? sum(all, "fees_7d") : null, f30 = span >= 30 ? sum(all, "fees_30d") : null;
     box.innerHTML = `
-        <div class="card kpi main"><div class="l">Fee APR · last 24 h</div><div class="v">${pct(value ? f24 / value * 365 * 100 : null)}</div>
+        <div class="card kpi main"><div class="l">Fee APR · last 24 h</div><div class="v">${pct(value && f24 != null ? f24 / value * 365 * 100 : null)}</div>
           <div class="s">on ${usd(value, 0)} in ${live.length} live position${live.length === 1 ? "" : "s"} · LP share of fees (80%)</div></div>
-        <div class="card kpi"><div class="l">Fee APR · last 7 days</div><div class="v">${pct(value ? f7 / value * 365 / 7 * 100 : null)}</div><div class="s">at today's position values</div></div>
+        <div class="card kpi"><div class="l">Fee APR · last 7 days</div><div class="v">${pct(value && f7 != null ? f7 / value * 365 / 7 * 100 : null)}</div><div class="s">at today's position values</div></div>
         <div class="card kpi"><div class="l">Fees earned</div><div class="v">${usd(f24, 2)}</div>
           <div class="s"><span class=it>last 24 h</span><span class=it>7 d ${usd(f7, 2)}</span><span class=it>30 d ${usd(f30, 2)}</span></div></div>
         <div class="card kpi"><div class="l">In range</div><div class="v">${inR.length} / ${live.length}</div>
