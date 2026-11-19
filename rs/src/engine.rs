@@ -1820,7 +1820,11 @@ impl Executor {
             }
             Ok(b as f64 / 10f64.powi(prices::meta(s.cid, t)?.decimals as i32) * prices::usd(s.cid, t)?)
         };
-        let toks = idle_tokens(&self.t0, &self.t1, others, &usdc);
+        // reward tokens are sold only when the settings sell them (the reward seller's rule): with
+        // "keep" (or SOLID going into the SOLID pool) they stay in the pool's book
+        let sells = self.settings["sell_rewards"]["enabled"].as_bool().unwrap_or(false) && !self.settings["solid_lp"]["enabled"].as_bool().unwrap_or(false);
+        let kept = if sells { vec![] } else { self.reward_tokens() };
+        let toks = idle_tokens(&self.t0, &self.t1, others, &usdc, &kept);
         let have_usdc = val(self, &usdc)?;
         let mut idle = 0.0;
         for t in &toks {
@@ -2502,13 +2506,19 @@ impl Executor {
         Ok(())
     }
 
+    /// The chain's SOLID and the reward tokens in the settings (lower case).
+    fn reward_tokens(&self) -> Vec<String> {
+        std::iter::once(crate::chains::get(self.cid).solid.to_lowercase())
+            .chain(self.settings["sell_rewards"]["tokens"].as_array().into_iter().flatten().filter_map(|t| t.as_str().map(|s| s.to_lowercase())))
+            .filter(|t| !t.is_empty())
+            .collect()
+    }
+
     fn fund(&mut self, budget0: f64, ranges: &[(i64, i64, f64)]) -> Res<()> {
         let mut fts: Vec<String> = crate::settings::funding_tokens(&self.settings, self.cid);
         // and any other token the pool was given (an Add of chosen tokens): the book follows it, so the
         // reserve names it. Reward tokens are the reward seller's
-        let rewards: Vec<String> = std::iter::once(crate::chains::get(self.cid).solid.to_lowercase())
-            .chain(self.settings["sell_rewards"]["tokens"].as_array().into_iter().flatten().filter_map(|t| t.as_str().map(|s| s.to_lowercase())))
-            .collect();
+        let rewards = self.reward_tokens();
         for t in self.reserve.as_ref().map(|r| r.keys().cloned().collect::<Vec<_>>()).unwrap_or_default() {
             if !fts.contains(&t) && !rewards.contains(&t) {
                 fts.push(t);
@@ -2620,10 +2630,12 @@ impl Executor {
 
 /// The tokens a withdrawal counts as idle: the pair's and the pool's others, each once (`others` is the
 /// pool's book, which holds the pair's two as well: counted twice, a withdrawal burned too little),
-/// without the asset it is sold to.
-fn idle_tokens(t0: &str, t1: &str, others: &[String], usdc: &str) -> Vec<String> {
+/// without the asset it is sold to, and without the `kept` tokens among the others (reward tokens the
+/// settings keep; the pair's own two are always the pool's to sell).
+fn idle_tokens(t0: &str, t1: &str, others: &[String], usdc: &str, kept: &[String]) -> Vec<String> {
     let mut seen = HashSet::new();
-    [t0.to_string(), t1.to_string()].into_iter().chain(others.iter().map(|t| t.to_lowercase()))
+    let others = others.iter().map(|t| t.to_lowercase()).filter(|t| !kept.iter().any(|k| k.eq_ignore_ascii_case(t)));
+    [t0.to_lowercase(), t1.to_lowercase()].into_iter().chain(others)
         .filter(|t| t != usdc && seen.insert(t.clone()))
         .collect()
 }
@@ -2784,8 +2796,20 @@ mod idle_tests {
     #[test]
     fn a_withdrawal_counts_each_idle_token_once() {
         let others = vec!["0xA0".to_string(), "0xb1".to_string(), "0xc2".to_string()];
-        assert_eq!(super::idle_tokens("0xa0", "0xb1", &others, "0xc2"), vec!["0xa0", "0xb1"]);
-        assert_eq!(super::idle_tokens("0xa0", "0xb1", &["0xd3".to_string()], "0xc2"), vec!["0xa0", "0xb1", "0xd3"]);
+        assert_eq!(super::idle_tokens("0xa0", "0xb1", &others, "0xc2", &[]), vec!["0xa0", "0xb1"]);
+        assert_eq!(super::idle_tokens("0xa0", "0xb1", &["0xd3".to_string()], "0xc2", &[]), vec!["0xa0", "0xb1", "0xd3"]);
+    }
+
+    #[test]
+    fn a_withdrawal_keeps_the_reward_tokens_the_settings_keep() {
+        // 18 Nov: SOLID in the USDC/USDT pool's book was sold for USDC although the settings keep it
+        let others = vec!["0xa0".to_string(), "0xb1".to_string(), "0xS0".to_string(), "0xd3".to_string()];
+        let kept = vec!["0xs0".to_string()];
+        assert_eq!(super::idle_tokens("0xa0", "0xb1", &others, "0xc2", &kept), vec!["0xa0", "0xb1", "0xd3"]);
+        // sold when the settings sell it
+        assert_eq!(super::idle_tokens("0xa0", "0xb1", &others, "0xc2", &[]), vec!["0xa0", "0xb1", "0xs0", "0xd3"]);
+        // a pair's own token is the pool's to sell even when it is a reward token (the SOLID pool)
+        assert_eq!(super::idle_tokens("0xs0", "0xb1", &others, "0xc2", &kept), vec!["0xs0", "0xb1", "0xa0", "0xd3"]);
     }
 }
 

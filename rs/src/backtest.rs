@@ -1535,6 +1535,9 @@ pub fn job(id: u64) -> Option<Value> {
 /// {chain_id, pool, days (1–730), until (optional: the period ends then, unix seconds, else now), capital, strategy: {type: "custom", ...rules} | {type: "ladder", ...},
 ///  costs: {swap_bps, gas_usd, fee_haircut, emission_haircut}, compare: true}
 pub fn start(req: Value, wallet: String) -> Result<u64, String> {
+    if req["strategy"]["type"] == "perp_portfolio" {
+        return start_portfolio(req);
+    }
     let cid = req["chain_id"].as_u64().ok_or("chain_id is required")?;
     crate::history::blockchain_name(cid).ok_or("chain not supported")?;
     let pool = req["pool"].as_str().unwrap_or("").to_lowercase();
@@ -1553,6 +1556,36 @@ pub fn start(req: Value, wallet: String) -> Result<u64, String> {
     set_job(id, json!({"id": id, "state": "running", "step": "loading history", "chain_id": cid}));
     std::thread::spawn(move || {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute(id, cid, &pool, days, &req, &wallet)));
+        let v = match r {
+            Ok(Ok(v)) => json!({"id": id, "state": "done", "result": v}),
+            Ok(Err(e)) => json!({"id": id, "state": "error", "error": e}),
+            Err(_) => json!({"id": id, "state": "error", "error": "the backtest crashed"}),
+        };
+        set_job(id, v);
+        RUNNING.fetch_sub(1, Ordering::SeqCst);
+    });
+    Ok(id)
+}
+
+/// A perp portfolio backtest: no pool, the coins' own market history ({strategy, days (1–2600), until, capital_usd}).
+fn start_portfolio(req: Value) -> Result<u64, String> {
+    let strategy = req["strategy"].as_object().cloned().ok_or("strategy")?;
+    crate::portfolio::parse(&strategy)?;
+    let days = req["days"].as_i64().unwrap_or(365);
+    if !(30..=2600).contains(&days) {
+        return Err("days must be 30 to 2600 for a perp portfolio".into());
+    }
+    if RUNNING.load(Ordering::SeqCst) >= MAX_JOBS {
+        return Err(format!("{MAX_JOBS} backtests are already running; try again when one finishes"));
+    }
+    RUNNING.fetch_add(1, Ordering::SeqCst);
+    let id = NEXT.fetch_add(1, Ordering::SeqCst) as u64;
+    set_job(id, json!({"id": id, "state": "running", "step": "loading market history"}));
+    std::thread::spawn(move || {
+        let now = crate::engine::now() as i64;
+        let to = req["until"].as_i64().filter(|u| *u > 0 && *u < now).unwrap_or(now);
+        let capital = req["capital_usd"].as_f64().or(req["capital"].as_f64()).unwrap_or(10_000.0);
+        let r = std::panic::catch_unwind(|| crate::portfolio::backtest(&strategy, to - days * 86400, to, capital));
         let v = match r {
             Ok(Ok(v)) => json!({"id": id, "state": "done", "result": v}),
             Ok(Err(e)) => json!({"id": id, "state": "error", "error": e}),

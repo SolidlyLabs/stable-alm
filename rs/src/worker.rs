@@ -676,6 +676,9 @@ impl Worker {
         self.set("ledger", crate::ledger::summary(&wallet, &ledger_chains));
         tr.stage("ledger");
 
+        // a perp portfolio's daily plan (dry run), in the background when due
+        crate::perps::maybe_run();
+
         let mut snap = account_value(&by_chain, &wallet, &s);
         snap["mode"] = json!(mode);
         extra_value(&by_chain, &wallet, &mut snap);

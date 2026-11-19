@@ -438,6 +438,7 @@ pub fn validate_pool(p: &Value) -> Result<(), String> {
             crate::graph::Graph::parse(st.as_object().ok_or(format!("{name}: strategy must be an object"))?, spacing)
                 .map_err(|e| format!("{name}: {e}"))?;
         }
+        "perp_portfolio" => return Err(format!("{name}: a perp portfolio trades perps on its own, not in a pool: run it from Perps")),
         t => return Err(format!("{name}: unknown strategy type {t}")),
     }
     Ok(())

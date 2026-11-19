@@ -119,6 +119,13 @@ pub const KINDS: &[Spec] = &[
     ("vol_price", &[], &["tick", "token"], &[]),
     // what a short of the hedged token earns on Hyperliquid, % a year (backtests only)
     ("funding", &[], &["apr"], &[]),
+    // the trend perps forecast of a coin (portfolio.rs, Binance perp history): `forecast` the
+    // normalised trend (median |x| = 1 over the trailing `norm_days`, ± `clip`; + up), `size` =
+    // per_unit × forecast within ± max (a position for the hedge block's size input, + long), `stale`
+    // true while there is no forecast; `tilts` 1 adds the coin's flow tilts, `daily` 1 holds the
+    // value from the `trade_hour` (UTC) close for a day
+    ("trend_forecast", &[], &["forecast", "size", "stale"], &[("per_unit", 0.25, 0.0, 2.0), ("max", 0.5, 0.0, 2.0), ("clip", 4.0, 0.5, 10.0),
+        ("tilts", 1.0, 0.0, 1.0), ("daily", 1.0, 0.0, 1.0), ("trade_hour", 1.0, 0.0, 23.0), ("norm_days", 365.0, 60.0, 1500.0)]),
     ("add", &["a", "b"], &["out"], &[]),
     ("sub", &["a", "b"], &["out"], &[]),
     ("mul", &["a", "b"], &["out"], &[]),
@@ -199,6 +206,8 @@ pub struct Node {
     pub tf_s: i64,
     /// token_price: the token (and its chain, when not the pool's)
     pub token: Option<(Option<u64>, String)>,
+    /// trend_forecast: the perp's coin (BTC, ETH, ...)
+    pub coin: Option<String>,
 }
 
 /// Timeframes a node may run on, in minutes.
@@ -297,7 +306,19 @@ impl Graph {
             } else {
                 None
             };
-            nodes.push(Node { id, kind: sp.0, p, inputs, label, tf_s: tf * 60, token });
+            let coin = if sp.0 == "trend_forecast" {
+                let c = n["coin"].as_str().unwrap_or("").trim().to_uppercase();
+                if !(2..=12).contains(&c.len()) || !c.chars().all(|x| x.is_ascii_alphanumeric()) {
+                    return Err(format!("node {id}: name the perp's coin (BTC, ETH, ...)"));
+                }
+                if tf != 5 {
+                    return Err(format!("node {id}: the trend forecast keeps its own hourly cadence (no timeframe)"));
+                }
+                Some(c)
+            } else {
+                None
+            };
+            nodes.push(Node { id, kind: sp.0, p, inputs, label, tf_s: tf * 60, token, coin });
         }
         // order: inputs first; a cycle is refused
         let mut order = vec![];
@@ -577,7 +598,27 @@ pub fn load_externals(g: &Graph, cid: u64, m: &Market) -> (Externals, Vec<String
             Err(e) => errs.push(format!("node {}: {e}", g.nodes[i].id)),
         }
     }
+    for (i, n) in g.nodes.iter().enumerate().filter(|(_, n)| n.kind == "trend_forecast") {
+        let coin = n.coin.clone().unwrap_or_default();
+        match crate::portfolio::node_series(&coin, &trend_cfg(g, i), &m.bar_end) {
+            Ok(v) => {
+                out.insert(i, crate::external::Series { hi: v.clone(), lo: v.clone(), at: vec![0; v.len()], close: v });
+            }
+            Err(e) => errs.push(format!("node {}: {coin} trend forecast: {e}", n.id)),
+        }
+    }
     (out, errs)
+}
+
+/// A trend_forecast block's settings in portfolio.rs's terms.
+pub fn trend_cfg(g: &Graph, i: usize) -> crate::portfolio::NodeCfg {
+    crate::portfolio::NodeCfg {
+        tilts: g.param(i, "tilts") > 0.5,
+        clip: g.param(i, "clip"),
+        daily: g.param(i, "daily") > 0.5,
+        trade_hour: g.param(i, "trade_hour").round() as i64,
+        norm_days: g.param(i, "norm_days").round() as usize,
+    }
 }
 
 /// The bars a node sees: the replay's own, longer candles, or 1-minute candles.
@@ -884,6 +925,20 @@ pub fn evaluate_ext(g: &Graph, m: &Market, ext: &Externals) -> Eval {
             "funding" => match ext.get(&i) {
                 Some(x) if fr.fine.is_none() && x.close.len() == nb => put("apr", fr.sample(x.close.clone())),
                 _ => put("apr", vec![f64::NAN; n]),
+            },
+            "trend_forecast" => match ext.get(&i) {
+                Some(x) if fr.fine.is_none() && x.close.len() == nb => {
+                    let f = fr.sample(x.close.clone());
+                    let (k, mx) = (par("per_unit"), par("max"));
+                    put("stale", f.iter().map(|v| b(!v.is_finite())).collect());
+                    put("size", f.iter().map(|v| if v.is_finite() { (k * v).clamp(-mx, mx) } else { f64::NAN }).collect());
+                    put("forecast", f);
+                }
+                _ => {
+                    put("stale", vec![1.0; n]);
+                    put("size", vec![f64::NAN; n]);
+                    put("forecast", vec![f64::NAN; n]);
+                }
             },
             "token_price" => match ext.get(&i) {
                 // 1-minute candles: loaded on the minutes already
@@ -1811,9 +1866,43 @@ mod tests {
     }
 
     #[test]
+    fn trend_forecast_needs_a_coin_and_sizes_within_its_max() {
+        let nodes = |coin: Value| json!({"type": "graph", "nodes": [
+            {"id": "p", "kind": "price"}, {"id": "w", "kind": "const", "p": {"value": 10}},
+            {"id": "ar", "kind": "around", "in": {"center": ["p", "tick"], "width": ["w", "value"]}},
+            {"id": "r", "kind": "range", "in": {"lower": ["ar", "lower"], "upper": ["ar", "upper"]}},
+            {"id": "tf", "kind": "trend_forecast", "coin": coin, "p": {"per_unit": 0.25, "max": 0.5}},
+            {"id": "h", "kind": "hedge", "p": {"ratio": 1}, "in": {"size": ["tf", "size"]}}]});
+        assert!(graph(nodes(json!(""))).unwrap_err().contains("coin"));
+        assert!(graph(nodes(json!("eth/x"))).is_err());
+        let g = graph(nodes(json!("eth"))).unwrap();
+        let i = g.nodes.iter().position(|n| n.kind == "trend_forecast").unwrap();
+        assert_eq!(g.nodes[i].coin.as_deref(), Some("ETH"));
+        let m = market(&vec![0; 40]);
+        let nb = m.bar_tick.len();
+        // forecasts: none yet, +1, +3 (size capped at 0.5), -1
+        let f: Vec<f64> = (0..nb).map(|j| match j * 4 / nb { 0 => f64::NAN, 1 => 1.0, 2 => 3.0, _ => -1.0 }).collect();
+        let mut ext = Externals::new();
+        ext.insert(i, crate::external::Series { hi: f.clone(), lo: f.clone(), at: vec![0; nb], close: f.clone() });
+        let ev = evaluate_ext(&g, &m, &ext);
+        let size = &ev.series[&(i, "size".to_string())];
+        let stale = &ev.series[&(i, "stale".to_string())];
+        let last = nb - 1;
+        assert!(size[0].is_nan() && stale[0] == 1.0);
+        assert_eq!(size[nb * 3 / 8], 0.25);
+        assert_eq!(size[nb * 5 / 8], 0.5);
+        assert_eq!(size[last], -0.25);
+        assert_eq!(stale[last], 0.0);
+        // no series at all (no data): stale, and the hedge falls back to its own size
+        let ev = evaluate(&g, &m);
+        assert_eq!(ev.series[&(i, "stale".to_string())][last], 1.0);
+        assert_eq!(hedge_ratio(&g, &ev, last, 0, None), Some((1.0, 0.0)));
+    }
+
+    #[test]
     fn every_new_kind_parses_and_long_chains_are_refused() {
         for (kind, ins, _, _) in KINDS.iter() {
-            if ["range", "ladder", "rebalance", "exit", "hold", "hedge", "token_price", "funding"].contains(kind) {
+            if ["range", "ladder", "rebalance", "exit", "hold", "hedge", "token_price", "funding", "trend_forecast"].contains(kind) {
                 continue;
             }
             let mut inputs = serde_json::Map::new();

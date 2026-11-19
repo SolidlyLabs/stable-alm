@@ -511,6 +511,7 @@ fn get(path: &str, w: &Arc<Worker>) -> (u16, Value) {
             (200, json!({"pools": rows}))
         }
         "/api/strategies" => (200, crate::library::get()),
+        "/api/perps" => (200, crate::perps::status()),
         "/api/parking/names" => {
             // the whitelist's tokens and pools by name, from the cached token metadata, so the list
             // reads before the market list has loaded
@@ -811,6 +812,7 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
             Ok(json!({"ok": true, "id": crate::backtest::start(body, wallet)?}))
         }
         "/api/strategies" => crate::library::post(&body),
+        "/api/perps" => crate::perps::post(&body),
         "/api/ui_prefs" => set_ui_prefs(&body),
         "/api/pools/add" => {
             let cid = body["chain_id"].as_u64().unwrap_or(crate::chains::BASE);

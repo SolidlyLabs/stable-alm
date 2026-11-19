@@ -237,6 +237,7 @@
   .eq svg{width:100%;height:150px;display:block}
   .moves{max-height:260px;overflow:auto;font-size:12px}
   .moves div{display:grid;grid-template-columns:130px 70px 1fr;gap:10px;padding:5px 0;border-bottom:1px solid var(--line)}
+  .moves.perp div{display:block;border-bottom:0;padding:0}
   .lab-legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;color:var(--mute);margin-top:8px}
   .lab-legend span{display:inline-flex;align-items:center;gap:6px}.lab-legend i{width:14px;height:3px;border-radius:2px;display:inline-block}
   .lab-note{font-size:12px;color:var(--mute);margin:8px 0 0}
@@ -334,6 +335,7 @@
     hold: ["Hold when", "out", "While true, nothing is done at all: a freeze, like the depeg guard."],
     latch: ["Latch", "cond", "True from the first bar where 'set' is true until a bar where 'reset' is true (when both are, it stays true). Use it for hysteresis: switch on at one level and off at another, so a signal near its threshold does not flip every bar."],
     vol_price: ["Volatile token price", "src", "The pool's volatile token (the one that is not the numeraire) priced in the numeraire, in ticks (1 tick = 0.01%). It rises when that token rises, whichever way round the pool is, so a trend signal on it means the same on every pool: below its average, the token a hedge shorts is falling. Not drawn on the chart (on some pools it is the pool's price upside down). 'token' is +1 when the volatile token is token0 and -1 when it is token1: into an Exit's 'to', the exit waits in the volatile token (through a scale of -1, in the other one)."],
+    trend_forecast: ["Trend forecast", "src", "The Trend perps rule's view of a coin, from its Binance perp history (hourly, the same in backtests and live): four EMA crossovers (1–2 days against 20–40 days), capped, times volume over volatility, scaled so its typical size is 1, with the coin's flow tilts. 'forecast' is + in an uptrend, − in a downtrend (about ±1 typical, clipped at ±'clip'). 'size' is per unit × forecast within ± max: into the Hedge block's 'size' it holds that share of the strategy in the perp of its own (+ long), so a fully hedged pool leans with the trend. 'daily' 1 decides once a day at the trade hour's close (the tested way), 0 every hour. 'stale' is true while there is no forecast (a new coin needs about 60 days). On ETH it called direction better than a 24-hour EMA latch in every period tested since 2020; on fast small coins (AERO) the faster signals did better."],
     funding: ["Funding", "src", "What a short of the pool's volatile token earns in funding on Hyperliquid, in % a year (negative: the short pays). Hourly, from Hyperliquid's history; for a pair of two volatile tokens, the token's funding less the numeraire's. Backtests only. Use it to hedge only while the short is paid, for example into Hedge 'when' through a > block."],
     hedge: ["Hedge", "out", "A perp short on Hyperliquid against the pool's volatile token (backtests only for now). It holds 'ratio' of what the pool holds of the token, traded back when it drifts 'band' % from that and by at least 'min $'. Its margin, at 'leverage', comes out of the pool's capital. 'when' (optional) hedges only while true; 'ratio' (optional) sets the ratio bar by bar. Results add the short's price P&L, the funding it earned or paid, and its fees."],
   };
@@ -615,7 +617,8 @@
     if (L.apr && L.apr.key === key && (L.apr.done || L.apr.job)) return renderLib();
     L.apr = {key, rows: {}, job: null, done: false, err: "", step: "starting"};
     renderLib();
-    const items = allItems().filter(x => !x.draft).map(x => ({id: x.id, strategy: body(x.strategy)}));
+    // perp portfolios have no pool: they are backtested on their own (open one to see it)
+    const items = allItems().filter(x => !x.draft && x.strategy.type !== "perp_portfolio").map(x => ({id: x.id, strategy: body(x.strategy)}));
     let id;
     while (true) {
       try { id = (await api("/api/backtest", {chain_id: L.chain, pool: L.pool, days: L.days, capital_usd: L.capital, costs: L.costs, strategy: ladderGraph({}, sp(), L.pegged), batch: items})).id; break; }
@@ -643,7 +646,7 @@
   const aprTxt = a => a == null ? "" : (a >= 0 ? "+" : "−") + fmt(Math.abs(a), Math.abs(a) < 10 ? 2 : 1) + "%";
   // Hyperliquid's mark (from its app), in its mint on a dark pill: strategies and blocks that short there
   const HL = `<span class="hlb" title="hedges on Hyperliquid"><svg viewBox="0 0 21 16" aria-label="Hyperliquid" role="img"><path fill="#97FCE4" d="M20.4523 7.53888C20.471 9.21764 20.1196 10.8218 19.4292 12.3544C18.4434 14.5368 16.0799 16.3213 13.9218 14.4218C12.1616 12.8736 11.8351 9.73059 9.19798 9.27049C5.7088 8.84769 5.62483 12.8923 3.34536 13.3492C0.804661 13.8653 -0.0380915 9.59381 -0.000774032 7.65391C0.0365434 5.71401 0.552769 2.98759 2.76072 2.98759C5.30142 2.98759 5.47245 6.83318 8.69731 6.62489C11.8911 6.40728 11.947 2.40624 14.0337 0.693288C15.8343 -0.786505 17.952 0.298469 19.0125 2.07982C19.9952 3.72749 20.4274 5.66116 20.4492 7.53888H20.4523Z"/></svg></span>`;
-  const hedges = st => !!st && st.type === "graph" && (st.nodes || []).some(n => n.kind === "hedge");
+  const hedges = st => !!st && (st.type === "perp_portfolio" || st.type === "graph" && (st.nodes || []).some(n => n.kind === "hedge"));
   function renderLib() {
     const box = $("sbList");
     if (!box || $("labSb").classList.contains("hide")) return;
@@ -688,7 +691,8 @@
       await loadLib(); renderEd(); toast("Deleted.");
     } catch (e) { toast(e.message, true); }
   }
-  const typeLabel = s => s.type === "custom" ? "simple rules" : "node strategy";
+  const typeLabel = s => s.type === "custom" ? "simple rules" : s.type === "perp_portfolio" ? "perp portfolio" : "node strategy";
+  const isPerp = () => !!(L.cur && L.cur.strategy && L.cur.strategy.type === "perp_portfolio");
   // the ladder is a block of a node strategy: an old plain ladder (the app default, a saved one) opens
   // as one ladder block with this pool's defaults, as the app migrates it (ladder.rs)
   function ladderGraph(s, spacing, pegged) {
@@ -724,7 +728,9 @@
   }
   function newStrategy(kind) {
     if (L.dirty && !confirm("Discard the changes to the strategy you are editing?")) return;
-    if (kind === "ladder_nodes") setCur({id: null, name: "My ladder", description: "", strategy: {type: "graph", nodes: [
+    if (kind === "perp") setCur({id: null, name: "My perp portfolio", description: "Trend-following perps on Hyperliquid, scaled to a target volatility.",
+      strategy: JSON.parse(JSON.stringify((L.lib.templates || {}).perp_portfolio || {type: "perp_portfolio", sleeves: [{coin: "BTC", weight: 1, signal: {}}]}))});
+    else if (kind === "ladder_nodes") setCur({id: null, name: "My ladder", description: "", strategy: {type: "graph", nodes: [
       {id: "lad", kind: "ladder", unit: "spacings", x: 500, y: 60, p: {hours: 24, span: 3, every_hours: 6, turnover: 0.4}, in: {}}]}});
     else newGraph();
     L.dirty = true;
@@ -775,7 +781,14 @@
   // ---------- editor ----------
   function renderEd() {
     const box = $("labEd");
-    if (!L.cur) { box.innerHTML = `<div class="empty">Choose a pool and a strategy.</div>`; return; }
+    if (!L.cur) {
+      // a perp portfolio needs no pool: it can be opened straight from the library
+      box.innerHTML = `<div class="empty">Choose a pool and a strategy, or open a perp portfolio (it needs no pool).<br><br>
+        <button class="sec sm" id="labOpen0">📂 Select strategy</button> <button class="sec sm" id="labPerp0">＋ New perp portfolio</button></div>`;
+      $("labOpen0").onclick = openBrowser;
+      $("labPerp0").onclick = () => newStrategy("perp");
+      return;
+    }
     const s = L.cur.strategy, mine = L.cur.id && L.cur.id.startsWith("u:");
     box.innerHTML = `<div class="ed-head" data-help="lab-save"><div class="ed-tools"><button class="sec sm" id="labOpen" title="browse every strategy with its APR (Ctrl+O)">📂 Select strategy</button>
         <button class="sec sm" id="labNewBtn" title="start a new strategy">＋ Create new strategy</button></div>
@@ -793,12 +806,13 @@
     $("labOpen").onclick = openBrowser;
     $("labNewBtn").onclick = e => {
       const r = e.currentTarget.getBoundingClientRect();
-      openMenu(r.left, r.bottom + 6, `<div class="ttl">New strategy</div>${item("graph", "Node strategy", "<kbd>blocks</kbd>")}${item("ladder_nodes", "Ladder", "<kbd>ladder block</kbd>")}`,
+      openMenu(r.left, r.bottom + 6, `<div class="ttl">New strategy</div>${item("graph", "Node strategy", "<kbd>blocks</kbd>")}${item("ladder_nodes", "Ladder", "<kbd>ladder block</kbd>")}${item("perp", "Perp portfolio", "<kbd>trend</kbd>")}`,
         m => { m.onclick = ev => { const a = ev.target.closest("[data-act]"); if (a) { closeMenu(); newStrategy(a.dataset.act); } }; });
     };
     if ($("labDel")) $("labDel").onclick = del;
     const body = $("labEdBody");
     if (s.type === "custom") renderRules(body);
+    else if (s.type === "perp_portfolio") renderPerp(body);
     else renderGraph(body);
   }
 
@@ -947,6 +961,7 @@
       if (el.dataset.unit && e.type === "change") { n.unit = el.value; changed(); }
       if (el.dataset.tf && e.type === "change") { const v = +el.value; if (v === 5) delete n.tf; else n.tf = v; changed(); }
       if (el.dataset.label) { n.label = el.value; changed(); }
+      if (el.dataset.coin && e.type === "change") { n.coin = el.value.trim().toUpperCase(); changed(); }
     };
     drawNodes();
     if (overlapping()) { tidy(); drawNodes(); }
@@ -988,13 +1003,14 @@
       el.style.left = (n.x || 0) + "px"; el.style.top = (n.y || 0) + "px";
       const ticks = c.params.some(p => p.ticks);
       // every block but position conditions and outputs may run on longer candles
-      const tfOk = !c.stateful && !["range", "ladder", "rebalance", "exit", "hold", "hedge"].includes(n.kind);
+      const tfOk = !c.stateful && !["range", "ladder", "rebalance", "exit", "hold", "hedge", "trend_forecast"].includes(n.kind);
       const tfSel = tfOk ? `<span data-help="lab-tf">candles</span><select data-tf="1" data-help="lab-tf">${TFS.map(([v, l]) => `<option value="${v}" ${(n.tf || 5) === v ? "selected" : ""}>${l}</option>`).join("")}</select>` : "";
+      const coinIn = n.kind === "trend_forecast" ? `<span>coin</span><input data-coin="1" value="${esc(n.coin || "")}" style="width:70px" title="the perp's coin (BTC, ETH, AERO...): Binance USDT perp history">` : "";
       const tok = n.kind === "token_price" ? `<span>token</span><button class="sec sm" data-tokpick="${esc(n.id)}" data-help="lab-token" title="pick the token to watch">${esc(n.tsym || (n.token ? n.token.slice(0, 8) + "…" : "pick…"))}</button>` : "";
       el.innerHTML = `<div class="hd" title="${esc(errs[n.id] || K[n.kind][2])}"><i style="background:${gcol(n.kind)}"></i><b>${esc(n.label || K[n.kind][0])}</b>${n.kind === "hedge" ? HL : ""}<span class="x" data-del="${esc(n.id)}" title="remove">×</span></div>
         <div class="bd">${c.inputs.map(p => `<div class="pr ${c.optional.includes(p) ? "opt" : ""}"><span>${p}${c.optional.includes(p) ? " (optional)" : ""}</span><span class="dot in" data-in="${p}" style="background:${n.in && n.in[p] ? "var(--fg2)" : "var(--line2)"}"></span></div>`).join("")}
         ${c.outputs.map(p => `<div class="pr" style="justify-content:flex-end"><span>${p}</span><span class="dot out" data-out="${p}" style="background:${BOOL.has(n.kind) || ["stale", "hot"].includes(p) ? "var(--warn)" : c.price ? "var(--acc)" : "var(--info)"}"></span></div>`).join("")}
-        ${c.params.length || ticks || tfSel || tok ? `<div class="pm">${tok}${c.params.map(p => `<span>${PNAME[p.name] || p.name}</span><input type="number" step="any" data-p="${p.name}" value="${(n.p || {})[p.name] ?? p.default}" min="${p.min}" max="${p.max}">`).join("")}
+        ${c.params.length || ticks || tfSel || tok || coinIn ? `<div class="pm">${tok}${coinIn}${c.params.map(p => `<span>${PNAME[p.name] || p.name}</span><input type="number" step="any" data-p="${p.name}" value="${(n.p || {})[p.name] ?? p.default}" min="${p.min}" max="${p.max}">`).join("")}
           ${ticks ? `<span>unit</span><select data-unit="1">${["ticks", "spacings", "percent"].map(u => `<option ${(n.unit || "ticks") === u ? "selected" : ""}>${u}</option>`).join("")}</select>` : ""}${tfSel}</div>` : ""}</div>`;
       area.appendChild(el);
       W = Math.max(W, (n.x || 0) + 260); H = Math.max(H, (n.y || 0) + 260);
@@ -1938,11 +1954,19 @@
     document.addEventListener("pointerup", up);
     document.addEventListener("pointercancel", cancel);
   }
+  // the perp that follows the pool's volatile token (wrapped and staked forms: their base coin)
+  function poolCoin() {
+    const base = t => { const u = String(t || "").toUpperCase(); return /^(WETH|ETH|CBETH|WSTETH|WEETH|RETH|EZETH|SUPEROETHB)$/.test(u) ? "ETH" : /^(CBBTC|WBTC|TBTC|BTC|LBTC)$/.test(u) ? "BTC" : /^(WS|STS|OS)$/.test(u) ? "S" : u; };
+    const stable = t => /^(USDC|USDT|USDC\.E|USDBC|DAI|USDS|USDE|FRAX|LUSD|GHO|EURC)$/i.test(t || "");
+    const v = (L.sym || []).find(t => !stable(t));
+    return v ? base(v).replace(/[^A-Z0-9]/g, "").slice(0, 12) || "ETH" : "BTC";
+  }
   function addNode(kind, x, y) {
     const s = L.cur.strategy, c = kcat(kind);
     if (["range", "ladder", "rebalance", "exit", "hold", "hedge"].includes(kind) && s.nodes.some(n => n.kind === kind)) return toast(`There is already a ${K[kind][0]} block.`, true);
     const n = {id: freeId(kind), kind, x: Math.round(x / 6) * 6, y: Math.round(y / 6) * 6, p: {}, in: {}};
     for (const p of c.params) n.p[p.name] = p.default;
+    if (kind === "trend_forecast") n.coin = poolCoin();
     s.nodes.push(n);
     L.sel = n.id;
     changed(); drawNodes();
@@ -2023,6 +2047,7 @@
     $("labOv").innerHTML = ov && ov.lines.length ? ov.lines.map((l, i) => `<button data-ov="${esc(l.name)}" class="${ovOn(l) && frameOf(l) !== "mixed" ? "on" : ""}" ${FRAME_TIP[frameOf(l)] ? `title="${esc(FRAME_TIP[frameOf(l)])}"` : ""} ${frameOf(l) === "mixed" ? "disabled" : ""}><i style="background:${OVC[i % OVC.length]}"></i>${esc(l.name)}${frameOf(l) === "usd" ? " ($)" : ""}</button>`).join("") : "";
   }
   function chartRange() {
+    if (isPerp()) { $("labSvg").innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="yl">a perp portfolio has no pool: its equity is below</text>`; $("labNow").textContent = ""; $("labLegend").innerHTML = ""; return; }
     const g = geom(), svg = $("labSvg");
     if (!g) { svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="yl">${L.pool ? (L.job ? "loading the pool's history…" : "no price yet") : "choose a pool"}</text>`; $("labNow").textContent = ""; $("labLegend").innerHTML = ""; return; }
     const {W, H, pts, r, c, tl, tu, blo, bhi, X, Y, Ys, left, right, top, bot, rules, Y2} = g;
@@ -2163,16 +2188,131 @@
       };
     });
   }
+  // ---------- perp portfolio (no pool): several coins' perps sized daily by a trend rule ----------
+  L.pdays = L.pdays || 1000;
+  function renderPerp(box) {
+    const s = L.cur.strategy, sl = s.sleeves || [];
+    const dirty = () => { L.dirty = true; $("labDirty").textContent = "unsaved changes"; schedule(); };
+    const tiltTxt = g => (g.tilts || []).flat().map(t => `${t.kind.replace("_", " ")} ${t.beta >= 0 ? "+" : ""}${t.beta}`).join(", ") || "none";
+    const speeds = g => (g.speeds || [[24, 480], [24, 960], [48, 480], [48, 960]]).map(p => p.join("/")).join(" ");
+    const wsum = sl.reduce((a, x) => a + (+x.weight || 0), 0);
+    box.innerHTML = `<p class="mute small" style="margin:0 0 10px">Long or short perps on several coins, rebalanced once a day at ${String(s.trade_hour_utc ?? 1).padStart(2, "0")}:00 UTC.
+        Each coin's position is a capped trend forecast × volume ÷ volatility, tilted by the signals listed; the portfolio is scaled to a target volatility.
+        It needs no pool: it trades perps on Hyperliquid. Backtests use Binance perp prices, volume and funding, Coinbase and Bybit data (downloaded once and kept).</p>
+      <table class="tbl" style="width:100%;font-size:12.5px"><thead><tr><th>coin</th><th title="share of risk">weight</th><th>trend speeds (h)</th><th>tilts</th><th></th></tr></thead><tbody>
+      ${sl.map((x, i) => `<tr><td><input data-pc="${i}" value="${esc(x.coin)}" style="width:64px"></td><td><input data-pw="${i}" type="number" step="0.01" min="0" max="1" value="${x.weight}" style="width:70px"></td>
+        <td class="mono small">${speeds(x.signal || {})}</td><td class="small">${esc(tiltTxt(x.signal || {}))}</td>
+        <td><button class="sec sm" data-pdel="${i}" title="remove">×</button></td></tr>`).join("")}</tbody></table>
+      <div style="margin:8px 0 12px"><button class="sec sm" id="perpAdd">＋ coin</button> <span class="${Math.abs(wsum - 1) > 0.001 ? "warn" : "mute"} small">weights add up to ${fmt(wsum, 3)}</span></div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:8px">
+        ${[["target_vol", "target volatility", 0.01], ["overlay_days", "vol window (days)", 1], ["lev_cap", "overlay cap (×)", 0.1], ["sleeve_vol", "per-coin vol", 0.01], ["trade_hour_utc", "trade hour (UTC)", 1]]
+          .map(([k, l, st]) => `<label class="small">${l}<br><input data-pk="${k}" type="number" step="${st}" value="${s[k] ?? ""}" style="width:110px"></label>`).join("")}
+        <label class="small">taker fee (bp)<br><input id="perpFee" type="number" step="0.5" value="${(s.costs || {}).taker_bps ?? 4.5}" style="width:110px"></label>
+        <label class="small">backtest days<br><select id="perpDays">${[365, 730, 1000, 1500, 2000, 2400].map(d => `<option ${d === L.pdays ? "selected" : ""}>${d}</option>`).join("")}</select></label>
+      </div>
+      <details style="margin-top:12px"><summary class="small">Settings as JSON (speeds, caps, tilts, calibration span)</summary>
+        <textarea id="perpJson" spellcheck="false" style="width:100%;height:220px;font:12px monospace">${esc(JSON.stringify(s, null, 1))}</textarea>
+        <button class="sec sm" id="perpApply">Apply JSON</button></details>`;
+    box.querySelectorAll("[data-pc]").forEach(e => e.onchange = () => { sl[+e.dataset.pc].coin = e.value.trim().toUpperCase(); dirty(); renderEd(); });
+    box.querySelectorAll("[data-pw]").forEach(e => e.onchange = () => { sl[+e.dataset.pw].weight = +e.value; dirty(); renderEd(); });
+    box.querySelectorAll("[data-pdel]").forEach(e => e.onclick = () => { sl.splice(+e.dataset.pdel, 1); dirty(); renderEd(); });
+    box.querySelectorAll("[data-pk]").forEach(e => e.onchange = () => { s[e.dataset.pk] = +e.value; dirty(); });
+    $("perpFee").onchange = e => { s.costs = Object.assign(s.costs || {}, {taker_bps: +e.target.value}); dirty(); };
+    $("perpDays").onchange = e => { L.pdays = +e.target.value; schedule(0); };
+    $("perpAdd").onclick = () => { sl.push({coin: "ETH", weight: 0.1, signal: JSON.parse(JSON.stringify((sl[1] || sl[0] || {signal: {}}).signal))}); dirty(); renderEd(); };
+    $("perpApply").onclick = () => {
+      try { const v = JSON.parse($("perpJson").value); if (v.type !== "perp_portfolio") throw new Error("the type must stay perp_portfolio"); L.cur.strategy = v; dirty(); renderEd(); }
+      catch (e) { toast("JSON: " + e.message, true); }
+    };
+  }
+  // the live side (dry run): which saved perp portfolio runs, on which Hyperliquid account, and its plan
+  async function renderPerpLive() {
+    const box = $("labMoves");
+    box.style.display = "block"; box.classList.add("perp");
+    let st;
+    try { st = await api("/api/perps"); } catch (e) { box.innerHTML = `<span class="bad">${esc(e.message)}</span>`; return; }
+    if (!isPerp()) return;
+    const c = st.config || {}, p = st.plan, mine = L.cur.id && L.cur.id.startsWith("u:"), runsThis = c.strategy_id && c.strategy_id === L.cur.id;
+    const chosen = c.strategy_id ? (itemById(c.strategy_id) || {name: c.strategy_id}).name : "none";
+    box.innerHTML = `<div class="small" style="line-height:1.7">
+        <b>Live, dry run</b> · ${esc(st.execution)}<br>
+        Runs: <b>${esc(chosen)}</b> · ${c.enabled ? `<span class="ok">on</span>` : `<span class="mute">off</span>`} · capital $${fmt(c.capital_usd || 0, 0)} · account ${c.account ? `<span class="mono">${esc(c.account.slice(0, 6) + "…" + c.account.slice(-4))}</span>` : "<span class=mute>not set</span>"}<br>
+        <span style="display:inline-flex;gap:6px;flex-wrap:wrap;margin-top:4px">
+          ${mine && !runsThis ? `<button class="sec sm" id="pvUse">Run this one</button>` : ""}${!mine ? `<span class="mute">Save the strategy to run it.</span>` : ""}
+          ${c.strategy_id ? `<button class="sec sm" id="pvOn">${c.enabled ? "Turn off" : "Turn on"}</button><button class="sec sm" id="pvPlan">Plan now</button>` : ""}
+          <input id="pvAcct" placeholder="Hyperliquid address 0x…" value="${esc(c.account || "")}" style="width:210px"><input id="pvCap" type="number" step="100" value="${c.capital_usd || 10000}" style="width:90px" title="capital (USD): the most of the account's value the plan uses"><button class="sec sm" id="pvSave">Save</button>
+        </span></div>
+      ${p ? `<div class="small" style="margin-top:8px">Plan ${new Date(p.ts * 1000).toLocaleString()} for ${esc(p.strategy)} · equity $${fmt(p.equity_usd, 0)} (${esc(p.equity_from)}) · gross ${fmt(p.gross_leverage, 2)}× · <span class="warn">${esc(p.note)}</span></div>
+        <table class="tbl" style="width:100%;font-size:12px;margin-top:4px"><thead><tr><th>coin</th><th>target</th><th>position</th><th>order</th></tr></thead><tbody>
+        ${p.coins.map(x => { const o = p.orders.find(o => o.coin === x.coin); return `<tr><td>${esc(x.coin)}</td><td>${fmt(x.target_leverage, 2)}× (${fmt(x.target_size, 4)})</td><td>${fmt(x.position, 4)}</td>
+          <td>${o ? `<span class="${o.side === "buy" ? "pos" : "neg"}">${o.side} ${fmt(o.size, 4)}</span> <span class="mute">$${fmt(o.usd, 0)}</span>` : `<span class="mute">none</span>`}</td></tr>`; }).join("")}</tbody></table>` : `<div class="mute small" style="margin-top:6px">No plan yet.</div>`}`;
+    const post = async (b, btn) => { if (btn) btn.disabled = true; try { await api("/api/perps", b); } catch (e) { toast(e.message, true); } renderPerpLive(); };
+    if ($("pvUse")) $("pvUse").onclick = e => post({action: "config", strategy_id: L.cur.id}, e.currentTarget);
+    if ($("pvOn")) $("pvOn").onclick = e => post({action: "config", enabled: !c.enabled}, e.currentTarget);
+    if ($("pvPlan")) $("pvPlan").onclick = e => { e.currentTarget.textContent = "planning…"; post({action: "plan"}, e.currentTarget); };
+    $("pvSave").onclick = e => post({action: "config", account: $("pvAcct").value.trim(), capital_usd: +$("pvCap").value}, e.currentTarget);
+  }
+  async function runPerp() {
+    if (L.job) { L.pending = true; status(); return; }
+    L.err = ""; L.step = "loading market history";
+    let id;
+    try { id = (await api("/api/backtest", {days: L.pdays, capital_usd: L.capital, strategy: body(L.cur.strategy)})).id; }
+    catch (e) { if (/already running/.test(e.message)) { setTimeout(runPerp, 1500); return; } L.err = e.message; status(); return; }
+    L.job = id; status(); renderResults();
+    const cur = L.cur;
+    while (true) {
+      await new Promise(r => setTimeout(r, 800));
+      let j;
+      try { j = await api("/api/backtest/" + id); } catch (e) { L.err = e.message; break; }
+      if (j.state === "running") { L.step = j.step; status(); continue; }
+      if (j.state === "error") { L.err = j.error; break; }
+      if (L.cur === cur) L.pres = j.result;
+      break;
+    }
+    L.job = null; status(); renderResults();
+    if (L.pending) { L.pending = false; runPerp(); }
+  }
+  function renderPerpResults() {
+    const r = L.pres;
+    renderPerpLive();
+    if (!r) {
+      $("labCmp").innerHTML = L.job ? skelCard(L.cur.name, "backtesting…", RUNCOL[0], true) : `<div class="empty">Waiting for the first backtest.</div>`;
+      $("labEq").innerHTML = ""; $("labMeta").textContent = ""; $("labNotes").textContent = ""; return;
+    }
+    const m = r.runs.main, st = m.stats || {};
+    const pc = x => x == null ? "–" : `<span class="${x >= 0 ? "pos" : "neg"}">${x >= 0 ? "+" : "−"}${fmt(Math.abs(x) * 100, 1)}%</span>`;
+    const usd = x => `<span class="${x >= 0 ? "pos" : "neg"}">${x >= 0 ? "+" : "−"}$${fmt(Math.abs(x), 0)}</span>`;
+    const cal = r.calibration || {};
+    $("labCmp").innerHTML = `<div class="rc2 main"><div class="t"><i style="background:${RUNCOL[0]}"></i><span class="n">${esc(L.cur.name)}<br><span class="sub">perp portfolio · ${r.sleeves.length} coins</span></span>
+        <span><div class="big">${usd(m.pnl)}</div><div class="apr">${pc(st.cagr)} a year</div></span></div>
+      <div class="g"><div>return<b>${pc(st.return)}</b></div><div>Sharpe<b>${fmt(st.sharpe, 2)}</b></div><div>volatility<b>${fmt((st.vol || 0) * 100, 1)}%</b></div>
+        <div>max drawdown<b class="neg">${fmt((st.max_drawdown || 0) * 100, 1)}%</b></div><div>end value<b>$${fmt(m.value, 0)}</b></div>
+        <div title="the span the settings are calibrated on: ${new Date(cal.from * 1000).toLocaleDateString()} – ${new Date(cal.to * 1000).toLocaleDateString()}">calibration Sharpe<b>${fmt((cal.stats || {}).sharpe, 2)}</b></div></div></div>
+      <table class="tbl" style="width:100%;font-size:11.5px;margin-top:6px;table-layout:fixed"><thead><tr><th>coin</th><th title="share of risk">wt</th><th title="the coin's own sleeve over the period">return</th><th>Sharpe</th><th title="max drawdown">DD</th><th title="the position the rule wants at the next rebalance, as a multiple of equity">now</th></tr></thead><tbody>
+      ${r.sleeves.map((x, i) => { const t = (r.targets || [])[i] || {}, xs = x.stats || {}; return `<tr><td>${esc(x.coin)}</td><td>${fmt(x.weight * 100, 0)}%</td><td>${pc(xs.return)}</td><td>${fmt(xs.sharpe, 2)}</td><td>${fmt((xs.max_drawdown || 0) * 100, 0)}%</td>
+        <td class="${t.leverage >= 0 ? "pos" : "neg"}" title="${t.leverage >= 0 ? "long" : "short"}">${t.leverage == null ? "–" : (t.leverage >= 0 ? "+" : "−") + fmt(Math.abs(t.leverage), 2) + "×"}</td></tr>`; }).join("")}</tbody></table>`;
+    $("labMeta").innerHTML = `${new Date(r.from * 1000).toLocaleDateString()} – ${new Date(r.to * 1000).toLocaleDateString()} · capital $${fmt(r.capital, 0)} · gross target now ${fmt((r.targets || []).reduce((a, t) => a + Math.abs(t.leverage || 0), 0), 2)}×`;
+    $("labNotes").textContent = (r.notes || []).join(" ") + " Each coin's row is its own sleeve at its calibrated risk, before the portfolio's volatility scaling.";
+    const ser = m.series, svg = $("labEq");
+    if (!ser || ser.length < 2) { svg.innerHTML = ""; return; }
+    const vs = ser.map(p => p[1]), lo = Math.min(...vs, r.capital), hi = Math.max(...vs, r.capital), W = 800, H = 150;
+    const X = i => i / (ser.length - 1) * W, Y = v => H - 6 - (v - lo) / (hi - lo || 1) * (H - 12);
+    svg.innerHTML = `<line x1="0" x2="${W}" y1="${Y(r.capital)}" y2="${Y(r.capital)}" stroke="var(--mute)" stroke-dasharray="3 3" stroke-width="1"/>
+      <polyline fill="none" stroke="${RUNCOL[0]}" stroke-width="1.6" vector-effect="non-scaling-stroke" points="${ser.map((p, i) => `${X(i).toFixed(1)},${Y(p[1]).toFixed(1)}`).join(" ")}"/>`;
+    const ax = $("labEqAxis");
+    if (ax) ax.textContent = `$${fmt(lo, 0)} – $${fmt(hi, 0)} · ${new Date(ser[0][0] * 1000).toLocaleDateString()} – ${new Date(ser[ser.length - 1][0] * 1000).toLocaleDateString()}`;
+  }
   // ---------- running ----------
   let timer = null;
   function schedule(ms = 450) {
-    if (!L.pool || !L.cur) return;
+    if (!L.cur || (!L.pool && !isPerp())) return;
     clearTimeout(timer);
     timer = setTimeout(run, ms);
   }
   function status() {
     const el = $("labStatus");
     if (!el) return;
+    if (isPerp()) { el.innerHTML = L.job ? `<span class="spin"></span>${esc(L.step || "running")}…` : L.err ? `<span class=bad>${esc(L.err)}</span>` : L.pres ? `Backtested ${L.pres.span_days} days of ${L.cur.strategy.sleeves.length} perps` : ""; return; }
     el.innerHTML = L.job || L.filling ? `<span class="spin"></span>${esc(L.step || "running")}…${L.pending ? " (another run queued)" : ""}`
       : L.err ? `<span class=bad>${esc(L.err)}</span>` : L.res ? `Backtested ${L.res.swaps.toLocaleString()} swaps in ${fmt(L.res.elapsed_ms / 1000, 1)} s` +
         (L.res.history_requests ? ` · downloaded ${L.res.history_requests} history page${L.res.history_requests === 1 ? "" : "s"}` : " · history from the local store") : "";
@@ -2183,6 +2323,7 @@
     return r;
   }
   async function run() {
+    if (isPerp()) return runPerp();
     if (L.job) { L.pending = true; status(); return; }
     if (L.cur.strategy.type === "graph") {
       const errs = Object.entries(graphErrors());
@@ -2414,6 +2555,8 @@
       ${main ? `<div class="of" id="labOf">${overfitHtml()}</div>` : ""}</div>`;
   }
   function renderResults() {
+    if (isPerp()) return renderPerpResults();
+    $("labMoves").style.display = ""; $("labMoves").classList.remove("perp");
     const res = L.res, cfg = cfgOf();
     if (!res) {
       $("labCmp").innerHTML = !L.pool ? `<div class="empty">Choose a pool.</div>` : !L.cur ? `<div class="empty">Waiting for the first backtest.</div>`
@@ -2539,12 +2682,14 @@
       if (saved && saved.pool) { L.chain = saved.chain; L.pool = saved.pool; }
       renderTop(); renderLib(); renderEd(); chartRange(); renderResults();
       if (tab === "lab" && L.pool) select(L.chain, L.pool);
+      else if (tab === "lab" && isPerp()) schedule(0);
       return;
     }
     if (tab === "lab") {
       if (!$("labPool").classList.contains("open")) renderTop();
       if (L.cur && L.cur.strategy.type === "graph" && !L.cur.view && $("neCv")) fit();
       if (L.pool && !L.res && !L.job && !L.err) select(L.chain, L.pool);
+      else if (!L.pool && isPerp() && !L.pres && !L.job && !L.err) schedule(0);
       if (!MARKET) loadMarket();
     }
   }, 1000);

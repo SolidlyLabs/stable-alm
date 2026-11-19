@@ -177,6 +177,7 @@ fn check(s: &Value) -> Result<Option<String>, String> {
             Ok(crate::graph::Graph::parse(o, 1).err())
         }
         "ladder" => Ok(None),
+        "perp_portfolio" => crate::portfolio::parse(o).map(|_| None),
         t => Err(format!("unknown strategy type {t:?}")),
     }
 }
@@ -239,7 +240,7 @@ pub fn post(body: &Value) -> Result<Value, String> {
 }
 
 pub fn get() -> Value {
-    json!({"builtin": builtin(), "mine": saved(), "catalog": crate::graph::catalog()})
+    json!({"builtin": builtin(), "mine": saved(), "catalog": crate::graph::catalog(), "templates": {"perp_portfolio": crate::portfolio::trend_perps_v3()}})
 }
 
 #[cfg(test)]
