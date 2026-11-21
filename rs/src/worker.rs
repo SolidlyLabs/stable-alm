@@ -311,6 +311,7 @@ impl Worker {
             if !execute {
                 let moved = capital::move_in_book(book, cid, &cfg.pool, usd, to.as_deref());
                 report.push(format!("  withdrawal (dry run): ${} of idle tokens moved to {dest} as they are (live, positions would be burned and sold to USDC as needed)", engine::commas(moved)));
+                engine::log(json!({"chain_id": cid, "pool": cfg.pool.to_lowercase(), "kind": "capital", "what": "release", "usd": moved, "asked_usd": usd, "to": to, "dry": true}));
                 capital::remove(&id);
                 capital::save(execute, book);
                 continue;
@@ -641,11 +642,17 @@ impl Worker {
                     let mut book = capital::load(execute);
                     // (a live wallet's requests wait for a cycle that can sign: they are the live book's)
                     for r in capital::releases(*cid, &cfg.pool).into_iter().filter(|_| execute || !Self::live_intended(&s)) {
-                        capital::move_in_book(&mut book, *cid, &cfg.pool, r["usd"].as_f64().unwrap_or(0.0), r["to"].as_str());
+                        let moved = capital::move_in_book(&mut book, *cid, &cfg.pool, r["usd"].as_f64().unwrap_or(0.0), r["to"].as_str());
+                        engine::log(json!({"chain_id": cid, "pool": cfg.pool.to_lowercase(), "kind": "capital", "what": "release", "usd": moved, "to": r["to"], "reason": "pool off"}));
                         capital::remove(r["id"].as_str().unwrap_or(""));
                     }
-                    if !book.pool(*cid, &cfg.pool).is_empty() {
+                    let left = book.pool(*cid, &cfg.pool);
+                    if !left.is_empty() {
                         crate::info!("capital", "[{}] is off: its idle tokens are Unallocated now", cfg.name);
+                        let usd = capital::value(*cid, &left);
+                        if usd > 0.005 {
+                            engine::log(json!({"chain_id": cid, "pool": cfg.pool.to_lowercase(), "kind": "capital", "what": "release", "usd": usd, "reason": "pool off"}));
+                        }
                         book.set_pool(*cid, &cfg.pool, capital::Tokens::new());
                     }
                     capital::save(execute, &book);
@@ -685,16 +692,30 @@ impl Worker {
         self.publish_capital(&by_chain, &wallet, &snap, execute);
         // each pool's capital (address → USD), for per-pool performance (agent::perf)
         let mut pc = Map::new();
+        // and what it is made of, with its two tokens' USD prices (per-pool performance: the hold
+        // benchmark while a pool holds no positions, what it parked)
+        let mut ps = Map::new();
         if let Some(chs) = self.with_status(|st| st["capital"].as_object().cloned()) {
-            for ch in chs.values() {
+            for (k, ch) in &chs {
+                let cid = k.parse::<u64>().unwrap_or(chains::BASE);
                 for p in ch["pools"].as_object().into_iter().flat_map(|m| m.values()) {
                     if let (Some(a), Some(u)) = (p["pool"].as_str(), p["capital_usd"].as_f64()) {
-                        pc.insert(a.to_lowercase(), json!(u));
+                        let a = a.to_lowercase();
+                        pc.insert(a.clone(), json!(u));
+                        let px = |t: &str| -> Option<f64> {
+                            let d = crate::prices::meta(cid, t).ok()?.decimals as i32;
+                            Some(capital::px_raw(cid, t).ok()? * 10f64.powi(d))
+                        };
+                        let (px0, px1) = crate::chain::pool_tokens(cid, &a).map(|(t0, t1)| (px(&t0), px(&t1))).unwrap_or((None, None));
+                        let r = |k: &str| p[k].as_f64().map(|x| (x * 100.0).round() / 100.0);
+                        ps.insert(a, json!({"capital_usd": r("capital_usd"), "positions_usd": r("positions_usd"), "idle_usd": r("idle_usd"),
+                                            "lots_usd": r("lots_usd"), "hosted_usd": r("hosted_usd"), "owed_usd": r("owed_usd"), "px0": px0, "px1": px1}));
                     }
                 }
             }
         }
         snap["pool_capital"] = Value::Object(pc);
+        snap["pool_stats"] = Value::Object(ps);
         let line = {
             let mut o = Map::new();
             o.insert("ts".into(), json!(engine::now()));

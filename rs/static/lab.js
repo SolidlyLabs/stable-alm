@@ -392,7 +392,11 @@
     b.onclick = () => show("lab");
     poolPickerEvents();
     $("labGo").onclick = () => { const a = $("labAddr").value.trim().toLowerCase(); if (!/^0x[0-9a-f]{40}$/.test(a)) return toast("Not a pool address", true); L.other = false; $("labOther").classList.add("hide"); select(+$("labChain").value, a); };
-    $("labDays").onclick = e => { const d = e.target.closest("button"); if (!d) return; L.days = +d.dataset.d; remember(); renderTop(); schedule(0); };
+    $("labDays").onclick = e => {
+      const d = e.target.closest("button"); if (!d) return;
+      // the period is every strategy's, a perp portfolio's too (its backtest days list only adds spans past 2y)
+      L.days = +d.dataset.d; L.pdays = null; remember(); renderTop(); if (isPerp()) renderEd(); schedule(0);
+    };
     $("labCap").oninput = e => { const v = parseFloat(e.target.value); if (v > 0) { L.capital = v; schedule(); } };
     const sb = document.createElement("div");
     sb.className = "sbx hide"; sb.id = "labSb";
@@ -480,7 +484,12 @@
     const open = box.classList.contains("open");
     if (!open) box.innerHTML = `<button class="pp-btn" type="button" aria-haspopup="listbox">${btn}<span class="car" ${o && o.mine && o.deployed != null ? 'style="margin-left:6px"' : ""}>▾</span></button>`;
     if (!$("labChain").matches(":focus")) $("labChain").innerHTML = chains().map(c => `<option value="${c.id}" ${c.id === (L.chain || 8453) ? "selected" : ""}>${esc(c.name)}</option>`).join("");
-    document.querySelectorAll("#labDays button").forEach(b => b.classList.toggle("on", +b.dataset.d === L.days));
+    const perp = !!(L.cur && L.cur.strategy && L.cur.strategy.type === "perp_portfolio");
+    document.querySelectorAll("#labDays button").forEach(b => {
+      // a span past 2y picked in a perp portfolio's backtest days list: no button is on
+      b.classList.toggle("on", +b.dataset.d === L.days && !(perp && L.pdays));
+      b.title = perp && +b.dataset.d < 30 ? "a perp portfolio backtests 30 days at the least" : +b.dataset.d === 730 ? "two years, or all the pool's history when it is younger" : "";
+    });
     if (document.activeElement !== $("labCap")) $("labCap").value = L.capital;
     $("labNum").textContent = "USD";
   }
@@ -2189,7 +2198,10 @@
     });
   }
   // ---------- perp portfolio (no pool): several coins' perps sized daily by a trend rule ----------
-  L.pdays = L.pdays || 1000;
+  // a perp portfolio backtests the Period above (30 days at the least), or a longer span picked in its
+  // backtest days list (L.pdays, past two years)
+  L.pdays = null;
+  const perpDays = () => L.pdays || Math.max(30, L.days || 365);
   function renderPerp(box) {
     const s = L.cur.strategy, sl = s.sleeves || [];
     const dirty = () => { L.dirty = true; $("labDirty").textContent = "unsaved changes"; schedule(); };
@@ -2208,7 +2220,7 @@
         ${[["target_vol", "target volatility", 0.01], ["overlay_days", "vol window (days)", 1], ["lev_cap", "overlay cap (×)", 0.1], ["sleeve_vol", "per-coin vol", 0.01], ["trade_hour_utc", "trade hour (UTC)", 1]]
           .map(([k, l, st]) => `<label class="small">${l}<br><input data-pk="${k}" type="number" step="${st}" value="${s[k] ?? ""}" style="width:110px"></label>`).join("")}
         <label class="small">taker fee (bp)<br><input id="perpFee" type="number" step="0.5" value="${(s.costs || {}).taker_bps ?? 4.5}" style="width:110px"></label>
-        <label class="small">backtest days<br><select id="perpDays">${[365, 730, 1000, 1500, 2000, 2400].map(d => `<option ${d === L.pdays ? "selected" : ""}>${d}</option>`).join("")}</select></label>
+        <label class="small" title="the Period above; spans longer than two years are picked here">backtest days<br><select id="perpDays">${[...new Set([30, 60, 90, 180, 365, 730, 1000, 1500, 2000, 2400, perpDays()])].sort((a, b) => a - b).map(d => `<option ${d === perpDays() ? "selected" : ""}>${d}</option>`).join("")}</select></label>
       </div>
       <details style="margin-top:12px"><summary class="small">Settings as JSON (speeds, caps, tilts, calibration span)</summary>
         <textarea id="perpJson" spellcheck="false" style="width:100%;height:220px;font:12px monospace">${esc(JSON.stringify(s, null, 1))}</textarea>
@@ -2218,7 +2230,11 @@
     box.querySelectorAll("[data-pdel]").forEach(e => e.onclick = () => { sl.splice(+e.dataset.pdel, 1); dirty(); renderEd(); });
     box.querySelectorAll("[data-pk]").forEach(e => e.onchange = () => { s[e.dataset.pk] = +e.value; dirty(); });
     $("perpFee").onchange = e => { s.costs = Object.assign(s.costs || {}, {taker_bps: +e.target.value}); dirty(); };
-    $("perpDays").onchange = e => { L.pdays = +e.target.value; schedule(0); };
+    $("perpDays").onchange = e => {
+      const v = +e.target.value;
+      if (v > 730) L.pdays = v; else { L.days = v; L.pdays = null; remember(); }
+      renderTop(); schedule(0);
+    };
     $("perpAdd").onclick = () => { sl.push({coin: "ETH", weight: 0.1, signal: JSON.parse(JSON.stringify((sl[1] || sl[0] || {signal: {}}).signal))}); dirty(); renderEd(); };
     $("perpApply").onclick = () => {
       try { const v = JSON.parse($("perpJson").value); if (v.type !== "perp_portfolio") throw new Error("the type must stay perp_portfolio"); L.cur.strategy = v; dirty(); renderEd(); }
@@ -2256,7 +2272,7 @@
     if (L.job) { L.pending = true; status(); return; }
     L.err = ""; L.step = "loading market history";
     let id;
-    try { id = (await api("/api/backtest", {days: L.pdays, capital_usd: L.capital, strategy: body(L.cur.strategy)})).id; }
+    try { id = (await api("/api/backtest", {days: perpDays(), capital_usd: L.capital, strategy: body(L.cur.strategy)})).id; }
     catch (e) { if (/already running/.test(e.message)) { setTimeout(runPerp, 1500); return; } L.err = e.message; status(); return; }
     L.job = id; status(); renderResults();
     const cur = L.cur;
@@ -2284,7 +2300,7 @@
     const usd = x => `<span class="${x >= 0 ? "pos" : "neg"}">${x >= 0 ? "+" : "−"}$${fmt(Math.abs(x), 0)}</span>`;
     const cal = r.calibration || {};
     $("labCmp").innerHTML = `<div class="rc2 main"><div class="t"><i style="background:${RUNCOL[0]}"></i><span class="n">${esc(L.cur.name)}<br><span class="sub">perp portfolio · ${r.sleeves.length} coins</span></span>
-        <span><div class="big">${usd(m.pnl)}</div><div class="apr">${pc(st.cagr)} a year</div></span></div>
+        <span><div class="big">${usd(m.pnl)}</div><div class="apr" title="the profit as a share of the capital, over the whole backtest; then the same as a yearly rate (compounded)">${pc(st.return)} in ${fmt(r.span_days, 0)} days · ${pc(st.cagr)} a year</div></span></div>
       <div class="g"><div>return<b>${pc(st.return)}</b></div><div>Sharpe<b>${fmt(st.sharpe, 2)}</b></div><div>volatility<b>${fmt((st.vol || 0) * 100, 1)}%</b></div>
         <div>max drawdown<b class="neg">${fmt((st.max_drawdown || 0) * 100, 1)}%</b></div><div>end value<b>$${fmt(m.value, 0)}</b></div>
         <div title="the span the settings are calibrated on: ${new Date(cal.from * 1000).toLocaleDateString()} – ${new Date(cal.to * 1000).toLocaleDateString()}">calibration Sharpe<b>${fmt((cal.stats || {}).sharpe, 2)}</b></div></div></div>

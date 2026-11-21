@@ -2285,6 +2285,9 @@ impl Executor {
         // once any of the host's liquidity is withdrawn the claim counts as paid back (what came out is
         // this pool's in the book after the run): trying again would withdraw the host's share twice
         let mut burned = false;
+        // whether the withdrawn other token was swapped back into the claim's (its failure leaves it
+        // with this pool as the payment)
+        let mut swapped_back = true;
         let r = (|| -> Res<()> {
             if have >= amount {
                 return Ok(());
@@ -2327,6 +2330,7 @@ impl Executor {
                     if let Err(e) = pk.retry("claim swap", |s| s.swap(&a, &b, got, fair, mc, "unpark: swap back")) {
                         // the other token stays this pool's idle tokens: its own strategy places them
                         pk.say_warn(format!("    claim swap back failed: {e}; the withdrawn tokens stay this pool's as they are"));
+                        swapped_back = false;
                     }
                 }
             } else {
@@ -2340,6 +2344,7 @@ impl Executor {
             self.report.push(l);
         }
         self.broadcasts += pk.broadcasts;
+        let all_ok = r.is_ok();
         match r {
             Err(e) if !burned && !pk.sent_any() => {
                 // nothing was sent: still owed as it was
@@ -2401,11 +2406,42 @@ impl Executor {
                 *e = (*e - have).max(0);
             }
         }
-        let back = have + pk.bal(&token).map(|b| (b - before_tok).max(0)).unwrap_or(0);
-        log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "unpark", "live": true, "lot": lot, "back": back.to_string(), "from_idle": have.to_string()}));
+        let came = pk.bal(&token).map(|b| (b - before_tok).max(0)).unwrap_or(0);
+        // The host's positions are withdrawn 1% beyond what the claim needs (for the swap back's
+        // slippage). What came out beyond the claim, and what is left of the other token, stays the
+        // host's: reserved from this run (so this pool's tokens after it do not include it) and given
+        // to the host in the book when the claim is settled (capital::settle_repaid). Before, this
+        // pool kept it: about $45 of the host's money on each $4,400 claim. Only after a clean
+        // withdrawal and swap back: otherwise what came out is this pool's payment, as it was.
+        let mut to_host = crate::capital::Tokens::new();
+        // (only with a reserve to hold it out of this pool's tokens: without one it would be counted twice)
+        if all_ok && burned && swapped_back && self.reserve.is_some() {
+            let extra = came - (amount - have).max(0);
+            if extra > 0 {
+                to_host.insert(token.clone(), extra);
+            }
+            let left = pk.bal(&other).map(|b| (b - before_other).max(0)).unwrap_or(0);
+            if left > 0 {
+                to_host.insert(other.clone(), left);
+            }
+            if let Some(r) = self.reserve.as_mut() {
+                for (t, a) in &to_host {
+                    *r.entry(t.clone()).or_default() += a;
+                }
+            }
+            if !to_host.is_empty() {
+                self.say(format!("    what came out beyond the claim stays {name}'s ({})",
+                                 to_host.iter().map(|(t, a)| format!("{a} raw {}", &t[..10.min(t.len())])).collect::<Vec<_>>().join(", ")));
+            }
+        }
+        let back = have + came - to_host.get(&token).copied().unwrap_or(0);
+        let to_host_json: serde_json::Map<String, Value> = to_host.iter().map(|(t, a)| (t.clone(), json!(a.to_string()))).collect();
+        log(json!({"chain_id": self.cid, "pool": self.cfg.pool, "kind": "unpark", "live": true, "lot": lot, "back": back.to_string(), "from_idle": have.to_string(),
+                   "to_host": to_host_json.clone()}));
         let mut done = lot.clone();
         done["stage"] = json!("repaid");
         done["from_idle"] = json!(have.to_string());
+        done["to_host"] = Value::Object(to_host_json);
         crate::parking::update(true, done);
         Ok(back)
     }

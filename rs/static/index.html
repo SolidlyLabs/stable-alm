@@ -238,6 +238,11 @@ dialog.cap .btns{display:flex;justify-content:flex-end;gap:8px}
 /* chart */
 svg.chart{width:100%;height:210px;display:block}
 .chartwrap{position:relative;padding-left:62px;padding-bottom:20px}
+.pstats{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-top:12px}
+.pstats>div{background:var(--bg2,transparent);border:1px solid var(--line);border-radius:10px;padding:8px 10px;min-width:0}
+.pstats>div>div{color:var(--mute);font-size:12px}.pstats b{display:block;font:600 16px/1.3 var(--mono);margin:2px 0;overflow-wrap:anywhere}
+.pstats span{font-size:11px;color:var(--mute)}
+@media (max-width:900px){.pstats{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .chartwrap .yl{position:absolute;left:0;width:54px;text-align:right;font:11px var(--mono);color:var(--mute);transform:translateY(-50%)}
 .chartwrap .xl{position:absolute;bottom:0;font-size:11px;color:var(--mute);transform:translateX(-50%);white-space:nowrap}
 .chartwrap .cross{position:absolute;top:0;bottom:20px;width:1px;background:var(--mute);opacity:.5;pointer-events:none;display:none}
@@ -337,7 +342,7 @@ dialog.wdlg .opts input{width:auto;margin-top:3px}
     <button id="pauseBtn" class="sec" onclick="togglePause()" title="the kill switch: pauses every wallet">Pause all</button>
   </div>
   <nav id="tabs">
-    <button data-t="overview" class="on">Overview</button><button data-t="pools">Pools</button>
+    <button data-t="overview" class="on">Overview</button><button data-t="performance">Performance</button><button data-t="pools">Pools</button>
     <button data-t="activity">Activity</button><button data-t="settings">Settings</button><button data-t="experimental" id="expTab" class="hide">Experimental</button>
   </nav>
 </header>
@@ -387,6 +392,13 @@ dialog.wdlg .opts input{width:auto;margin-top:3px}
         <p class="mute small" id="claimInfo" style="margin-bottom:0"></p></div>
     </div>
     </div>
+  </section>
+
+  <!-- PERFORMANCE: each pool's profit with deposits and withdrawals kept apart (perf.js) -->
+  <section data-tab="performance" class="grid hide">
+    <div class="row" style="gap:12px;flex-wrap:wrap"><div class="seg" role="tablist" id="perfSeg"></div>
+      <span class="mute small" id="perfInfo"></span><span class="sp"></span><button class="sec" onclick="PERF.reset();PERF.load()">Refresh</button></div>
+    <div id="perfBody" class="grid"></div>
   </section>
 
   <!-- POOLS -->
@@ -647,6 +659,7 @@ function show(t) {
   if (t === "pools" && !MARKET) loadMarket();
   if (t === "settings" && !TOKENS) loadTokens();
   if (t === "experimental") loadExperimental();
+  if (t === "performance" && window.PERF) PERF.load();
   if (t === "pools" && POOLVIEW === "mine" && !isAll() && window.POSITIONS) POSITIONS.load();
   if (t === "activity" && isAll()) loadAllActivity();
   // the strategy library as the app has it now: strategies saved or edited outside this page show up
@@ -678,9 +691,11 @@ function setWallet(id) {
   try { localStorage.setItem("alm.wallet", id); } catch (e) {}
   dirtyPools = false; poolsEdit = null; TOKENS = null; fundEdit = {}; KEY_EDIT = null; OPEN.clear(); ALLACT = null;
   if (window.POSITIONS && POSITIONS.reset) POSITIONS.reset();
+  if (window.PERF) PERF.reset();
   renderSwitcher();
   refresh().then(() => { if (tab === "settings" && !isAll()) loadTokens(); if (tab === "activity" && isAll()) loadAllActivity();
-    if (tab === "pools" && POOLVIEW === "mine" && !isAll() && window.POSITIONS) POSITIONS.load(); });
+    if (tab === "pools" && POOLVIEW === "mine" && !isAll() && window.POSITIONS) POSITIONS.load();
+    if (tab === "performance" && window.PERF) PERF.load(); });
 }
 // a wallet's state on its switcher button: paused, live, dry run or watching (the kill switch pauses them all)
 function wState(w) {
@@ -722,6 +737,7 @@ function render() {
   renderUpdate();
   renderActivity();
   renderPoolView();
+  if (window.PERF) PERF.tick();
   const exp = !!(S.settings.experimental || {}).enabled;
   $("expTab").classList.toggle("hide", !exp);
   if (!exp && tab === "experimental") show("overview");
@@ -2572,6 +2588,7 @@ setTimeout(function pre() { if (MARKET) return; if (!S) return setTimeout(pre, 1
 </script>
 <script src="/lab.js"></script>
 <script src="/positions.js"></script>
+<script src="/perf.js"></script>
 <script src="/help.js"></script>
 <script src="/wizard.js"></script>
 </body>

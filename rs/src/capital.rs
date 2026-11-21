@@ -359,7 +359,9 @@ fn claim_of(x: &Value, cid: u64, origin: &str) -> bool {
     crate::parking::is_claim(x) && x["chain_id"].as_u64() == Some(cid) && x["origin"].as_str().map(|o| o.eq_ignore_ascii_case(origin)).unwrap_or(false)
 }
 
-/// What a host paid back from its idle tokens for a claim (`from_idle`, raw) leaves it in the book.
+/// What a host paid back from its idle tokens for a claim (`from_idle`, raw) leaves it in the book;
+/// what its positions gave beyond the claim (`to_host`: token → raw, kept out of the origin's tokens
+/// by its run's reserve) comes back to it.
 fn debit_host(book: &mut Book, cid: u64, lot: &Value) {
     let token = lot["token"].as_str().unwrap_or("").to_lowercase();
     let host = lot["pool"].as_str().unwrap_or("").to_lowercase();
@@ -367,6 +369,12 @@ fn debit_host(book: &mut Book, cid: u64, lot: &Value) {
     let mut h = book.pool(cid, &host);
     let have = h.get(&token).copied().unwrap_or(0);
     h.insert(token, have - paid.clamp(0, have.max(0)));
+    for (t, a) in lot["to_host"].as_object().into_iter().flatten() {
+        let a: i128 = a.as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
+        if a > 0 {
+            *h.entry(t.to_lowercase()).or_default() += a;
+        }
+    }
     book.set_pool(cid, &host, h);
 }
 
@@ -687,7 +695,12 @@ fn fill_from_allocations(book: &mut Book, cid: u64, pools: &[&PoolConfig], acct:
         first.extend(crate::chains::default_funding(cid));
         let free = unallocated(&book.held(cid), wallet);
         let got = take(&ordered_only(cid, &free, &first), need);
-        crate::info!("capital", "[{}] given {} (${}) from Unallocated, to reach its {}%", cfg.name, describe(cid, &got), crate::engine::commas(value(cid, &got.iter().cloned().collect())), cfg.allocation_pct);
+        let usd = value(cid, &got.iter().cloned().collect());
+        crate::info!("capital", "[{}] given {} (${}) from Unallocated, to reach its {}%", cfg.name, describe(cid, &got), crate::engine::commas(usd), cfg.allocation_pct);
+        // money into the pool: per-pool performance does not count it as profit (agent::perf)
+        if usd > 0.0 {
+            crate::engine::log(json!({"chain_id": cid, "pool": cfg.pool.to_lowercase(), "kind": "capital", "what": "allocate", "usd": usd, "tokens": describe(cid, &got)}));
+        }
         add_to(book, cid, &cfg.pool, &got);
     }
 }
@@ -740,8 +753,18 @@ pub fn prepare(book: &mut Book, cid: u64, pools: &[&PoolConfig], acct: &Value, w
     // a pool's book waiting for a transaction that may still be mined: the wallet does not show it
     // yet, so it is not clamped against now (that would take the shortfall from every pool)
     let waiting = book.dirty.keys().any(|d| d.starts_with(&format!("{cid}:")));
+    let was = book.chains.get(&cid).cloned().unwrap_or_default();
     if !waiting && clamp(book.chains.entry(cid).or_default(), wallet) {
         crate::warn!("capital", "chain {cid}: the wallet holds less of some tokens than the pools did (sent out?): every pool's share of them shrank in proportion");
+        // what each pool lost left the wallet: money out of it, not a loss of its strategy
+        for (pool, before) in &was {
+            let after = book.pool(cid, pool);
+            let gone: Tokens = before.iter().map(|(t, a)| (t.clone(), a - after.get(t).copied().unwrap_or(0))).filter(|(_, a)| *a > 0).collect();
+            let usd = value(cid, &gone);
+            if usd > 0.005 {
+                crate::engine::log(json!({"chain_id": cid, "pool": pool, "kind": "capital", "what": "shrink", "usd": usd, "tokens": describe(cid, &gone.into_iter().collect::<Vec<_>>())}));
+            }
+        }
     }
     if !book.initialized.contains(&cid) {
         fill_from_allocations(book, cid, pools, acct, wallet, live);
@@ -805,6 +828,14 @@ pub fn prepare(book: &mut Book, cid: u64, pools: &[&PoolConfig], acct: &Value, w
                 remove(&id);
             }
             "reset" => {
+                // each pool's idle tokens go back to Unallocated (logged as taken out), then the
+                // allocation % gives them again (logged as "allocate")
+                for (pool, toks) in book.chains.get(&cid).cloned().unwrap_or_default() {
+                    let usd = value(cid, &toks);
+                    if usd > 0.005 {
+                        crate::engine::log(json!({"chain_id": cid, "pool": pool, "kind": "capital", "what": "release", "usd": usd, "reason": "reset"}));
+                    }
+                }
                 if let Some(c) = book.chains.get_mut(&cid) {
                     c.clear();
                 }
@@ -846,6 +877,7 @@ pub fn releases(cid: u64, pool: &str) -> Vec<Value> {
 /// Reward tokens a claim brought in, given to the pools that earned them (the claim's per-pool
 /// amounts); what unmanaged positions earned stays Unallocated.
 pub fn credit_claim(book: &mut Book, cid: u64, pools: &[&PoolConfig], rewards: &Value, before: &Tokens, after: &Tokens) {
+    let mut credited: BTreeMap<String, f64> = BTreeMap::new();
     for (t, a) in after {
         let got = a - before.get(t).copied().unwrap_or(0);
         if got <= 0 {
@@ -859,7 +891,14 @@ pub fn credit_claim(book: &mut Book, cid: u64, pools: &[&PoolConfig], rewards: &
         for (p, n) in parts {
             if pools.iter().any(|c| c.pool.eq_ignore_ascii_case(&p)) {
                 add_to(book, cid, &p, &[(t.clone(), n)]);
+                *credited.entry(p.clone()).or_default() += px_raw(cid, t).map(|x| n as f64 * x).unwrap_or(0.0);
             }
+        }
+    }
+    // what each pool earned (income, not money put in: agent::perf shows it as fees claimed)
+    for (p, usd) in credited {
+        if usd > 0.0 {
+            crate::engine::log(json!({"chain_id": cid, "pool": p, "kind": "capital", "what": "fees", "usd": usd}));
         }
     }
 }
@@ -905,6 +944,18 @@ mod tests {
         assert_eq!(super::move_claim(&mut b, 8453, a, h, usdc, 500), 100);
         assert!(b.pool(8453, a).get(usdc).is_none());
         assert_eq!(b.pool(8453, h).get(usdc), Some(&300));
+    }
+
+    #[test]
+    fn what_the_host_withdrew_beyond_the_claim_comes_back_to_it() {
+        let mut b = Book::default();
+        let (h, usdc, usdt) = ("0xbbb", "0xusdc", "0xusdt");
+        b.set_pool(8453, h, [(usdc.to_string(), 100i128)].into_iter().collect());
+        // 60 paid from its idle; its positions gave 45 USDC and 3 USDT more than the claim needed
+        let lot = json!({"token": usdc, "pool": h, "from_idle": "60", "to_host": {usdc: "45", usdt: "3"}});
+        debit_host(&mut b, 8453, &lot);
+        assert_eq!(b.pool(8453, h).get(usdc), Some(&85));
+        assert_eq!(b.pool(8453, h).get(usdt), Some(&3));
     }
 
     #[test]

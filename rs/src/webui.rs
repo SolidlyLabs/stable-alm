@@ -15,6 +15,7 @@ const HELP: &str = include_str!("../static/help.js");
 const LAB: &str = include_str!("../static/lab.js");
 const POSITIONS: &str = include_str!("../static/positions.js");
 const WIZARD: &str = include_str!("../static/wizard.js");
+const PERF: &str = include_str!("../static/perf.js");
 const COOKIE: &str = "alm_t";
 
 pub fn ui_token() -> String {
@@ -242,6 +243,9 @@ fn handle(mut req: Request, w: &Arc<Worker>) {
         }
         if path == "/positions.js" {
             return send(req, 200, POSITIONS.as_bytes().to_vec(), "application/javascript; charset=utf-8");
+        }
+        if path == "/perf.js" {
+            return send(req, 200, PERF.as_bytes().to_vec(), "application/javascript; charset=utf-8");
         }
         if !path.starts_with("/api/") {
             return send_json(req, 404, json!({"error": "not found"}));
@@ -509,6 +513,20 @@ fn get(path: &str, w: &Arc<Worker>) -> (u16, Value) {
                 }
             }
             (200, json!({"pools": rows}))
+        }
+        // the Performance tab: /api/pool_stats/<days> (0: all recorded), each pool's profit with money
+        // put in and taken out kept apart, its series, flows, fees and costs (agent::perf)
+        p if p == "/api/pool_stats" || p.starts_with("/api/pool_stats/") => {
+            let days = p.strip_prefix("/api/pool_stats/").and_then(|d| d.parse::<i64>().ok()).unwrap_or(30).clamp(0, 400);
+            let led = w.status_of(&crate::paths::wallet())["ledger"].clone();
+            let mut costs: std::collections::HashMap<String, Vec<(i64, f64, f64)>> = Default::default();
+            for ch in led.as_object().into_iter().flat_map(|m| m.values()) {
+                for (pool, b) in ch["by_pool"].as_object().into_iter().flatten() {
+                    let v = costs.entry(pool.to_lowercase()).or_default();
+                    v.extend(b["daily"].as_array().into_iter().flatten().filter_map(|d| Some((d[0].as_i64()?, d[1].as_f64()?, d[2].as_f64()?))));
+                }
+            }
+            (200, crate::agent::perf::report(days, &costs))
         }
         "/api/strategies" => (200, crate::library::get()),
         "/api/perps" => (200, crate::perps::status()),
