@@ -220,7 +220,78 @@ pub fn meta(cid: u64, token: &str) -> Result<Meta, String> {
     Ok(m)
 }
 
+/// A pool token's price tied to its pair's: token → (the other token, how many of it one token is
+/// worth, when the pool said so). Each token's USD quote is cached on its own for 10 minutes, so in a
+/// fast move the two of a pair are read minutes apart (cbETH read 1.12 to 1.18 WETH while the pool
+/// stood at 1.144), and the pool's value and its hold benchmark jumped with that.
+static ANCHOR: Mutex<Option<HashMap<(u64, String), (String, f64, Instant)>>> = Mutex::new(None);
+/// how long a pool's rate stands in for a quote (a cycle reads it again each minute or so)
+const ANCHOR_S: u64 = 900;
+/// a pool rate this far from the two quotes' own is not used (a thin or stuck pool)
+const ANCHOR_MAX_GAP: f64 = 0.10;
+
+/// Which of two tokens prices the other: the chain's USD stable, then the wrapped gas token. None
+/// when neither is one of those (both are then quoted on their own).
+fn anchor_rank(cid: u64, t: &str) -> u8 {
+    let ch = crate::chains::get(cid);
+    if t == ch.usd {
+        0
+    } else if t == ch.wnative.to_lowercase() {
+        1
+    } else {
+        2
+    }
+}
+
+/// The token of a pair priced from the other, with how many of the other one of it is worth, given
+/// the pool's price `p0in1` (whole token1 per whole token0). None when neither token ranks above the
+/// other or the rate is not a number.
+pub fn pair_anchor(r0: u8, r1: u8, p0in1: f64) -> Option<(usize, f64)> {
+    if !(p0in1.is_finite() && p0in1 > 0.0) || r0 == r1 {
+        return None;
+    }
+    if r1 < r0 {
+        Some((0, p0in1))
+    } else {
+        Some((1, 1.0 / p0in1))
+    }
+}
+
+/// Ties the USD price of one of a pool's tokens to the other's through the pool's own price
+/// (`p0in1`: whole token1 per whole token0), so both are valued from the same moment. The token
+/// tied is the one that is not the USD stable (or, failing that, not the wrapped gas token).
+pub fn anchor_pool(cid: u64, t0: &str, t1: &str, p0in1: f64) {
+    let (t0, t1) = (t0.to_lowercase(), t1.to_lowercase());
+    let Some((i, rate)) = pair_anchor(anchor_rank(cid, &t0), anchor_rank(cid, &t1), p0in1) else { return };
+    let (tok, base) = if i == 0 { (t0, t1) } else { (t1, t0) };
+    // checked against the quotes: a pool far off the market is not trusted to price its token
+    if let (Ok(q), Ok(b)) = (quoted(cid, &tok), usd(cid, &base)) {
+        if b > 0.0 && ((rate * b) / q - 1.0).abs() > ANCHOR_MAX_GAP {
+            crate::warn!("prices", "the pool prices {tok} {:.1}% off its quote: quoted on its own", ((rate * b) / q - 1.0) * 100.0);
+            ANCHOR.lock().unwrap().get_or_insert_with(HashMap::new).remove(&(cid, tok));
+            return;
+        }
+    }
+    ANCHOR.lock().unwrap().get_or_insert_with(HashMap::new).insert((cid, tok), (base, rate, Instant::now()));
+}
+
+/// USD per whole token: the chain's USD stable is 1; a pool token tied to its pair (anchor_pool) is
+/// the pair token's price times the pool's rate; anything else is quoted.
 pub fn usd(cid: u64, token: &str) -> Result<f64, String> {
+    let t = token.to_lowercase();
+    let a = ANCHOR.lock().unwrap().get_or_insert_with(HashMap::new).get(&(cid, t.clone())).cloned();
+    if let Some((base, rate, at)) = a {
+        if at.elapsed() < Duration::from_secs(ANCHOR_S) && base != t {
+            if let Ok(b) = usd(cid, &base) {
+                return Ok(b * rate);
+            }
+        }
+    }
+    quoted(cid, &t)
+}
+
+/// USD per whole token from a swap quote (cached 10 minutes; up to an hour while quotes fail).
+fn quoted(cid: u64, token: &str) -> Result<f64, String> {
     let t = token.to_lowercase();
     let usdc = crate::chains::get(cid).usd;
     if t == usdc {
@@ -268,4 +339,23 @@ pub fn num_out(best: &Value) -> f64 {
 
 pub fn fnum(v: &Value) -> f64 {
     v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok())).unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pair_anchor;
+
+    #[test]
+    fn the_pair_token_that_is_not_the_stable_or_weth_is_priced_from_the_other() {
+        // cbETH (token0, unranked) / WETH (token1, the wrapped gas token): cbETH = 1.144 WETH
+        assert_eq!(pair_anchor(2, 1, 1.144), Some((0, 1.144)));
+        // USDC (token0, the stable) / USDT (token1): USDT = 1 / (USDT per USDC) USDC
+        let (i, r) = pair_anchor(0, 2, 1.002).unwrap();
+        assert_eq!(i, 1);
+        assert!((r - 1.0 / 1.002).abs() < 1e-12);
+        // neither ranks above the other, or no price: both quoted on their own
+        assert_eq!(pair_anchor(2, 2, 1.0), None);
+        assert_eq!(pair_anchor(2, 1, 0.0), None);
+        assert_eq!(pair_anchor(2, 1, f64::NAN), None);
+    }
 }

@@ -790,8 +790,10 @@ fn pool_value(cid: u64, cfg: &PoolConfig, wallet: &str) -> Result<(Value, f64, S
     let (t0, t1) = crate::chain::pool_tokens(cid, &cfg.pool)?;
     let (sp, tick, fee) = crate::chain::slot0(cid, &cfg.pool)?;
     let p = (to_f64(&sp) / 2f64.powi(96)).powi(2);
-    let (u0, u1) = (prices::usd(cid, &t0)?, prices::usd(cid, &t1)?);
     let (m0, m1) = (prices::meta(cid, &t0)?, prices::meta(cid, &t1)?);
+    // both tokens valued from the same moment: one from the other through the pool's own price
+    prices::anchor_pool(cid, &t0, &t1, p * 10f64.powi(m0.decimals as i32 - m1.decimals as i32));
+    let (u0, u1) = (prices::usd(cid, &t0)?, prices::usd(cid, &t1)?);
     let (d0, d1) = (10f64.powi(m0.decimals as i32), 10f64.powi(m1.decimals as i32));
     let mut pos = vec![];
     let mut val = 0.0;
