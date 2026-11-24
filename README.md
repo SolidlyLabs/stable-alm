@@ -191,6 +191,12 @@ positions.
 The same release has the plain `StableALM.exe` if you'd rather not install it, and you can always
 build it yourself (below).
 
+On Linux x86-64, extract `StableALM-<version>-linux-x86_64.tar.gz` from the same release and run
+`./install.sh` inside the extracted directory. The installer adds the app and its icon to your
+application menu. Launch Stable ALM, then open the dashboard from its status bar icon.
+The build requires glibc 2.39 or newer and OpenSSL 3. To update, quit the app and run the installer
+from the new archive.
+
 **Updates.** The installed app checks for a new release every 12 hours and offers it at the top of
 the dashboard (**Update now** installs it and restarts the app; **Settings › Check for updates**
 checks now). It offers only releases signed with a key on the signer whitelist built into the app,
@@ -198,7 +204,9 @@ and installs an installer only if its checksum is the signed one. Each release h
 and its signature `SHA256SUMS.txt.sig`; to check them by hand:
 
 ```bash
-ssh-keygen -Y verify -f rs/release/allowed_signers -I release -n stable-alm-release -s SHA256SUMS.txt.sig < SHA256SUMS.txt
+signer=$(ssh-keygen -Y find-principals -f rs/release/allowed_signers -s SHA256SUMS.txt.sig < SHA256SUMS.txt)
+ssh-keygen -Y verify -f rs/release/allowed_signers -I "$signer" -n stable-alm-release -s SHA256SUMS.txt.sig < SHA256SUMS.txt
+sha256sum --check SHA256SUMS.txt
 ```
 
 **Strategies.** The ladder is a block of a node strategy (Strategy lab). A ladder set up with 0.5.0
@@ -208,7 +216,7 @@ or earlier becomes a node strategy with one ladder block and the same settings o
 ## Using the app
 
 1. Start Stable ALM. A tray icon appears: click it for its menu, double-click it to open the dashboard
-   (on macOS a click opens the menu; choose Open dashboard). On first start (and once after an
+   (on macOS and Linux, choose Open dashboard from the icon menu). On first start (and once after an
    update from 0.4 or earlier) a setup wizard opens: create a wallet, or import one from a recovery
    phrase or a private key, pick chains and parking pools. **Settings › Run the setup wizard** opens
    it again.
@@ -218,10 +226,12 @@ or earlier becomes a node strategy with one ladder block and the same settings o
    Unallocated, the free tokens no pool holds), and watch a few dry-run cycles. **My pools** shows
    your balances per chain, your pools, and each position's range against the price now (as prices
    or ticks), with its measured APR and history.
-3. When the plan looks right, add your wallet's private key (in the wizard, or **Settings › Update
-   key**) and press **Go live**. The wallet address is blurred on screen until you click it.
+3. When the plan looks right, open **Settings › Wallets › Set key** to enter a private key or pick
+   an account from a recovery phrase. Press **Go live** when ready. The wallet address is blurred on
+   screen until you click it.
    - On Windows the key is encrypted for your user account (DPAPI); on macOS it goes into the
      Keychain.
+   - On Linux the wallet keys, agent credentials, and custom RPC URLs go into your desktop keyring.
    - It never leaves your computer and is never shown again.
    - The same address is used on every chain. Keep a little of each chain's gas token there.
 4. To manage more than one wallet, add one with **+** on the wallet switcher at the top. Each wallet has its
@@ -233,7 +243,7 @@ or earlier becomes a node strategy with one ladder block and the same settings o
    must be switched off first).
 
 Your settings, data and logs are kept in `%LOCALAPPDATA%\StableALM` (Windows) or
-`~/Library/Application Support/StableALM` (macOS). Run only one copy per wallet.
+`~/Library/Application Support/StableALM` (macOS) or `~/.stable-alm` (Linux). Run only one copy per wallet.
 
 > Volatile pairs (for example WETH/USDC) can be shown after a confirmation, but the strategy has
 > **not** been tested on them. On a volatile pair, concentrated liquidity can lose more to price
@@ -249,23 +259,38 @@ cd stable-alm/rs
 cargo build --release
 ```
 
-The app is `rs/target/release/StableALM.exe` on Windows, or `rs/target/release/StableALM` on macOS.
-It is a single file of about 8 MB; copy it anywhere and run it.
+The app is `rs/target/release/StableALM.exe` on Windows, or `rs/target/release/StableALM` on macOS and Linux.
 
-To make a release, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run, from `rs/`:
+On Linux, build with the OpenSSL development headers installed (`libssl-dev` on Debian and Ubuntu).
+Run `StableALM` to show the icon in a desktop panel that supports Status Notifier Items. Open the
+dashboard from the icon menu or from the link printed in the terminal. Linux uses the desktop
+session's Secret Service keyring (such as GNOME Keyring). Keep the keyring unlocked
+when the worker needs credentials. Custom RPC URLs from older profiles move into the keyring on startup.
+
+To build the Windows assets, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run, from `rs/`:
 
 ```bash
 pwsh release/release.ps1                              # build, installer, sign, verify -> rs/dist/<version>/
-pwsh release/release.ps1 -Publish -Notes notes.md     # ... and create the GitHub release
 ```
 
 It takes the version from `Cargo.toml`, builds the app and the installer
 (`rs/dist/<version>/StableALM-Setup-<version>.exe`), writes `SHA256SUMS.txt` and `SHA256SUMS.txt.sig`, and
 checks the signature against `rs/release/allowed_signers` and every file against its sum. It
-refuses uncommitted changes. `-Publish` runs the checks again right before it uploads the four files,
-so an unsigned or changed build never goes up. Do not upload release files by hand: the app's
-updater ignores a release whose signature does not verify. (`release/sign.ps1` alone signs files
-already built.)
+refuses uncommitted changes.
+
+For a combined release, build Linux and Windows from the same commit. Copy the Windows installer and
+standalone executable into `rs/dist/<version>/` on Linux, then run from `rs/`:
+
+```bash
+cargo build --locked --release
+python3 release/package-linux.py target/release/StableALM
+bash release/sign-release.sh "$signer" "$key_path"
+bash release/sign-release.sh "$signer" --verify
+```
+
+The combined signature covers the Windows installer, standalone `.exe`, and Linux archive.
+Verify the completed manifest before uploading those three files, `SHA256SUMS.txt`, and
+`SHA256SUMS.txt.sig` to the same release.
 
 Signers are listed in `rs/release/allowed_signers` (OpenSSH format). To let someone else sign
 releases, add their public key there; installed copies trust it from the first release that

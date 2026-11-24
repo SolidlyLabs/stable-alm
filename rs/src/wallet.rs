@@ -44,8 +44,8 @@ pub fn normalise_phrase(p: &str) -> Result<String, String> {
     if ![12, 15, 18, 21, 24].contains(&words.len()) {
         return Err(format!("a recovery phrase has 12, 15, 18, 21 or 24 words (this one has {})", words.len()));
     }
-    if let Some(w) = words.iter().find(|w| !w.chars().all(|c| c.is_ascii_lowercase())) {
-        return Err(format!("\"{w}\" is not a recovery phrase word (English words, letters only)"));
+    if words.iter().any(|w| !w.chars().all(|c| c.is_ascii_lowercase())) {
+        return Err("Enter English recovery words using letters only.".into());
     }
     Ok(words.join(" "))
 }

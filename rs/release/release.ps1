@@ -1,4 +1,4 @@
-# Build, sign and (with -Publish) upload a release, in one go: the only way a release should be made.
+# Build and sign the Windows assets. For combined releases, use sign-release.sh with the Linux archive.
 # The version is Cargo.toml's. Steps: the release build (target-dist), the exe copied to
 # dist\<version>\ (a folder of its own: dist\StableALM.exe may be the copy running), the installer,
 # SHA256SUMS.txt and its signature (sign.ps1), then a check of the signature against the signer
@@ -70,7 +70,7 @@ try {
   # names (a change of RUSTFLAGS rebuilds everything, so target-dist keeps to these)
   $repo = Split-Path -Parent $rs
   $env:RUSTFLAGS = "--remap-path-prefix=$(Join-Path $HOME '.cargo')=cargo --remap-path-prefix=$repo=src --remap-path-prefix=$(Join-Path $HOME '.rustup')=rustup"
-  Run "cargo build" { cargo build --release }
+  Run "cargo build" { cargo build --locked --release }
   New-Item -ItemType Directory -Force $dist | Out-Null
   Copy-Item (Join-Path $rs "target-dist\release\StableALM.exe") $exe -Force
   $leak = [regex]::Matches([Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe)), [regex]::Escape($HOME), "IgnoreCase").Count

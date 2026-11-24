@@ -39,7 +39,7 @@ fn host(url: &str) -> String {
 
 /// `text` with every URL in it cut to its host: the path of an RPC URL can be its key (dRPC's is),
 /// and an error may print the URL normalized (its host lowercased), so no exact text is looked for.
-fn without_url_path(text: &str) -> String {
+pub(crate) fn without_url_path(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(i) = rest.find("://") {

@@ -4,8 +4,13 @@
 use crate::worker::Worker;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+#[cfg(any(windows, target_os = "macos"))]
 use tray_icon::menu::{CheckMenuItem, ContextMenu, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+#[cfg(any(windows, target_os = "macos"))]
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+#[cfg(target_os = "linux")]
+mod linux_tray;
 
 static QUIT: AtomicBool = AtomicBool::new(false);
 
@@ -17,6 +22,7 @@ fn port_file() -> std::path::PathBuf {
     crate::paths::home().join("ui.port")
 }
 
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 pub fn dashboard_url() -> String {
     let port = std::fs::read_to_string(port_file()).unwrap_or_else(|_| "8080".into());
     format!("http://localhost:{}/?t={}", port.trim(), crate::webui::ui_token())
@@ -181,45 +187,26 @@ mod plat {
     pub const LOGIN_LABEL: &str = "Start at login";
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
-mod plat {
-    pub fn single_instance() -> bool {
-        true
-    }
-    pub fn open(target: &str) {
-        let _ = std::process::Command::new("xdg-open").arg(target).spawn();
-    }
-    pub fn message(_t: &str, _y: bool) -> bool {
-        false
-    }
-    pub fn autostart_enabled() -> bool {
-        false
-    }
-    pub fn set_autostart(_on: bool) {}
-    pub fn menu_owner() -> isize {
-        0
-    }
-    pub fn double_click() -> std::time::Duration {
-        std::time::Duration::ZERO
-    }
-    pub fn after_menu(_owner: isize) {}
-    pub const MENU_ON_LEFT: bool = true;
-    pub fn pump(d: std::time::Duration) {
-        std::thread::sleep(d)
-    }
-    pub const LOGIN_LABEL: &str = "Start at login";
+#[cfg(any(windows, target_os = "macos"))]
+pub use plat::message;
+
+#[cfg(any(windows, target_os = "macos"))]
+fn icon(colour: &str) -> Icon {
+    Icon::from_rgba(icon_rgba(colour), ICON_SIZE as u32, ICON_SIZE as u32).expect("icon")
 }
 
-pub use plat::{message, open, single_instance};
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+const ICON_SIZE: usize = 32;
 
-fn icon(colour: &str) -> Icon {
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+fn icon_rgba(colour: &str) -> Vec<u8> {
     let (r, g, b) = match colour {
         "green" => (46u8, 160u8, 67u8),
         "amber" => (219, 154, 4),
         "red" => (218, 54, 51),
         _ => (128, 128, 128),
     };
-    let n = 32usize;
+    let n = ICON_SIZE;
     let mut px = vec![0u8; n * n * 4];
     for y in 0..n {
         for x in 0..n {
@@ -233,9 +220,10 @@ fn icon(colour: &str) -> Icon {
             }
         }
     }
-    Icon::from_rgba(px, n as u32, n as u32).expect("icon")
+    px
 }
 
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 fn state(w: &Worker, thread_alive: bool, quitting: bool) -> (&'static str, String) {
     let st = w.status.lock().unwrap().clone();
     if quitting {
@@ -243,10 +231,13 @@ fn state(w: &Worker, thread_alive: bool, quitting: bool) -> (&'static str, Strin
     }
     let last = st["last_cycle"].as_u64();
     let ago = last.map(|t| format!("{} min ago", crate::engine::now().saturating_sub(t) / 60)).unwrap_or_else(|| "not yet".into());
-    let value = st["account"]["value_usd"].as_f64().or_else(|| st["account"]["total_usd"].as_f64());
-    let val = value.map(|v| format!(" | ${}", crate::engine::commas_p(v, 0))).unwrap_or_default();
     let mode = st["mode"].as_str().unwrap_or("dry run").to_string();
-    let line = format!("{mode} | {} | last cycle {ago}{val}", st["state"].as_str().unwrap_or("?"));
+    let line = format!("{mode} | {} | last cycle {ago}", st["state"].as_str().unwrap_or("?"));
+    #[cfg(any(windows, target_os = "macos"))]
+    let line = match st["account"]["value_usd"].as_f64().or_else(|| st["account"]["total_usd"].as_f64()) {
+        Some(value) => format!("{line} | ${}", crate::engine::commas_p(value, 0)),
+        None => line,
+    };
     let stale = last.map(|t| crate::engine::now().saturating_sub(t) > 1800).unwrap_or(false);
     if !st["last_error"].is_null() || stale || !thread_alive {
         return ("red", line);
@@ -258,7 +249,9 @@ fn state(w: &Worker, thread_alive: bool, quitting: bool) -> (&'static str, Strin
     (if mode == "LIVE" { "green" } else { "grey" }, line)
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 pub fn run() -> Result<(), String> {
+    use plat::{open, single_instance};
     if !single_instance() {
         open(&dashboard_url());
         return Ok(());
@@ -319,6 +312,7 @@ pub fn run() -> Result<(), String> {
         }
         if single.map(|t| t.elapsed() >= plat::double_click()).unwrap_or(false) {
             single = None;
+            #[cfg(windows)]
             unsafe { menu.show_context_menu_for_hwnd(owner, None) };
             plat::after_menu(owner);
         }
@@ -411,8 +405,21 @@ pub fn quit_running(timeout: Duration) -> i32 {
     1
 }
 
+#[cfg(target_os = "linux")]
+pub fn run() -> Result<(), String> {
+    run_background(true)
+}
+
 pub fn headless() -> Result<(), String> {
+    run_background(false)
+}
+
+fn run_background(_show_tray: bool) -> Result<(), String> {
     crate::paths::seed();
+    #[cfg(target_os = "linux")]
+    let _instance = lock_instance()?;
+    #[cfg(target_os = "linux")]
+    crate::chains::protect_rpc_endpoints()?;
     crate::wallets::ensure_registry();
     let worker = Worker::new();
     let _port = crate::webui::serve(worker.clone(), crate::webui::wanted_port(), true)?;
@@ -421,12 +428,38 @@ pub fn headless() -> Result<(), String> {
     crate::positions::start();
     let w2 = worker.clone();
     let th = std::thread::spawn(move || w2.loop_forever());
+    #[cfg(target_os = "linux")]
+    let tray = if _show_tray { linux_tray::start() } else { None };
+    #[cfg(target_os = "linux")]
+    let mut next_refresh = Instant::now();
     while !QUIT.load(Ordering::SeqCst) {
+        #[cfg(target_os = "linux")]
+        if let Some(tray) = tray.as_ref().filter(|_| Instant::now() >= next_refresh) {
+            tray.refresh(&worker, !th.is_finished(), false);
+            next_refresh = Instant::now() + Duration::from_secs(3);
+        }
         std::thread::sleep(Duration::from_millis(250));
     }
     worker.stop();
+    #[cfg(target_os = "linux")]
+    if let Some(tray) = &tray {
+        tray.refresh(&worker, !th.is_finished(), true);
+    }
     let _ = th.join();
+    crate::webui::stop();
     let _ = std::fs::remove_file(port_file());
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub fn lock_instance() -> Result<std::fs::File, String> {
+    let lock = std::fs::OpenOptions::new().write(true).create(true).truncate(false)
+        .open(crate::paths::home().join("instance.lock"))
+        .map_err(|e| format!("could not open the instance lock: {e}"))?;
+    match lock.try_lock() {
+        Ok(()) => Ok(lock),
+        Err(std::fs::TryLockError::WouldBlock) => Err("Stable ALM is already running for this profile".into()),
+        Err(e) => Err(format!("could not lock the profile: {e}")),
+    }
 }
 

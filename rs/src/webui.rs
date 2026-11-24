@@ -1001,7 +1001,7 @@ fn post(path: &str, body: Value, w: &Arc<Worker>) -> Result<Value, String> {
         },
         "/api/key" => crate::onboard::save_key(body["private_key"].as_str().unwrap_or("")),
         "/api/key/delete" => {
-            crate::signer::forget();
+            crate::signer::forget()?;
             let mut s = load_settings();
             if s["execute"].as_bool().unwrap_or(false) {
                 s["execute"] = json!(false);

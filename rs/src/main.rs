@@ -78,18 +78,28 @@ fn main() {
         mem::start();
     }
     let code = match arg {
+        #[cfg(any(windows, target_os = "macos"))]
         "" => desktop::run().map(|_| 0).unwrap_or_else(|e| {
             error!("desktop", "{e}");
             desktop::message(&format!("Stable ALM could not start: {e}"), false);
             1
         }),
+        #[cfg(target_os = "linux")]
+        "" => console_result(desktop::run()),
+        #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+        "" => console_result(desktop::headless()),
         "--quit" => desktop::quit_running(std::time::Duration::from_secs(900)),
-        "--headless" => desktop::headless().map(|_| 0).unwrap_or_else(|e| {
-            eprintln!("{e}");
-            1
-        }),
+        "--headless" => console_result(desktop::headless()),
         "--once" => {
             paths::seed();
+            #[cfg(target_os = "linux")]
+            let _instance = desktop::lock_instance().and_then(|lock| {
+                chains::protect_rpc_endpoints()?;
+                Ok(lock)
+            }).unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
             let w = worker::Worker::new();
             w.cycle();
             println!("{}", serde_json::to_string_pretty(&*w.status.lock().unwrap()).unwrap());
@@ -105,4 +115,11 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+fn console_result(result: Result<(), String>) -> i32 {
+    result.map(|_| 0).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        1
+    })
 }

@@ -1,0 +1,13 @@
+Stable ALM for Linux x86-64
+
+This build requires glibc 2.39 or newer and OpenSSL 3. For credentials,
+use an unlocked desktop keyring that implements Secret Service, such as
+GNOME Keyring or KWallet.
+
+Run ./install.sh from this extracted directory to install for your user.
+Launch Stable ALM from your application menu. On a panel that supports
+Status Notifier Items, use the Stable ALM icon to open the dashboard.
+You can also run ./StableALM and open the link printed in the terminal.
+
+To upgrade, quit Stable ALM and run the installer from the new archive.
+The app uses ~/.stable-alm for settings and history.

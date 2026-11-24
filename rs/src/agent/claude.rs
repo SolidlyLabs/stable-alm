@@ -36,8 +36,7 @@ pub fn has_key() -> bool {
 pub fn set_key(k: &str) -> Result<(), String> {
     let k = k.trim();
     if k.is_empty() {
-        crate::signer::delete_secret(KEY);
-        return Ok(());
+        return crate::signer::delete_secret(KEY);
     }
     if !k.starts_with("sk-ant-") || k.len() > 300 || k.chars().any(|c| c.is_whitespace()) {
         return Err("that does not look like an Anthropic API key (sk-ant-…)".into());

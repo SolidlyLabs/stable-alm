@@ -551,10 +551,10 @@ pub(crate) mod tests {
         assert_eq!(paths::scope(&id, || crate::signer::save_key(&k2)).unwrap(), a2);
         assert_eq!(crate::signer::load_account().unwrap().address, a1);
         assert_eq!(paths::scope(&id, crate::signer::load_account).unwrap().address, a2);
-        paths::scope(&id, crate::signer::forget);
+        paths::scope(&id, crate::signer::forget).unwrap();
         assert!(!paths::scope(&id, crate::signer::configured));
         assert!(crate::signer::configured(), "forgetting one wallet's key keeps the others");
-        crate::signer::forget();
+        crate::signer::forget().unwrap();
     }
 
     #[test]

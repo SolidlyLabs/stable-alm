@@ -326,6 +326,10 @@ dialog.wdlg{max-width:520px;width:calc(100% - 32px)}dialog.wdlg .opts{display:gr
 dialog.wdlg .opts label{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border:1px solid var(--line);border-radius:10px;cursor:pointer}
 dialog.wdlg .opts label:has(input:checked){border-color:color-mix(in srgb,var(--acc) 50%,var(--line2));background:var(--acc-soft)}
 dialog.wdlg .opts input{width:auto;margin-top:3px}
+.wcred fieldset{margin:0;padding:0;border:0;min-width:0;display:grid;gap:12px}
+.wcred label.f{display:block;margin-bottom:5px}.wcred textarea{width:100%;resize:vertical;-webkit-text-security:disc}
+.wcred .cred-account{min-width:0;overflow-wrap:anywhere}.wcred .pick input{width:auto;flex:none}
+.wcred .pick label span.badge{flex:none}.wcred .cred-note{margin:0;overflow-wrap:anywhere}.wcred [hidden]{display:none}
 @media (max-width:640px){.wcard .kv{grid-template-columns:auto 1fr}.where .r{grid-template-columns:1fr 70px}.where .r .b{grid-column:1/-1;order:3}}
 @media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important}}
 </style>
@@ -496,6 +500,32 @@ dialog.wdlg .opts input{width:auto;margin-top:3px}
       <div style="grid-column:1/-1"><label class=f>Start with pools</label><select id="wCopy"></select></div></div>
     <p class="mute small">Keys are stored encrypted for your Windows account and never shown again. A new wallet starts in dry run. Pools copied from another wallet start switched off at 0%: give it its own split and strategies under Pools.</p>
     <div class="btns"><button type=button class="sec" onclick="$('wDlg').close()">Cancel</button><button type=submit id="wAddBtn">Add wallet</button></div></form></dialog>
+
+  <dialog class="cap wdlg wcred" id="wCredDlg" aria-labelledby="wCredTitle"><form method=dialog>
+    <h3 id="wCredTitle">Set key</h3>
+    <fieldset id="wCredFields">
+      <div><label class="f" for="wCredMode">Import with</label><select id="wCredMode">
+        <option value="key">Private key</option><option value="phrase">Recovery phrase</option>
+      </select></div>
+      <div id="wCredKeyBox"><label class="f" for="wCredKey">Private key</label>
+        <input id="wCredKey" type="password" spellcheck="false" autocomplete="off" placeholder="0x…">
+        <p id="wCredKeyNote" class="cred-note mute small" style="margin-top:6px" hidden>The wallet will follow the address of this key.</p>
+      </div>
+      <div id="wCredPhraseBox" hidden>
+        <label class="f" for="wCredPhrase">Recovery phrase</label>
+        <textarea id="wCredPhrase" rows="3" spellcheck="false" autocomplete="off"></textarea>
+        <label class="f" for="wCredPass" style="margin-top:8px">Optional passphrase</label>
+        <input id="wCredPass" type="password" spellcheck="false" autocomplete="off" aria-describedby="wCredPassHelp">
+        <p id="wCredPassHelp" class="cred-note mute small" style="margin-top:6px">Enter a passphrase only if you set one when creating the wallet.</p>
+        <button type="button" id="wCredFind" class="sec sm" style="margin-top:10px">Find accounts</button>
+        <div id="wCredAccounts" class="pick" role="group" aria-label="Derived accounts" style="margin-top:8px" hidden></div>
+        <p id="wCredNotice" class="cred-note warn small" role="status" hidden></p>
+      </div>
+    </fieldset>
+    <p class="cred-note mute small">Stable ALM stores the selected account’s private key. Your recovery phrase and passphrase are only used to derive it.</p>
+    <p id="wCredError" class="cred-note bad small" role="alert" hidden></p>
+    <div class="btns"><button type="button" class="sec" id="wCredCancel">Cancel</button><button type="submit" id="wCredSave">Save key</button></div>
+  </form></dialog>
 
   <!-- EXPERIMENTAL (Settings → Experimental features) -->
   <section data-tab="experimental" class="grid exg hide">
@@ -689,7 +719,7 @@ function setWallet(id) {
   if (dirtyPools && !confirm("This wallet's pools have unsaved changes. Discard them?")) return;
   WID = id;
   try { localStorage.setItem("alm.wallet", id); } catch (e) {}
-  dirtyPools = false; poolsEdit = null; TOKENS = null; fundEdit = {}; KEY_EDIT = null; OPEN.clear(); ALLACT = null;
+  dirtyPools = false; poolsEdit = null; TOKENS = null; fundEdit = {}; ADDR_EDIT = null; OPEN.clear(); ALLACT = null;
   if (window.POSITIONS && POSITIONS.reset) POSITIONS.reset();
   if (window.PERF) PERF.reset();
   renderSwitcher();
@@ -2268,7 +2298,7 @@ async function loadAllActivity() {
   } catch (e) { toast("activity: " + e.message, true); }
 }
 // ---------- the Wallets card (Settings) ----------
-const KEY_WHERE = {"Windows DPAPI": "encrypted for your Windows account", "macOS Keychain": "in your macOS Keychain"};
+const KEY_WHERE = {"Windows DPAPI": "encrypted for your Windows account", "macOS Keychain": "in your macOS Keychain", "Linux Secret Service": "in your Linux desktop keyring"};
 function keyLine(w) {
   const k = w.key || {};
   if (k.error) return `<span class=bad>${esc(k.error)}</span>`;
@@ -2282,9 +2312,9 @@ function renderWallets(force) {
   if (!box || (!force && box.contains(document.activeElement) && document.activeElement.tagName === "INPUT")) return;
   const ws = wlist();
   box.innerHTML = ws.map((w, i) => {
-    const k = w.key || {}, open = KEY_EDIT === w.id, aopen = ADDR_EDIT === w.id;
+    const k = w.key || {}, aopen = ADDR_EDIT === w.id;
     const mode = w.paused ? `<span class="badge b-paused">paused</span>` : w.watch ? `<span class="badge b-dry">watching</span>` : w.live ? `<span class="badge b-live">live</span>` : `<span class="badge b-dry">dry run</span>`;
-    return `<div class="wrow${open ? " open" : ""}" data-w="${esc(w.id)}">
+    return `<div class="wrow" data-w="${esc(w.id)}">
       <input type=color value="${esc(w.color)}" data-k="color" title="colour">
       <div class="nm"><div class="row" style="gap:8px;flex-wrap:nowrap"><span class="mute small" style="flex:none">${i + 1}</span><input data-k="label" value="${esc(w.label)}" maxlength=40 aria-label="name">${mode}</div>
         <span class="small">${w.address ? privAddr(w.address) : "<span class=mute>no address yet</span>"} · ${keyLine(w)}</span>
@@ -2298,9 +2328,6 @@ function renderWallets(force) {
         ${k.stored && k.matches ? "" : `<button class="sec sm" data-k="key">Set key</button>`}
         ${k.stored ? `<button class="ghost sm" data-k="delkey" title="the wallet becomes watched only and live trading turns off">Remove key</button>` : ""}
         ${ws.length < 2 ? "" : `<button class="ghost sm" data-k="remove" title="only once it holds no positions and is in dry run; its folder is kept">Remove</button>`}</div>
-      ${open ? `<div class="wkey"><input type=password data-k="pk" autocomplete=off spellcheck=false placeholder="0x… private key for ${esc(w.label)}">
-        <button class="sm" data-k="savekey">Save key</button><button class="ghost sm" data-k="cancel">Cancel</button>
-        <span class="mute small">Stored encrypted, never shown again. The wallet's address becomes the key's.</span></div>` : ""}
       ${aopen ? `<div class="wkey"><input data-k="ad" autocomplete=off spellcheck=false placeholder="0x… address for ${esc(w.label)} to watch">
         <button class="sm" data-k="saveaddr">Save address</button><button class="ghost sm" data-k="cancela">Cancel</button>
         <span class="mute small">Watched only: balances, positions and statistics; nothing is signed.</span></div>` : ""}</div>`;
@@ -2313,20 +2340,15 @@ function renderWallets(force) {
     if (q("dry")) q("dry").onclick = () => wLive(id, false);
     if (q("pause")) q("pause").onclick = () => wPause(id, true);
     if (q("start")) q("start").onclick = () => wPause(id, false);
-    if (q("addr")) q("addr").onclick = () => { ADDR_EDIT = id; KEY_EDIT = null; renderWallets(true); const f = $("wList").querySelector(`[data-w="${CSS.escape(id)}"] [data-k="ad"]`); if (f) f.focus(); };
+    if (q("addr")) q("addr").onclick = () => { ADDR_EDIT = id; renderWallets(true); const f = $("wList").querySelector(`[data-w="${CSS.escape(id)}"] [data-k="ad"]`); if (f) f.focus(); };
     if (q("saveaddr")) {
       q("saveaddr").onclick = () => wSetAddr(id, q("ad").value.trim());
       q("ad").onkeydown = e => { if (e.key === "Enter") wSetAddr(id, q("ad").value.trim()); };
       q("cancela").onclick = () => { ADDR_EDIT = null; renderWallets(true); };
     }
-    if (q("key")) q("key").onclick = () => { KEY_EDIT = id; ADDR_EDIT = null; renderWallets(true); const f = $("wList").querySelector(`[data-w="${CSS.escape(id)}"] [data-k="pk"]`); if (f) f.focus(); };
+    if (q("key")) q("key").onclick = () => wCredentialOpen(id);
     if (q("delkey")) q("delkey").onclick = () => wDelKey(id);
     if (q("remove")) q("remove").onclick = () => wRemove(id);
-    if (q("savekey")) {
-      q("savekey").onclick = () => wSetKey(id, q("pk").value.trim());
-      q("pk").onkeydown = e => { if (e.key === "Enter") wSetKey(id, q("pk").value.trim()); };
-      q("cancel").onclick = () => { KEY_EDIT = null; renderWallets(true); };
-    }
   });
   $("wNote").textContent = ws.length > 1 ? "Every wallet runs each cycle, one after another. The kill switch (Pause all), RPC, cycle interval, port and updates are shared; the rest of Settings is the wallet's own." :
     "Add a wallet to run several at once: each gets its own pools, split of funds, strategies, key (or none, to just watch it) and statistics.";
@@ -2341,12 +2363,130 @@ async function wSetAddr(id, addr) {
     toast(`${wOf(id).label} now watches that address.`); document.activeElement && document.activeElement.blur(); renderWallets(true); refresh(); }
   catch (e) { toast(e.message, true); }
 }
-async function wSetKey(id, key) {
-  if (!key) return toast("Paste the private key.", true);
-  try { const r = await api(`/api/key?wallet=${encodeURIComponent(id)}`, {private_key: key}); KEY_EDIT = null;
-    toast(`Key saved for ${wOf(id).label}` + (r.wallet_changed ? " (its address is now the key's)" : "")); document.activeElement && document.activeElement.blur(); renderWallets(true); refresh(); }
-  catch (e) { toast(e.message, true); }
+const wCredDialog = $("wCredDlg"), wCredForm = wCredDialog.querySelector("form");
+let W_CRED = null;
+function wCredentialOpen(id) {
+  const wallet = wOf(id);
+  W_CRED = {id, label: wallet.label, address: (wallet.address || "").toLowerCase(),
+    accounts: [], next: 0, picked: null, revision: 0, searching: false, saving: false};
+  ADDR_EDIT = null;
+  wCredForm.reset();
+  $("wCredTitle").textContent = `Set key for ${wallet.label}`;
+  $("wCredKeyNote").hidden = !wallet.address;
+  wCredentialMode();
+  wCredDialog.showModal();
+  $("wCredKey").focus();
 }
+function wCredentialError(message = "") {
+  const error = $("wCredError");
+  error.textContent = message;
+  error.hidden = !message;
+}
+function wCredentialMode() {
+  const phrase = $("wCredMode").value === "phrase";
+  $("wCredKeyBox").hidden = phrase;
+  $("wCredPhraseBox").hidden = !phrase;
+  $("wCredKey").value = "";
+  $("wCredPhrase").value = "";
+  $("wCredPass").value = "";
+  wCredentialClearAccounts();
+}
+function wCredentialClearAccounts() {
+  const edit = W_CRED;
+  if (!edit) return;
+  edit.revision++;
+  edit.searching = false;
+  edit.accounts = [];
+  edit.next = 0;
+  edit.picked = null;
+  $("wCredAccounts").replaceChildren();
+  $("wCredAccounts").hidden = true;
+  wCredentialError();
+  wCredentialButtons(edit);
+}
+function wCredentialButtons(edit) {
+  const phrase = $("wCredMode").value === "phrase";
+  $("wCredFind").disabled = edit.searching || edit.next === null;
+  $("wCredFind").textContent = edit.searching ? "Finding accounts…" : edit.accounts.length ? "Find more accounts" : "Find accounts";
+  $("wCredFind").hidden = edit.next === null;
+  $("wCredSave").disabled = edit.saving || edit.searching || (phrase && !edit.picked);
+  $("wCredSave").textContent = edit.saving ? "Saving…" : "Save key";
+  $("wCredFields").disabled = edit.saving;
+  $("wCredCancel").disabled = edit.saving;
+  const anotherAddress = phrase && edit.address && edit.picked && edit.picked.address.toLowerCase() !== edit.address;
+  const notice = $("wCredNotice");
+  notice.textContent = anotherAddress ? "Saving this account will change the address this wallet manages." : "";
+  notice.hidden = !anotherAddress;
+}
+async function wCredentialFind() {
+  const edit = W_CRED;
+  if (!edit || edit.searching || edit.next === null) return;
+  const revision = edit.revision;
+  edit.searching = true;
+  wCredentialError();
+  wCredentialButtons(edit);
+  try {
+    const result = await api(`/api/onboard/phrase?wallet=${encodeURIComponent(edit.id)}`, {
+      phrase: $("wCredPhrase").value, passphrase: $("wCredPass").value, from: edit.next, count: 5
+    });
+    if (W_CRED !== edit || edit.revision !== revision) return;
+    edit.accounts.push(...result.addresses);
+    edit.next = result.next_from;
+    if (!edit.picked) edit.picked = edit.accounts.find(a => a.address.toLowerCase() === edit.address) || null;
+    const accounts = $("wCredAccounts");
+    accounts.innerHTML = edit.accounts.map((a, i) => {
+      const match = a.address.toLowerCase() === edit.address;
+      return `<label><input type="radio" name="wCredAccount" value="${i}" ${a === edit.picked ? "checked" : ""}>
+        <span class="cred-account mono">${esc(a.address)}</span><span class="mute">#${a.index}</span>
+        ${match ? `<span class="badge b-dry">Watched address</span>` : ""}</label>`;
+    }).join("");
+    accounts.hidden = false;
+  } catch (e) {
+    if (W_CRED === edit && edit.revision === revision) wCredentialError(e.message);
+  } finally {
+    if (W_CRED === edit && edit.revision === revision) {
+      edit.searching = false;
+      wCredentialButtons(edit);
+    }
+  }
+}
+async function wCredentialSave() {
+  const edit = W_CRED;
+  if (!edit || edit.saving || edit.searching) return;
+  const phrase = $("wCredMode").value === "phrase";
+  const key = $("wCredKey").value.trim();
+  if (phrase && !edit.picked) return wCredentialError("Find the accounts and select an address first.");
+  if (!phrase && !/^(0x)?[0-9a-fA-F]{64}$/.test(key)) return wCredentialError("Enter a private key with 64 hex characters, with or without 0x.");
+  if (phrase && edit.address && edit.picked.address.toLowerCase() !== edit.address &&
+      !confirm(`Change the address managed by "${edit.label}"?\n\n${edit.address}\n→ ${edit.picked.address}`)) return;
+  edit.saving = true;
+  wCredentialError();
+  wCredentialButtons(edit);
+  const query = `?wallet=${encodeURIComponent(edit.id)}`;
+  try {
+    const result = phrase ? await api(`/api/onboard/phrase_save${query}`, {
+      phrase: $("wCredPhrase").value, passphrase: $("wCredPass").value,
+      index: edit.picked.index, expected_address: edit.picked.address
+    }) : await api(`/api/key${query}`, {private_key: key});
+    wCredDialog.close();
+    toast(`Key saved for ${edit.label}` + (result.wallet_changed ? " and its managed address updated." : "."));
+    refresh();
+  } catch (e) { wCredentialError(e.message); }
+  finally { edit.saving = false; wCredentialButtons(edit); }
+}
+$("wCredMode").onchange = wCredentialMode;
+$("wCredPhrase").oninput = $("wCredPass").oninput = wCredentialClearAccounts;
+$("wCredFind").onclick = wCredentialFind;
+$("wCredAccounts").onchange = e => {
+  if (W_CRED && e.target.name === "wCredAccount") {
+    W_CRED.picked = W_CRED.accounts[Number(e.target.value)];
+    wCredentialButtons(W_CRED);
+  }
+};
+$("wCredCancel").onclick = () => wCredDialog.close();
+wCredForm.onsubmit = e => { e.preventDefault(); wCredentialSave(); };
+wCredDialog.addEventListener("cancel", e => { if (W_CRED?.saving) e.preventDefault(); });
+wCredDialog.addEventListener("close", () => { wCredForm.reset(); $("wCredAccounts").replaceChildren(); W_CRED = null; });
 async function wPause(id, on) {
   try {
     await api(`/api/control?wallet=${encodeURIComponent(id)}`, {action: on ? "pause_wallet" : "resume_wallet"});
@@ -2548,7 +2688,6 @@ async function wLive(id, on) {
     w.live = on; renderWallets(true); renderSwitcher();
     toast(on ? `${w.label} is live: a cycle is starting now.` : `${w.label} is in dry run: a cycle is starting now.`); refresh(); } catch (e) { toast(e.message, true); }
 }
-let KEY_EDIT = null; // the wallet whose key field is open (Settings → Wallets)
 let ADDR_EDIT = null; // the watched wallet whose address field is open
 // The owner's address, shown as a random address of the same form (blurred) until clicked; a click shows
 // the real one and keeps it shown across re-renders. Each address keeps its stand-in for the session.

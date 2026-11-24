@@ -18,6 +18,8 @@ use serde_json::{json, Value};
 
 use crate::settings::{load_settings, save_settings};
 
+const MAX_PHRASE_ACCOUNT_INDEX: u32 = 1000;
+
 /// Store a key as the signer and make its address the managed wallet.
 pub fn save_key(k: &str) -> Result<Value, String> {
     // one wallet per address (wallets.rs): refused before anything is stored
@@ -101,17 +103,26 @@ pub fn post(action: &str, body: &Value) -> Result<Value, String> {
         }
         "phrase" => {
             let n = body["count"].as_u64().unwrap_or(5).clamp(1, 20) as u32;
-            let from = body["from"].as_u64().unwrap_or(0).min(1000) as u32;
+            let from = body["from"].as_u64().unwrap_or(0).min(MAX_PHRASE_ACCOUNT_INDEX.into()) as u32;
+            let end = (from + n).min(MAX_PHRASE_ACCOUNT_INDEX + 1);
+            let phrase = s("phrase");
+            let passphrase = s("passphrase");
             let mut rows = vec![];
-            for i in from..from + n {
-                let k = crate::wallet::from_phrase(&s("phrase"), &s("passphrase"), i)?;
+            for i in from..end {
+                let k = crate::wallet::from_phrase(&phrase, &passphrase, i)?;
                 rows.push(json!({"index": i, "address": crate::eth::Account::from_key(&k)?.address}));
             }
-            Ok(json!({"addresses": rows}))
+            Ok(json!({"addresses": rows, "next_from": (end <= MAX_PHRASE_ACCOUNT_INDEX).then_some(end)}))
         }
         "phrase_save" => {
-            let i = body["index"].as_u64().unwrap_or(0).min(1000) as u32;
+            let i = body["index"].as_u64().unwrap_or(0).min(MAX_PHRASE_ACCOUNT_INDEX.into()) as u32;
             let k = crate::wallet::from_phrase(&s("phrase"), &s("passphrase"), i)?;
+            if let Some(expected) = body["expected_address"].as_str() {
+                let actual = crate::eth::Account::from_key(&k)?.address;
+                if !actual.eq_ignore_ascii_case(expected) {
+                    return Err("The phrase or passphrase changed. Find the accounts and select the address again.".into());
+                }
+            }
             save_key(&k)
         }
         "done" => {

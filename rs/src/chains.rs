@@ -76,6 +76,72 @@ fn defaults() -> Value {
 }
 
 static CACHE: Mutex<Option<HashMap<u64, Chain>>> = Mutex::new(None);
+static CONFIG_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(target_os = "linux")]
+const KEYRING_PREFIX: &str = "keyring:rpc-";
+
+fn rpc_endpoint(value: &Value) -> String {
+    let endpoint = value.as_str().unwrap_or("");
+    #[cfg(target_os = "linux")]
+    if let Some(name) = endpoint.strip_prefix(KEYRING_PREFIX) {
+        return crate::signer::keyring_store::load(&format!("rpc-{name}")).ok().flatten().unwrap_or_default();
+    }
+    endpoint.into()
+}
+
+#[cfg(target_os = "linux")]
+fn store_rpc_endpoint(endpoint: &str) -> Result<String, String> {
+    let mut id = [0u8; 16];
+    getrandom::getrandom(&mut id).map_err(|e| e.to_string())?;
+    let id: String = id.iter().map(|byte| format!("{byte:02x}")).collect();
+    crate::signer::keyring_store::save(&format!("rpc-{id}"), endpoint)?;
+    Ok(format!("{KEYRING_PREFIX}{id}"))
+}
+
+#[cfg(target_os = "linux")]
+fn delete_rpc_endpoint(endpoint: &str) {
+    if let Some(id) = endpoint.strip_prefix(KEYRING_PREFIX) {
+        if let Err(e) = crate::signer::keyring_store::delete(&format!("rpc-{id}")) {
+            crate::warn!("rpc", "could not clear an unused RPC keyring entry: {e}");
+        }
+    }
+}
+
+/// Move old Linux RPC overrides into the keyring before starting the worker or UI.
+#[cfg(target_os = "linux")]
+pub fn protect_rpc_endpoints() -> Result<(), String> {
+    let _guard = CONFIG_LOCK.lock().unwrap();
+    let path = crate::paths::app_config().join("chains.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("could not read chains.json: {e}")),
+    };
+    let mut user: Value = serde_json::from_slice(&bytes).map_err(|e| format!("could not read chains.json: {e}"))?;
+    let mut added = Vec::new();
+    let result = (|| {
+        let Some(chains) = user.as_object_mut() else { return Ok(()) };
+        for chain in chains.values_mut().filter_map(Value::as_object_mut) {
+            for field in ["rpc", "send_rpc"] {
+                let Some(value) = chain.get_mut(field) else { continue };
+                let Some(endpoint) = value.as_str().filter(|s| !s.is_empty() && !s.starts_with(KEYRING_PREFIX)) else { continue };
+                let reference = store_rpc_endpoint(endpoint)?;
+                *value = json!(reference);
+                added.push(reference);
+            }
+        }
+        if !added.is_empty() {
+            crate::settings::write_atomic(&path, &user).map_err(|e| e.to_string())?;
+            *CACHE.lock().unwrap() = None;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        for endpoint in added { delete_rpc_endpoint(&endpoint); }
+    }
+    result
+}
 
 fn load_all() -> HashMap<u64, Chain> {
     let user: Value = std::fs::read_to_string(crate::paths::app_config().join("chains.json"))
@@ -99,11 +165,11 @@ fn load_all() -> HashMap<u64, Chain> {
                 off: v["off"].as_bool().unwrap_or(false),
                 rpc: std::env::var(format!("ALM_RPC_URL_{id}"))
                     .or_else(|_| if id == BASE { std::env::var("ALM_RPC_URL") } else { Err(std::env::VarError::NotPresent) })
-                    .unwrap_or_else(|_| v["rpc"].as_str().unwrap_or("").to_string())
+                    .unwrap_or_else(|_| rpc_endpoint(&v["rpc"]))
                     .replace("{chain_id}", &id.to_string()),
                 send_rpc: std::env::var(format!("ALM_SEND_RPC_URL_{id}"))
                     .or_else(|_| if id == BASE { std::env::var("ALM_SEND_RPC_URL") } else { Err(std::env::VarError::NotPresent) })
-                    .unwrap_or_else(|_| v["send_rpc"].as_str().unwrap_or("").to_string()),
+                    .unwrap_or_else(|_| rpc_endpoint(&v["send_rpc"])),
                 batch_size: v["batch_size"].as_u64().unwrap_or(3).clamp(1, 100) as usize,
                 rate_per_min: v["rate_per_min"].as_u64().map(|x| x.min(100_000) as u32),
                 gas_speed: crate::chain::GasSpeed::parse(v["gas_speed"].as_str().unwrap_or("")).unwrap_or_default().name().into(),
@@ -157,6 +223,7 @@ pub fn set_enabled(id: u64, on: bool) -> Result<(), String> {
     if RETIRED.contains(&id) || !defaults().as_object().unwrap().contains_key(&id.to_string()) {
         return Err(format!("chain {id} is not supported"));
     }
+    let _guard = CONFIG_LOCK.lock().unwrap();
     let p = crate::paths::app_config().join("chains.json");
     let mut user: Value = std::fs::read_to_string(&p).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!({}));
     if !user.is_object() {
@@ -204,6 +271,7 @@ pub fn set_off(id: u64, off: bool) -> Result<(), String> {
             return Err(format!("{} has pools switched on ({}): switch them off first", get(id).name, on.join(", ")));
         }
     }
+    let _guard = CONFIG_LOCK.lock().unwrap();
     let p = crate::paths::app_config().join("chains.json");
     let mut user: Value = std::fs::read_to_string(&p).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!({}));
     if !user.is_object() {
@@ -225,6 +293,14 @@ pub fn set_rpc(id: u64, rpc: Option<&str>, send_rpc: Option<&str>, batch_size: O
     if RETIRED.contains(&id) || !d.as_object().unwrap().contains_key(&id.to_string()) {
         return Err(format!("chain {id} is not supported"));
     }
+    let endpoints = [("rpc", rpc.map(str::trim)), ("send_rpc", send_rpc.map(str::trim))];
+    for (field, endpoint) in endpoints {
+        let Some(endpoint) = endpoint.filter(|s| !s.is_empty()) else { continue };
+        if !(endpoint.starts_with("https://") || endpoint.starts_with("http://127.0.0.1") || endpoint.starts_with("http://localhost")) || endpoint.contains(char::is_whitespace) {
+            return Err(format!("{field}: expected an https:// URL"));
+        }
+    }
+    let _guard = CONFIG_LOCK.lock().unwrap();
     let p = crate::paths::app_config().join("chains.json");
     let mut user: Value = std::fs::read_to_string(&p).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!({}));
     if !user.is_object() {
@@ -234,17 +310,6 @@ pub fn set_rpc(id: u64, rpc: Option<&str>, send_rpc: Option<&str>, batch_size: O
         user[id.to_string()] = json!({});
     }
     let e = &mut user[id.to_string()];
-    for (k, v) in [("rpc", rpc), ("send_rpc", send_rpc)] {
-        let Some(v) = v.map(str::trim) else { continue };
-        if v.is_empty() {
-            e.as_object_mut().unwrap().remove(k);
-            continue;
-        }
-        if !(v.starts_with("https://") || v.starts_with("http://127.0.0.1") || v.starts_with("http://localhost")) || v.contains(char::is_whitespace) {
-            return Err(format!("{k}: expected an https:// URL"));
-        }
-        e[k] = json!(v);
-    }
     if let Some(b) = batch_size {
         if !(1..=100).contains(&b) {
             return Err("batch_size: expected 1 to 100".into());
@@ -259,9 +324,35 @@ pub fn set_rpc(id: u64, rpc: Option<&str>, send_rpc: Option<&str>, batch_size: O
         }
         None => {}
     }
-    crate::settings::write_atomic(&p, &user).map_err(|e| e.to_string())?;
-    *CACHE.lock().unwrap() = None;
-    Ok(())
+    #[cfg(target_os = "linux")]
+    let (mut added, mut replaced) = (Vec::new(), Vec::new());
+    let result: Result<(), String> = (|| {
+        let e = &mut user[id.to_string()];
+        for (field, endpoint) in endpoints {
+            let Some(endpoint) = endpoint else { continue };
+            let previous = e.as_object_mut().unwrap().remove(field);
+            #[cfg(target_os = "linux")]
+            if let Some(Value::String(reference)) = previous { replaced.push(reference); }
+            #[cfg(not(target_os = "linux"))]
+            let _ = previous;
+            if !endpoint.is_empty() {
+                #[cfg(target_os = "linux")]
+                let endpoint = {
+                    let reference = store_rpc_endpoint(endpoint)?;
+                    added.push(reference.clone());
+                    reference
+                };
+                e[field] = json!(endpoint);
+            }
+        }
+        crate::settings::write_atomic(&p, &user).map_err(|e| e.to_string())
+    })();
+    if result.is_ok() {
+        *CACHE.lock().unwrap() = None;
+    }
+    #[cfg(target_os = "linux")]
+    for endpoint in if result.is_ok() { replaced } else { added } { delete_rpc_endpoint(&endpoint); }
+    result
 }
 
 /// Set how a chain's transactions are priced (config/chains.json, `gas_speed`): "low", "normal"
@@ -272,6 +363,7 @@ pub fn set_gas_speed(id: u64, speed: &str) -> Result<(), String> {
     }
     let sp = crate::chain::GasSpeed::parse(speed).ok_or("gas_speed: expected low, normal or instant")?;
     // the app's chains.json, which every wallet reads (not the current wallet's folder)
+    let _guard = CONFIG_LOCK.lock().unwrap();
     let p = crate::paths::app_config().join("chains.json");
     let mut user: Value = std::fs::read_to_string(&p).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!({}));
     if !user.is_object() {
@@ -305,7 +397,7 @@ pub fn test_rpc(id: u64, url: &str) -> Result<Value, String> {
                 std::thread::sleep(std::time::Duration::from_millis(700 * tries));
             }
             Err(ureq::Error::Status(429, _)) => return Err("rate limited (HTTP 429) — the endpoint works but is busy; try again".into()),
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(crate::rpc::without_url_path(&e.to_string())),
         }
     };
     let got = crate::rpc::hex_u64(&v["result"]);

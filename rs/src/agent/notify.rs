@@ -81,7 +81,7 @@ fn send(text: &str, keyboard: Option<Value>) -> Result<(), String> {
 pub fn set_token(t: &str) -> Result<String, String> {
     let t = t.trim();
     if t.is_empty() {
-        crate::signer::delete_secret(TOKEN);
+        crate::signer::delete_secret(TOKEN)?;
         unlink("bot token removed");
         return Ok(String::new());
     }
@@ -93,9 +93,12 @@ pub fn set_token(t: &str) -> Result<String, String> {
     match api("getMe", &json!({})) {
         Ok(me) => Ok(me["username"].as_str().unwrap_or("").to_string()),
         Err(e) => {
-            match old {
-                Some(o) => { let _ = crate::signer::save_secret(TOKEN, &o); }
+            let restore = match old {
+                Some(o) => crate::signer::save_secret(TOKEN, &o),
                 None => crate::signer::delete_secret(TOKEN),
+            };
+            if let Err(restore) = restore {
+                return Err(format!("the token did not work and the previous credential could not be restored: {restore}"));
             }
             Err(format!("the token did not work: {e}"))
         }
