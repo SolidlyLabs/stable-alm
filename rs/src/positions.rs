@@ -12,7 +12,9 @@
 //! APR chart is the change between samples. Before there are samples, the trailing fee sums give a
 //! coarse history (last hour, 1–2 h, 2–4 h, … 7–30 days back). The timeline adds the app's own
 //! transactions (ledger), decisions (executor log) and range exits/entries (cycle snapshots).
-use serde_json::{json, Map, Value};
+use serde::Deserialize;
+use serde_json::{json, value::RawValue, Map, Value};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -78,19 +80,13 @@ fn names() -> HashMap<String, (String, u64)> {
         .collect()
 }
 
-/// The newest cycle snapshot as written (with every position's value and whether it is in range).
-fn last_snapshot() -> Value {
-    let s = std::fs::read_to_string(crate::paths::logs().join("snapshots.jsonl")).unwrap_or_default();
-    s.lines().rev().find_map(|l| serde_json::from_str(l).ok()).unwrap_or(Value::Null)
-}
-
 /// Value now of each of our positions, by (pool, tickLower, tickUpper), from the last cycle.
 fn position_values(snap: &Value) -> HashMap<(String, i64, i64), (f64, bool)> {
     let by_name: HashMap<String, String> = names().into_iter().map(|(a, (n, _))| (n, a)).collect();
     let mut out = HashMap::new();
-    for (name, p) in snap["pools"].as_object().cloned().unwrap_or_default() {
-        let Some(addr) = by_name.get(&name) else { continue };
-        for q in p["positions"].as_array().cloned().unwrap_or_default() {
+    for (name, p) in snap["pools"].as_object().into_iter().flatten() {
+        let Some(addr) = by_name.get(name) else { continue };
+        for q in p["positions"].as_array().into_iter().flatten() {
             let (tl, tu) = (q["tl"].as_i64().unwrap_or(0), q["tu"].as_i64().unwrap_or(0));
             out.insert((addr.clone(), tl, tu), (q["usd"].as_f64().unwrap_or(0.0), q["in_range"].as_bool().unwrap_or(false)));
         }
@@ -118,7 +114,7 @@ fn rewards_cumulative(cid: u64, wallet: &str) -> Result<(Value, Value), String> 
 
 /// One sample of every chain: appended to position_apr.jsonl.
 fn sample(wallet: &str) {
-    let snap = last_snapshot();
+    let snap = crate::snapshots::latest();
     let vals = position_values(&snap);
     let mut f = match std::fs::OpenOptions::new().create(true).append(true).open(track_path()) {
         Ok(f) => f,
@@ -181,17 +177,168 @@ pub fn start() {
     });
 }
 
-fn read_samples(cid: u64, since: u64) -> Vec<Value> {
-    let s = std::fs::read_to_string(track_path()).unwrap_or_default();
-    s.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter(|r| r["chain_id"].as_u64() == Some(cid) && r["ts"].as_u64().unwrap_or(0) >= since).collect()
+type AprPoint = (u64, f64, f64);
+type AprSeries = Vec<(u64, f64)>;
+const SAMPLE_HISTORY_DAYS: u64 = 91;
+static APR_HISTORY: crate::jsonl::Index<AprHistory> = crate::jsonl::Index::new();
+
+#[derive(Deserialize)]
+struct Sample<'a> {
+    ts: u64,
+    chain_id: u64,
+    #[serde(borrow)]
+    p: Option<Vec<EpisodeSample<'a>>>,
+    #[serde(default)]
+    rw: Value,
+    #[serde(default)]
+    px: Value,
+    #[serde(default)]
+    dep: Value,
+}
+
+#[derive(Deserialize)]
+struct EpisodeSample<'a> {
+    #[serde(borrow)]
+    id: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    ep: Option<&'a RawValue>,
+    fees: Option<f64>,
+    usd: Option<f64>,
+    cap: Option<f64>,
+}
+
+#[derive(Default)]
+struct EpisodeHistory {
+    last_sample: usize,
+    points: Vec<AprPoint>,
+}
+
+struct RewardSample {
+    ts: u64,
+    rewards: Value,
+    prices: Value,
+    deployed: Value,
+}
+
+#[derive(Default)]
+struct ChainHistory {
+    samples_seen: usize,
+    samples: Vec<RewardSample>,
+    episodes: HashMap<String, HashMap<String, EpisodeHistory>>,
+}
+
+#[derive(Default)]
+struct AprHistory {
+    chains: HashMap<u64, ChainHistory>,
+    cutoff: u64,
+}
+
+impl AprHistory {
+    fn record(&mut self, line: &[u8], cutoff: u64) {
+        let Ok(row) = serde_json::from_slice::<Sample<'_>>(line) else { return };
+        if row.ts < cutoff {
+            return;
+        }
+        let chain = self.chains.entry(row.chain_id).or_default();
+        chain.samples_seen += 1;
+        for p in row.p.into_iter().flatten() {
+            let Some(id) = p.id else { continue };
+            let key = p.ep.map_or("null", RawValue::get);
+            if !chain.episodes.contains_key(id.as_ref()) {
+                chain.episodes.insert(id.to_string(), HashMap::new());
+            }
+            let episodes = chain.episodes.get_mut(id.as_ref()).unwrap();
+            if !episodes.contains_key(key) {
+                episodes.insert(key.to_string(), EpisodeHistory::default());
+            }
+            let history = episodes.get_mut(key).unwrap();
+            // The original report uses the first occurrence of an episode in a sample.
+            if history.last_sample == chain.samples_seen {
+                continue;
+            }
+            history.last_sample = chain.samples_seen;
+            if let Some(fees) = p.fees {
+                let cap = p.usd.filter(|v| *v > 0.0).or(p.cap).unwrap_or(0.0);
+                history.points.push((row.ts, fees, cap));
+            }
+        }
+        chain.samples.push(RewardSample { ts: row.ts, rewards: row.rw, prices: row.px, deployed: row.dep });
+    }
+
+    fn prune(&mut self, cutoff: u64) {
+        if cutoff <= self.cutoff {
+            return;
+        }
+        for chain in self.chains.values_mut() {
+            chain.samples.retain(|s| s.ts >= cutoff);
+            chain.episodes.retain(|_, episodes| {
+                episodes.retain(|_, e| {
+                    e.points.retain(|p| p.0 >= cutoff);
+                    !e.points.is_empty()
+                });
+                !episodes.is_empty()
+            });
+        }
+        self.cutoff = cutoff;
+    }
+}
+
+impl ChainHistory {
+    fn report(&self, since: u64, positions: &[&Value]) -> (Vec<AprSeries>, Map<String, Value>, usize) {
+        let start = since.saturating_sub(3600);
+        let series = positions.iter().map(|p| {
+            let id = p["positionId"].as_str().unwrap_or("");
+            let ep = p["episodeIndex"].to_string();
+            let points = self.episodes.get(id).and_then(|by_episode| by_episode.get(&ep)).map(|e| e.points.as_slice()).unwrap_or_default();
+            apr_series(points.iter().copied().filter(|p| p.0 >= start)).into_iter().filter(|p| p.0 >= since).collect()
+        }).collect();
+        let samples: Vec<_> = self.samples.iter().filter(|r| r.ts >= start).collect();
+        let mut rewards = Map::new();
+        let pools = samples.iter().filter_map(|r| r.rewards.as_object()).flat_map(|o| o.keys())
+            .collect::<std::collections::BTreeSet<_>>();
+        for pool in pools {
+            let mut points = Vec::new();
+            let mut start: Option<&RewardSample> = None;
+            for r in &samples {
+                if r.rewards[pool].is_null() {
+                    continue;
+                }
+                let Some(s0) = start else { start = Some(r); continue };
+                if r.ts < s0.ts + 3600 {
+                    continue;
+                }
+                let gain: f64 = r.rewards[pool].as_object().into_iter().flatten()
+                    .map(|(t, a)| (a.as_f64().unwrap_or(0.0) - s0.rewards[pool][t].as_f64().unwrap_or(0.0)).max(0.0) * r.prices[t].as_f64().unwrap_or(0.0))
+                    .sum();
+                let dep = r.deployed[pool].as_f64().unwrap_or(0.0);
+                if dep > 1.0 && r.ts >= since {
+                    points.push(json!([r.ts, gain / dep * YEAR_S / (r.ts - s0.ts) as f64 * 100.0]));
+                }
+                start = Some(r);
+            }
+            rewards.insert(pool.clone(), json!(points));
+        }
+        (series, rewards, samples.len())
+    }
+}
+
+fn apr_history(cid: u64, now: u64, since: u64, positions: &[&Value]) -> (Vec<AprSeries>, Map<String, Value>, usize) {
+    let cutoff = (now / 86_400).saturating_sub(SAMPLE_HISTORY_DAYS) * 86_400;
+    APR_HISTORY.read(&track_path(), u64::MAX, |h, line| h.record(line, cutoff), |h| {
+        h.prune(cutoff);
+        match h.chains.get(&cid) {
+            Some(chain) => chain.report(since, positions),
+            None => (vec![Vec::new(); positions.len()], Map::new(), 0),
+        }
+    })
 }
 
 /// APR between samples at least an hour apart: the change in fees (LP share) over the capital.
 /// `points` are (ts, fees so far, capital); a fall in fees (a new episode) restarts the window.
-pub fn apr_series(points: &[(u64, f64, f64)]) -> Vec<(u64, f64)> {
+fn apr_series(points: impl IntoIterator<Item = AprPoint>) -> AprSeries {
     let mut out = vec![];
     let mut start: Option<(u64, f64)> = None;
-    for &(ts, fees, cap) in points {
+    for (ts, fees, cap) in points {
         match start {
             None => start = Some((ts, fees)),
             Some((_, f0)) if fees < f0 - 1e-9 => start = Some((ts, fees)),
@@ -234,8 +381,8 @@ pub fn trailing(intervals: &[Value], cap: f64, now: u64, start: u64) -> Vec<(u64
 fn pool_prices(snap: &Value) -> HashMap<String, (i64, f64)> {
     let by_name: HashMap<String, String> = names().into_iter().map(|(a, (n, _))| (n, a)).collect();
     let mut out = HashMap::new();
-    for (name, p) in snap["pools"].as_object().cloned().unwrap_or_default() {
-        let (Some(addr), Some(tick), Some(px)) = (by_name.get(&name), p["tick"].as_i64(), p["price"].as_f64()) else { continue };
+    for (name, p) in snap["pools"].as_object().into_iter().flatten() {
+        let (Some(addr), Some(tick), Some(px)) = (by_name.get(name), p["tick"].as_i64(), p["price"].as_f64()) else { continue };
         out.insert(addr.clone(), (tick, px));
     }
     out
@@ -249,14 +396,66 @@ fn price_at(tick: i64, d0: i32, d1: i32) -> f64 {
 /// files). An older one is rebuilt, and served only when the rebuild takes over 10 s; None when there
 /// is none yet.
 pub fn view(wallet: &str, days: u64) -> Option<Value> {
+    if ![1, 7, 30, 90].contains(&days) {
+        return Some(build(wallet, days));
+    }
     let w = wallet.to_string();
-    crate::store::background_fresh(&format!("positions_view_{}_{days}", w.to_lowercase()), 30, Duration::from_secs(10), move || Ok(build(&w, days)))
+    crate::store::background_fresh(&format!("positions_view_{}_{}_{days}", crate::paths::wallet(), w.to_lowercase()), 30, Duration::from_secs(10), move || Ok(build(&w, days)))
+}
+
+fn window_episodes(earnings: &Value, since: u64) -> impl Iterator<Item = &Value> {
+    earnings["positions"].as_array().into_iter().flatten().filter(move |p| {
+        p["closed"] != true || ts_of(&p["episodeEndTimestamp"]).unwrap_or(0) >= since
+    })
+}
+
+fn interval_fee(intervals: &[Value], window: &str) -> Option<f64> {
+    intervals.iter().find(|i| i["aggregationInterval"] == window).map(|i| LP_SHARE * crate::prices::fnum(&i["feesUSD"]))
+}
+
+/// Fee cards use cached earnings and the latest snapshot. They do not need APR or event history.
+pub fn fee_summary(wallet: &str) -> Value {
+    let now = crate::engine::now();
+    let last = position_values(&crate::snapshots::latest());
+    let mut totals = [0.0; 3];
+    let mut by_pool: HashMap<String, [f64; 3]> = HashMap::new();
+    let (mut live, mut in_range, mut live_usd, mut in_range_usd) = (0, 0, 0.0, 0.0);
+    let mut available = false;
+    for cid in chains() {
+        let Ok(e) = earnings(cid, wallet) else { continue };
+        available = true;
+        for p in window_episodes(&e, now.saturating_sub(30 * 86_400)) {
+            let pool = p["poolId"].as_str().unwrap_or("").to_lowercase();
+            let intervals = p["intervals"].as_array().map(Vec::as_slice).unwrap_or_default();
+            let pool_fees = by_pool.entry(pool.clone()).or_default();
+            for (i, window) in ["HOUR_24", "DAY_7", "DAY_30"].into_iter().enumerate() {
+                let fee = interval_fee(intervals, window).unwrap_or(0.0);
+                totals[i] += fee;
+                pool_fees[i] += fee;
+            }
+            if p["closed"] != true {
+                live += 1;
+                let key = (pool, int(&p["tickLower"]).unwrap_or(0), int(&p["tickUpper"]).unwrap_or(0));
+                if let Some(&(usd, active)) = last.get(&key) {
+                    live_usd += usd;
+                    if active {
+                        in_range += 1;
+                        in_range_usd += usd;
+                    }
+                }
+            }
+        }
+    }
+    let fees = |f: [f64; 3]| json!({"h24": f[0], "d7": f[1], "d30": f[2]});
+    let by_pool: Map<String, Value> = by_pool.into_iter().map(|(pool, f)| (pool, fees(f))).collect();
+    json!({"totals": available.then(|| fees(totals)), "by_pool": by_pool,
+           "live": live, "in_range": in_range, "live_usd": live_usd, "in_range_usd": in_range_usd})
 }
 
 fn build(wallet: &str, days: u64) -> Value {
     let now = crate::engine::now();
     let since = now.saturating_sub(days * 86400);
-    let snap = last_snapshot();
+    let snap = crate::snapshots::latest();
     let vals = position_values(&snap);
     let now_px = pool_prices(&snap);
     let names = names();
@@ -270,29 +469,20 @@ fn build(wallet: &str, days: u64) -> Value {
             }
         };
         let n = crate::prices::fnum;
-        let samples = read_samples(cid, since.saturating_sub(3600));
+        let episodes: Vec<_> = window_episodes(&e, since).collect();
+        let (series, rewards, samples) = apr_history(cid, now, since, &episodes);
         let mut positions = vec![];
-        for p in e["positions"].as_array().cloned().unwrap_or_default() {
+        for (p, series) in episodes.into_iter().zip(series) {
             let pool = p["poolId"].as_str().unwrap_or("").to_lowercase();
             let (tl, tu) = (int(&p["tickLower"]).unwrap_or(0), int(&p["tickUpper"]).unwrap_or(0));
             let (start, end) = (ts_of(&p["episodeStartTimestamp"]).unwrap_or(0), ts_of(&p["episodeEndTimestamp"]));
             let closed = p["closed"].as_bool().unwrap_or(false);
-            if closed && end.unwrap_or(0) < since {
-                continue;
-            }
             // the value now belongs to the live episode only (a closed one may share its ticks)
             let now_val = if closed { None } else { vals.get(&(pool.clone(), tl, tu)).copied() };
             let (usd, in_range) = now_val.map(|(u, r)| (Some(u), Some(r))).unwrap_or((None, None));
             let cap = n(&p["averageCapitalUSD"]);
             let id = p["positionId"].as_str().unwrap_or("").to_string();
-            let ep = p["episodeIndex"].clone();
-            let pts: Vec<(u64, f64, f64)> = samples
-                .iter()
-                .filter_map(|r| {
-                    let q = r["p"].as_array()?.iter().find(|q| q["id"] == id.as_str() && q["ep"] == ep)?.clone();
-                    Some((r["ts"].as_u64()?, q["fees"].as_f64()?, q["usd"].as_f64().filter(|u| *u > 0.0).unwrap_or(q["cap"].as_f64().unwrap_or(0.0))))
-                })
-                .collect();
+            let ep = &p["episodeIndex"];
             let tokens = crate::chain::pool_tokens(cid, &pool).ok();
             let metas = tokens.as_ref().and_then(|(a, b)| Some((crate::prices::meta(cid, a).ok()?, crate::prices::meta(cid, b).ok()?)));
             let (sym, range, price_now) = match &metas {
@@ -305,8 +495,8 @@ fn build(wallet: &str, days: u64) -> Value {
                 None => (Value::Null, Value::Null, None),
             };
             let tick_now = now_px.get(&pool).filter(|_| !closed).map(|(t, _)| *t);
-            let intervals = p["intervals"].as_array().cloned().unwrap_or_default();
-            let lp = |k: &str| intervals.iter().find(|i| i["aggregationInterval"] == k).map(|i| LP_SHARE * n(&i["feesUSD"]));
+            let intervals = p["intervals"].as_array().map(Vec::as_slice).unwrap_or_default();
+            let lp = |k: &str| interval_fee(intervals, k);
             let base = usd.filter(|u| *u > 0.0).unwrap_or(cap);
             positions.push(json!({
                 "id": id, "episode": ep, "pool": pool, "name": names.get(&pool).map(|x| x.0.clone()), "symbols": sym, "tl": tl, "tu": tu, "prices": range,
@@ -317,44 +507,12 @@ fn build(wallet: &str, days: u64) -> Value {
                 "fees_24h": lp("HOUR_24"), "fees_7d": lp("DAY_7"), "fees_30d": lp("DAY_30"),
                 "apr_24h": lp("HOUR_24").filter(|_| base > 0.0).map(|f| f / base * 365.0 * 100.0),
                 "apr_7d": lp("DAY_7").filter(|_| base > 0.0).map(|f| f / base * 365.0 / 7.0 * 100.0),
-                "series": apr_series(&pts).into_iter().filter(|x| x.0 >= since).map(|(t, a)| json!([t, a])).collect::<Vec<_>>(),
-                "trailing": if closed { vec![] } else { trailing(&intervals, base, now, start).into_iter().filter(|x| x.1 >= since).map(|(a, b, c)| json!([a, b, c])).collect::<Vec<_>>() },
+                "series": series,
+                "trailing": if closed { vec![] } else { trailing(intervals, base, now, start).into_iter().filter(|x| x.1 >= since).map(|(a, b, c)| json!([a, b, c])).collect::<Vec<_>>() },
             }));
         }
-        // rewards per pool: the change in cumulative emissions (at the newer sample's prices) over the
-        // money deployed in the pool, between samples at least an hour apart
-        let mut rewards: Map<String, Value> = Map::new();
-        let pools: Vec<String> = samples.iter().filter_map(|r| r["rw"].as_object()).flat_map(|o| o.keys().cloned()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
-        for pool in pools {
-            let mut pts = vec![];
-            let mut start: Option<&Value> = None;
-            for r in &samples {
-                if r["rw"][&pool].is_null() {
-                    continue;
-                }
-                match start {
-                    None => start = Some(r),
-                    Some(s0) if r["ts"].as_u64().unwrap_or(0) >= s0["ts"].as_u64().unwrap_or(0) + 3600 => {
-                        let dt = (r["ts"].as_u64().unwrap_or(0) - s0["ts"].as_u64().unwrap_or(0)) as f64;
-                        let gain: f64 = r["rw"][&pool]
-                            .as_object()
-                            .into_iter()
-                            .flatten()
-                            .map(|(t, a)| (a.as_f64().unwrap_or(0.0) - s0["rw"][&pool][t].as_f64().unwrap_or(0.0)).max(0.0) * r["px"][t].as_f64().unwrap_or(0.0))
-                            .sum();
-                        let dep = r["dep"][&pool].as_f64().unwrap_or(0.0);
-                        if dep > 1.0 {
-                            pts.push(json!([r["ts"], gain / dep * YEAR_S / dt * 100.0]));
-                        }
-                        start = Some(r);
-                    }
-                    _ => {}
-                }
-            }
-            rewards.insert(pool, json!(pts.into_iter().filter(|x| x[0].as_u64().unwrap_or(0) >= since).collect::<Vec<_>>()));
-        }
         out.push(json!({"chain_id": cid, "explorer": crate::chains::get(cid).explorer, "as_of": e["asOfTimestamp"], "positions": positions,
-                        "rewards": rewards, "samples": samples.len()}));
+                        "rewards": rewards, "samples": samples}));
     }
     json!({"now": now, "days": days, "lp_share": LP_SHARE, "chains": out, "events": events(wallet, since)})
 }
@@ -433,32 +591,6 @@ fn top_up_wallet_events(cid: u64, wallet: &str) -> Vec<Value> {
     rows
 }
 
-/// Range exits and entries of every pool, from the cycle snapshots.
-fn range_changes(since: u64) -> Vec<Value> {
-    let s = std::fs::read_to_string(crate::paths::logs().join("snapshots.jsonl")).unwrap_or_default();
-    let by_name: HashMap<String, (String, u64)> = names().into_iter().map(|(a, (n, c))| (n, (a, c))).collect();
-    let mut last: HashMap<String, bool> = HashMap::new();
-    let mut out = vec![];
-    for l in s.lines() {
-        // most lines are older than the window: check the timestamp before parsing the whole line
-        let Ok(r) = serde_json::from_str::<Value>(l) else { continue };
-        let ts = r["ts"].as_u64().unwrap_or(0);
-        for (name, p) in r["pools"].as_object().cloned().unwrap_or_default() {
-            if p["positions"].as_array().map(|a| a.is_empty()).unwrap_or(true) {
-                continue;
-            }
-            let now_in = p["in_range"].as_bool().unwrap_or(false);
-            if let Some(was) = last.insert(name.clone(), now_in) {
-                if was != now_in && ts >= since {
-                    let (pool, cid) = by_name.get(&name).cloned().unwrap_or_default();
-                    out.push(json!({"ts": ts, "chain_id": cid, "kind": if now_in { "range_enter" } else { "range_exit" }, "pool": pool, "name": name, "tick": p["tick"]}));
-                }
-            }
-        }
-    }
-    out
-}
-
 /// Every event since `since`, newest first: mints and burns (Solidly UI history), the app's other
 /// transactions (claims, swaps, approvals: the ledger), its decisions (executor log) and range changes.
 fn events(wallet: &str, since: u64) -> Vec<Value> {
@@ -521,7 +653,8 @@ fn events(wallet: &str, since: u64) -> Vec<Value> {
         v["name"] = json!(names.get(&pool).map(|x| x.0.clone()));
         out.push(v);
     }
-    out.extend(range_changes(since));
+    let by_name = names.iter().map(|(a, (n, c))| (n.as_str(), (a.as_str(), *c))).collect();
+    out.extend(crate::snapshots::range_changes(since, &by_name));
     out.sort_by(|a, b| b["ts"].as_u64().cmp(&a["ts"].as_u64()));
     out.truncate(600);
     out
@@ -534,7 +667,7 @@ mod tests {
     #[test]
     fn apr_between_samples_an_hour_apart_and_a_new_episode_restarts() {
         // $1000 earning $1 gross over 2 hours: 0.8 × 1/1000 × (year / 2 h)
-        let s = apr_series(&[(0, 0.0, 1000.0), (1800, 0.3, 1000.0), (7200, 1.0, 1000.0), (9000, 0.0, 1000.0), (12600, 0.5, 1000.0)]);
+        let s = apr_series([(0, 0.0, 1000.0), (1800, 0.3, 1000.0), (7200, 1.0, 1000.0), (9000, 0.0, 1000.0), (12600, 0.5, 1000.0)]);
         assert_eq!(s.len(), 2);
         assert!((s[0].1 - 0.8 * 0.001 * YEAR_S / 7200.0 * 100.0).abs() < 1e-9);
         assert_eq!(s[1].0, 12600);

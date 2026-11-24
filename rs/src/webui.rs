@@ -7,7 +7,7 @@ use crate::settings::{self, load_pools, load_settings, save_settings};
 use crate::worker::{pool_chain, Worker};
 use serde_json::{json, Value};
 use std::io::Read;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use tiny_http::{Header, Method, Request, Response, Server};
 
 const INDEX: &str = include_str!("../static/index.html");
@@ -309,7 +309,7 @@ fn wallet_of(path: &str, query: &str) -> Result<String, String> {
 }
 
 /// Every wallet's card and the totals over them (the Overview's "All wallets").
-fn wallets_overview(w: &Arc<Worker>) -> Value {
+fn wallets_overview(w: &Arc<Worker>, history: bool) -> Value {
     let chains = crate::chains::as_json();
     let min_gas = |id: u64| chains.as_array().and_then(|a| a.iter().find(|c| c["id"].as_u64() == Some(id))).and_then(|c| c["min_gas"].as_f64()).unwrap_or(0.0);
     let cards: Vec<Value> = crate::wallets::list()
@@ -317,7 +317,16 @@ fn wallets_overview(w: &Arc<Worker>) -> Value {
         .map(|meta| {
             let id = meta["id"].as_str().unwrap_or(crate::paths::MAIN).to_string();
             crate::paths::scope(&id, || {
-                let mut c = crate::wallets::summary(meta, &w.status_of(&id), &load_settings(), &crate::signer::status(), &load_pools(), &snapshots(),
+                let settings = load_settings();
+                let pools = load_pools();
+                let mut status = w.status_of(&id);
+                let snapshots = if history {
+                    status["ledger"] = crate::ledger::view(settings["wallet"].as_str().unwrap_or(""), &pools);
+                    crate::snapshots::overview()
+                } else {
+                    Vec::new()
+                };
+                let mut c = crate::wallets::summary(meta, &status, &settings, &crate::signer::status(), &pools, &snapshots,
                                                     crate::capital::requests().len(), &min_gas, engine::now() as i64);
                 c["paused"] = json!(crate::paths::wallet_pause_file().exists());
                 c
@@ -342,92 +351,6 @@ fn tail_text(p: &std::path::Path, n: usize) -> Vec<String> {
     lines[lines.len().saturating_sub(n)..].to_vec()
 }
 
-type Stamp = (u64, std::time::SystemTime);
-static SNAPS: Mutex<Option<std::collections::HashMap<std::path::PathBuf, (Stamp, Vec<Value>)>>> = Mutex::new(None);
-
-/// The chart series of the current wallet, re-read only when its snapshots.jsonl changes (once a
-/// cycle), not on every poll.
-fn snapshots() -> Vec<Value> {
-    let p = crate::paths::logs().join("snapshots.jsonl");
-    let stamp = std::fs::metadata(&p).ok().map(|m| (m.len(), m.modified().unwrap_or(std::time::UNIX_EPOCH)));
-    if let Some(st) = stamp {
-        if let Some((k, v)) = SNAPS.lock().unwrap().get_or_insert_with(Default::default).get(&p) {
-            if *k == st {
-                return v.clone();
-            }
-        }
-    }
-    let rows = snapshots_read(&p);
-    if let Some(st) = stamp {
-        SNAPS.lock().unwrap().get_or_insert_with(Default::default).insert(p, (st, rows.clone()));
-    }
-    rows
-}
-
-fn snapshots_read(p: &std::path::Path) -> Vec<Value> {
-    let s = std::fs::read_to_string(p).unwrap_or_default();
-    let rows: Vec<Value> = s.lines().rev().take(20000).filter_map(|l| serde_json::from_str(l).ok()).collect::<Vec<_>>().into_iter().rev().collect();
-    let rows = clean_history(rows);
-    let step = (rows.len() / 600).max(1);
-    let mut keep: Vec<&Value> = rows.iter().step_by(step).collect();
-    if !rows.is_empty() && (rows.len() - 1) % step != 0 {
-        keep.push(rows.last().unwrap());
-    }
-    keep.iter()
-        .map(|r| {
-            let idle: f64 = r["tokens"].as_object().map(|t| t.values().map(|x| x["usd"].as_f64().unwrap_or(0.0)).sum()).unwrap_or(0.0);
-            let pools: serde_json::Map<String, Value> =
-                r["pools"].as_object().map(|p| p.iter().map(|(k, v)| (k.clone(), v["deployed_usd"].clone())).collect()).unwrap_or_default();
-            let chains: serde_json::Map<String, Value> =
-                r["chains"].as_object().map(|c| c.iter().map(|(k, v)| (k.clone(), v["total_usd"].clone())).collect()).unwrap_or_default();
-            json!({"ts": r["ts"], "total_usd": r["total_usd"], "mode": r["mode"], "value_usd": r["value_usd"], "rewards_usd": r["rewards_usd"],
-                   "solid_usd": r["solid_usd"], "idle_usd": idle, "pools": pools, "chains": chains})
-        })
-        .collect()
-}
-
-/// The value history without the cycles that were mis-measured, as they are read (the file keeps every
-/// line): a cycle whose valuation was incomplete (a pool, balance or parked lot could not be read, so
-/// the total lacks it; each chain lists those in `incomplete`, written since 0.3), and a dip or spike
-/// of one to three cycles that the cycles either side of it, agreeing with each other, contradict.
-/// Money moved in or out is a step, not a V, and stays.
-fn clean_history(rows: Vec<Value>) -> Vec<Value> {
-    const AGREE: f64 = 0.01; // the flanks within 1% of each other
-    const OFF: f64 = 0.03; // every cycle of the run at least 3% away from them
-    let flagged = |r: &Value| r["chains"].as_object().is_some_and(|c| c.values().any(|v| v["incomplete"].as_array().is_some_and(|a| !a.is_empty())));
-    let rows: Vec<Value> = rows.into_iter().filter(|r| !flagged(r)).collect();
-    let v = |r: &Value| r["value_usd"].as_f64().or_else(|| r["total_usd"].as_f64()).unwrap_or(0.0);
-    let mut drop = vec![false; rows.len()];
-    let mut i = 1;
-    while i + 1 < rows.len() {
-        let mut hit = 0;
-        for k in 1..=3 {
-            if i + k >= rows.len() {
-                break;
-            }
-            let (a, b) = (v(&rows[i - 1]), v(&rows[i + k]));
-            let mid = (a + b) / 2.0;
-            if mid <= 0.0 || (a - b).abs() > AGREE * a.max(b) {
-                continue;
-            }
-            let run = &rows[i..i + k];
-            let below = run.iter().all(|r| v(r) < mid * (1.0 - OFF));
-            let above = run.iter().all(|r| v(r) > mid * (1.0 + OFF));
-            if below || above {
-                hit = k;
-                break;
-            }
-        }
-        if hit > 0 {
-            drop[i..i + hit].iter_mut().for_each(|d| *d = true);
-            i += hit;
-        } else {
-            i += 1;
-        }
-    }
-    rows.into_iter().zip(drop).filter(|(_, d)| !d).map(|(r, _)| r).collect()
-}
-
 fn configured() -> Vec<(u64, String)> {
     load_pools().iter().map(|p| (pool_chain(p), p["pool"].as_str().unwrap_or("").to_lowercase())).collect()
 }
@@ -436,7 +359,7 @@ fn get(path: &str, w: &Arc<Worker>) -> (u16, Value) {
     let s = load_settings();
     let wallet = s["wallet"].as_str().unwrap_or("").to_string();
     match path {
-        "/api/status" => {
+        "/api/status" | "/api/status/brief" => {
             let events: Vec<Value> = engine::log_tail(400_000).into_iter().rev().take(150).collect();
             let mut rewards = json!({});
             let mut total = 0.0;
@@ -455,15 +378,23 @@ fn get(path: &str, w: &Arc<Worker>) -> (u16, Value) {
             let errors: Vec<String> = tail_text(&crate::paths::app_logs().join("errors.log"), 80).into_iter().rev().collect();
             let id = crate::paths::wallet();
             let me = crate::wallets::list().into_iter().find(|x| x["id"] == id.as_str()).unwrap_or(json!({"id": id}));
-            (200, json!({"worker": w.status_of(&id), "wallet": me, "wallets": crate::wallets::list(),
-                         "settings": s, "pools": load_pools(), "signer": crate::signer::status(),
-                         "paused": crate::paths::stop_file().exists(), "wallet_paused": crate::paths::wallet_pause_file().exists(), "events": events, "errors": errors, "snapshots": snapshots(),
+            let pools = load_pools();
+            let mut status = w.status_of(&id);
+            let snapshots = if path == "/api/status" {
+                status["ledger"] = crate::ledger::view(&wallet, &pools);
+                crate::snapshots::overview()
+            } else {
+                Vec::new()
+            };
+            (200, json!({"worker": status, "wallet": me, "wallets": crate::wallets::list(),
+                         "settings": s, "pools": pools, "signer": crate::signer::status(),
+                         "paused": crate::paths::stop_file().exists(), "wallet_paused": crate::paths::wallet_pause_file().exists(), "events": events, "errors": errors, "snapshots": snapshots,
                          "rewards": rw, "chains": crate::chains::as_json(), "now": engine::now(), "runtime": "rust",
                          "ladder_defaults": crate::ladder::plain_defaults(), "update": crate::update::status(), "pool_defaults": settings::pool_defaults()}))
         }
         "/api/chains" => (200, json!({"chains": crate::chains::as_json()})),
         "/api/ui_prefs" => (200, ui_prefs()),
-        "/api/wallets" => (200, wallets_overview(w)),
+        "/api/wallets" | "/api/wallets/brief" => (200, wallets_overview(w, path == "/api/wallets")),
         "/api/update" => (200, crate::update::status()),
         "/api/onboard" => (200, crate::onboard::status()),
         "/api/onboard/parking" => (200, crate::onboard::parking_suggestions()),
@@ -498,6 +429,7 @@ fn get(path: &str, w: &Arc<Worker>) -> (u16, Value) {
             }
         }
         // the Positions tab: /api/positions or /api/positions/<days> (1 to 90)
+        "/api/positions/fees" => (200, crate::positions::fee_summary(&wallet)),
         p if p == "/api/positions" || p.starts_with("/api/positions/") => {
             let days = p.strip_prefix("/api/positions/").and_then(|d| d.parse::<u64>().ok()).unwrap_or(30).clamp(1, 90);
             match crate::positions::view(&wallet, days) {
@@ -518,7 +450,7 @@ fn get(path: &str, w: &Arc<Worker>) -> (u16, Value) {
         // put in and taken out kept apart, its series, flows, fees and costs (agent::perf)
         p if p == "/api/pool_stats" || p.starts_with("/api/pool_stats/") => {
             let days = p.strip_prefix("/api/pool_stats/").and_then(|d| d.parse::<i64>().ok()).unwrap_or(30).clamp(0, 400);
-            let led = w.status_of(&crate::paths::wallet())["ledger"].clone();
+            let led = crate::ledger::view(&wallet, &load_pools());
             let mut costs: std::collections::HashMap<String, Vec<(i64, f64, f64)>> = Default::default();
             for ch in led.as_object().into_iter().flat_map(|m| m.values()) {
                 for (pool, b) in ch["by_pool"].as_object().into_iter().flatten() {
@@ -1070,29 +1002,6 @@ mod tests {
         assert_eq!(super::set_limits(pools.clone(), &json!({"chain_id": 10, "pool": "0x00000000000000000000000000000000000000a1"})).unwrap().1, 0);
         // out of range is refused as the Pools card would
         assert!(super::set_limits(pools, &json!({"chain_id": 8453, "pool": "0x00000000000000000000000000000000000000a1", "max_actions_per_day": 5000.0})).is_err());
-    }
-
-    #[test]
-    fn the_value_history_leaves_out_mis_measured_cycles_and_keeps_real_moves() {
-        let row = |ts: u64, v: f64| json!({"ts": ts, "total_usd": v, "value_usd": v, "chains": {"8453": {"incomplete": []}}});
-        let ts = |rows: &[Value]| rows.iter().map(|r| r["ts"].as_u64().unwrap()).collect::<Vec<_>>();
-        // one cycle where a pool could not be read: flagged, left out
-        let mut bad = row(3, 6000.0);
-        bad["chains"]["8453"]["incomplete"] = json!(["usdc-usdt: rate limited"]);
-        let h = clean_history(vec![row(1, 15000.0), row(2, 15010.0), bad, row(4, 15005.0)]);
-        assert_eq!(ts(&h), [1, 2, 4]);
-        // the same dip without the flag (an old file, or an answer that was wrong but not an error)
-        let h = clean_history(vec![row(1, 15000.0), row(2, 15010.0), row(3, 6000.0), row(4, 15005.0), row(5, 15002.0)]);
-        assert_eq!(ts(&h), [1, 2, 4, 5]);
-        // two and three cycles low, and a one-cycle spike
-        let h = clean_history(vec![row(1, 100.0), row(2, 60.0), row(3, 61.0), row(4, 100.5), row(5, 160.0), row(6, 100.2)]);
-        assert_eq!(ts(&h), [1, 4, 6]);
-        // a withdrawal is a step: kept, and so is ordinary noise under 3%
-        let h = clean_history(vec![row(1, 15000.0), row(2, 9000.0), row(3, 9001.0), row(4, 9002.0), row(5, 8900.0), row(6, 9003.0)]);
-        assert_eq!(ts(&h), [1, 2, 3, 4, 5, 6]);
-        // the newest cycle has no cycle after it to judge it by: kept until the next one
-        let h = clean_history(vec![row(1, 100.0), row(2, 100.0), row(3, 40.0)]);
-        assert_eq!(ts(&h), [1, 2, 3]);
     }
 
     #[test]

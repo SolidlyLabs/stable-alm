@@ -18,14 +18,16 @@
 //! in the balance.
 
 use serde_json::{json, Map, Value};
+use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const TRANSFER: &str = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 
-/// per wallet (wallets.rs): the totals, when they were computed and how long the executor log was then
-static LAST: Mutex<Option<std::collections::HashMap<String, (Instant, u64, Value)>>> = Mutex::new(None);
+type LedgerStamp = (u64, Option<std::time::SystemTime>);
+/// Per wallet: when totals were computed and which receipt file they used.
+static LAST: Mutex<Option<HashMap<String, (Instant, Option<LedgerStamp>, Value)>>> = Mutex::new(None);
 
 /// Forget the cached totals: a transaction was just sent, so the next read recomputes them rather
 /// than show figures from before it for up to ten minutes.
@@ -75,78 +77,140 @@ fn digest(r: &Value, wallet: &str) -> Value {
     json!({"gas_wei": gas, "moves": moves, "status": r["status"]})
 }
 
-/// Fetch and cache receipts for every sent transaction not seen yet.
-fn sync(wallet: &str) -> Map<String, Value> {
-    let mut cache: Map<String, Value> =
-        std::fs::read_to_string(path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-    let mut todo: BTreeMap<u64, Vec<(String, String, Value)>> = BTreeMap::new();
-    let mut changed = false;
-    for e in crate::engine::log_tail(64 << 20) {
-        if e["kind"] != "sent" {
-            continue;
+struct Sent {
+    what: String,
+    metadata: Value,
+}
+
+#[derive(Default)]
+struct Receipts {
+    cached: Option<Map<String, Value>>,
+    pending: BTreeMap<u64, BTreeMap<String, Sent>>,
+    dirty: bool,
+}
+
+static RECEIPTS: crate::jsonl::Index<Receipts> = crate::jsonl::Index::new();
+
+fn with_receipts<R>(use_receipts: impl FnOnce(&mut Receipts) -> R) -> R {
+    RECEIPTS.read(&crate::engine::log_path(), 64 << 20, Receipts::record, use_receipts)
+}
+
+impl Receipts {
+    fn entries(&mut self) -> &mut Map<String, Value> {
+        self.cached.get_or_insert_with(|| {
+            std::fs::read_to_string(path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+        })
+    }
+
+    fn record(&mut self, line: &[u8]) {
+        if !std::str::from_utf8(line).is_ok_and(|s| s.contains("\"sent\"")) {
+            return;
         }
-        let Some(h) = e["hash"].as_str().map(|s| s.to_lowercase()) else { continue };
-        if let Some(d) = cache.get_mut(&h) {
+        let Ok(e) = serde_json::from_slice::<Value>(line) else { return };
+        if e["kind"] != "sent" {
+            return;
+        }
+        let Some(h) = e["hash"].as_str().map(str::to_lowercase) else { return };
+        if let Some(d) = self.entries().get_mut(&h) {
+            let mut changed = false;
             for k in ["ts", "block", "pool", "ref"] {
                 if d.get(k).map(|v| v.is_null()).unwrap_or(true) && !e[k].is_null() {
                     d[k] = e[k].clone();
                     changed = true;
                 }
             }
-            continue;
+            self.dirty |= changed;
+            return;
         }
         let cid = e["chain_id"].as_u64().unwrap_or(crate::chains::BASE);
-        todo.entry(cid).or_default().push((h, e["what"].as_str().unwrap_or("").to_string(), json!({"ts": e["ts"], "block": e["block"], "pool": e["pool"], "ref": e["ref"]})));
+        self.pending.entry(cid).or_default().entry(h).or_insert_with(|| Sent {
+            what: e["what"].as_str().unwrap_or("").to_string(),
+            metadata: json!({"ts": e["ts"], "block": e["block"], "pool": e["pool"], "ref": e["ref"]}),
+        });
     }
-    for (cid, txs) in todo {
-        for part in txs.chunks(25) {
-            let calls: Vec<(&str, Value)> = part.iter().map(|(h, _, _)| ("eth_getTransactionReceipt", json!([h]))).collect();
-            let Ok(res) = crate::rpc::batch(cid, &calls) else { continue };
-            for ((h, what, ts), r) in part.iter().zip(res) {
-                if let Ok(r) = r {
-                    if r.is_object() {
-                        let mut d = digest(&r, wallet);
-                        d["chain_id"] = json!(cid);
-                        d["what"] = json!(what);
-                        for k in ["ts", "block", "pool", "ref"] {
-                            d[k] = ts[k].clone();
-                        }
-                        cache.insert(h.clone(), d);
-                        changed = true;
+
+    fn sync(&mut self, wallet: &str) {
+        let mut received = Vec::new();
+        for (&cid, txs) in &self.pending {
+            let txs: Vec<_> = txs.iter().collect();
+            for part in txs.chunks(25) {
+                let calls: Vec<_> = part.iter().map(|(h, _)| ("eth_getTransactionReceipt", json!([h]))).collect();
+                let Ok(results) = crate::rpc::batch(cid, &calls) else { continue };
+                for (&(h, sent), r) in part.iter().zip(results) {
+                    let Ok(r) = r else { continue };
+                    if !r.is_object() {
+                        continue;
                     }
+                    let mut d = digest(&r, wallet);
+                    d["chain_id"] = json!(cid);
+                    d["what"] = json!(sent.what);
+                    for k in ["ts", "block", "pool", "ref"] {
+                        d[k] = sent.metadata[k].clone();
+                    }
+                    received.push((cid, h.clone(), d));
                 }
             }
         }
-    }
-    if changed {
-        let _ = std::fs::write(path(), Value::Object(cache.clone()).to_string());
-    }
-    cache
-}
-
-/// Token prices over time, from the wallet balances in the snapshots: (chain, token) -> [(ts, usd)].
-fn price_history() -> HashMap<(u64, String), Vec<(i64, f64)>> {
-    let mut out: HashMap<(u64, String), Vec<(i64, f64)>> = HashMap::new();
-    let Ok(text) = std::fs::read_to_string(crate::paths::logs().join("snapshots.jsonl")) else { return out };
-    for l in text.lines() {
-        let Ok(s) = serde_json::from_str::<Value>(l) else { continue };
-        let ts = s["ts"].as_i64().unwrap_or(0);
-        for t in s["tokens"].as_object().into_iter().flat_map(|m| m.values()) {
-            let (Some(a), Some(amt), Some(u)) = (t["address"].as_str(), t["amount"].as_f64(), t["usd"].as_f64()) else { continue };
-            if amt > 0.0 && u > 0.0 {
-                let cid = t["chain_id"].as_u64().unwrap_or(crate::chains::BASE);
-                out.entry((cid, a.to_lowercase())).or_default().push((ts, u / amt));
-            }
+        self.dirty |= !received.is_empty();
+        for (cid, h, d) in received {
+            self.pending.get_mut(&cid).unwrap().remove(&h);
+            self.entries().insert(h, d);
+        }
+        self.pending.retain(|_, txs| !txs.is_empty());
+        if self.dirty && crate::settings::write_atomic(&path(), &Value::Object(self.entries().clone())).is_ok() {
+            self.dirty = false;
         }
     }
-    out
+}
+
+/// Save new receipts even with the dashboard closed.
+pub fn record_receipts(wallet: &str) {
+    with_receipts(|r| r.sync(wallet));
+}
+
+type PriceHistory = HashMap<(u64, String), Vec<(i64, f64)>>;
+static PRICES: crate::jsonl::Index<PriceHistory> = crate::jsonl::Index::new();
+
+#[derive(Deserialize)]
+struct PriceRow<'a> {
+    ts: Option<i64>,
+    #[serde(borrow)]
+    tokens: Option<HashMap<String, Balance<'a>>>,
+}
+
+#[derive(Deserialize)]
+struct Balance<'a> {
+    address: Option<&'a str>,
+    amount: Option<f64>,
+    usd: Option<f64>,
+    chain_id: Option<u64>,
+}
+
+fn price_history() -> PriceHistory {
+    PRICES.read(&crate::paths::logs().join("snapshots.jsonl"), u64::MAX, |out, line| {
+        let Ok(row) = serde_json::from_slice::<PriceRow<'_>>(line) else { return };
+        let ts = row.ts.unwrap_or(0);
+        for (_, balance) in row.tokens.into_iter().flatten() {
+            let (Some(a), Some(amt), Some(u)) = (balance.address, balance.amount, balance.usd) else { continue };
+            if amt > 0.0 && u > 0.0 {
+                let cid = balance.chain_id.unwrap_or(crate::chains::BASE);
+                let samples = out.entry((cid, a.to_lowercase())).or_default();
+                if samples.last().is_none_or(|(last, _)| *last < ts) {
+                    samples.push((ts, u / amt));
+                } else if let Err(i) = samples.binary_search_by_key(&ts, |(t, _)| *t) {
+                    samples.insert(i, (ts, u / amt));
+                }
+            }
+        }
+    }, |out| out.clone())
 }
 
 /// The token's price nearest to `ts` (within 12 hours), else today's.
 fn price_at(hist: &HashMap<(u64, String), Vec<(i64, f64)>>, cid: u64, token: &str, ts: Option<i64>) -> Option<f64> {
     if let (Some(ts), Some(v)) = (ts, hist.get(&(cid, token.to_string()))) {
-        if let Some(&(t, p)) = v.iter().min_by_key(|(t, _)| (t - ts).abs()) {
-            if (t - ts).abs() <= 12 * 3600 {
+        let i = v.partition_point(|(t, _)| *t < ts);
+        if let Some(&(t, p)) = v[..i].last().into_iter().chain(v.get(i)).min_by_key(|(t, _)| t.abs_diff(ts)) {
+            if t.abs_diff(ts) <= 12 * 3600 {
                 return Some(p);
             }
         }
@@ -351,18 +415,22 @@ fn il_cost(cid: u64, wallet: &str, hist: &HashMap<(u64, String), Vec<(i64, f64)>
 }
 
 /// Per-chain totals: {"<chain id>": {earned_usd, claimed_usd, claimable_usd, gas_usd, swap_cost_usd,
-/// profit_usd, txs, claims, swaps, since (the first position event)}}. Recomputed at most every 10 minutes.
+/// profit_usd, txs, claims, swaps, since (the first position event)}}. Cached until receipts
+/// change or the figures are ten minutes old.
 pub fn summary(wallet: &str, chains: &[u64]) -> Value {
-    // a new transaction (the executor log grew) recomputes them once they are half a minute old
-    let log_len = std::fs::metadata(crate::paths::logs().join("executor.jsonl")).map(|m| m.len()).unwrap_or(0);
-    if let Some((t, n, v)) = LAST.lock().unwrap().get_or_insert_with(Default::default).get(&crate::paths::wallet()) {
-        if t.elapsed() < Duration::from_secs(600) && (*n == log_len || t.elapsed() < Duration::from_secs(30)) {
+    let stamp = || std::fs::metadata(path()).ok().map(|m| (m.len(), m.modified().ok()));
+    let before = stamp();
+    if let Some((t, saved, v)) = LAST.lock().unwrap().get_or_insert_with(Default::default).get(&crate::paths::wallet()) {
+        if t.elapsed() < Duration::from_secs(600) && *saved == before && chains.iter().all(|id| v.get(id.to_string()).is_some()) {
             return v.clone();
         }
     }
     let wallet = wallet.to_lowercase();
-    let cache = sync(&wallet);
-    let hist = price_history();
+    let (cache, written) = with_receipts(|r| {
+        r.sync(&wallet);
+        (r.entries().clone(), stamp())
+    });
+    let hist = if cache.is_empty() { PriceHistory::new() } else { price_history() };
     let mut out = Map::new();
     let mut ids: Vec<u64> = chains.to_vec();
     for d in cache.values() {
@@ -470,14 +538,68 @@ pub fn summary(wallet: &str, chains: &[u64]) -> Value {
         );
     }
     let v = Value::Object(out);
-    LAST.lock().unwrap().get_or_insert_with(Default::default).insert(crate::paths::wallet(), (Instant::now(), log_len, v.clone()));
+    LAST.lock().unwrap().get_or_insert_with(Default::default).insert(crate::paths::wallet(), (Instant::now(), written, v.clone()));
     v
+}
+
+/// Revenue and costs are calculated when a dashboard requests them. Serve the previous totals
+/// while the background refresh waits on the chain.
+pub fn view(wallet: &str, pools: &[Value]) -> Value {
+    if wallet.is_empty() {
+        return json!({});
+    }
+    let mut chains: Vec<_> = pools.iter().map(crate::worker::pool_chain).filter(|id| !crate::chains::is_off(*id)).collect();
+    chains.sort_unstable();
+    chains.dedup();
+    let wallet = wallet.to_string();
+    let key = format!("ledger_view_{}_{}", crate::paths::wallet(), wallet.to_lowercase());
+    crate::store::background(&key, 30, Duration::from_millis(200), || None, move || Ok(summary(&wallet, &chains))).unwrap_or_default()
 }
 
 #[cfg(test)]
 mod il_tests {
     use super::*;
     use crate::data::Ev;
+
+    #[test]
+    fn background_receipt_recording_updates_an_existing_entry_after_an_append() {
+        use std::io::Write;
+        let home = crate::wallets::tests::temp_home("ledger-receipts");
+        std::fs::create_dir_all(crate::paths::logs()).unwrap();
+        let log = crate::engine::log_path();
+        let hash = "0xa";
+        crate::settings::write_atomic(&path(), &json!({(hash): {"gas_wei": 2000}})).unwrap();
+        std::fs::write(&log, b"{\"kind\":\"keep\"}\n").unwrap();
+        record_receipts("");
+        assert!(transactions()[0].1["ts"].is_null());
+        let mut file = std::fs::File::options().append(true).open(log).unwrap();
+        writeln!(file, "{}", json!({"kind": "sent", "hash": hash, "ts": 10, "block": 12})).unwrap();
+        record_receipts("");
+        let saved = transactions();
+        assert_eq!(saved[0].1["ts"], 10);
+        assert_eq!(saved[0].1["block"], 12);
+        assert_eq!(saved[0].1["gas_wei"], 2000);
+        drop(file);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn indexed_prices_find_the_nearest_snapshot_after_an_out_of_order_append() {
+        use std::io::Write;
+        let home = crate::wallets::tests::temp_home("ledger-prices");
+        std::fs::create_dir_all(crate::paths::logs()).unwrap();
+        let log = crate::paths::logs().join("snapshots.jsonl");
+        let sample = |ts, usd| json!({"ts": ts, "tokens": {"T": {"address": "0x1", "chain_id": 8453, "amount": 1.0, "usd": usd}}});
+        std::fs::write(&log, format!("{}\n{}\n", sample(100, 1.0), sample(300, 3.0))).unwrap();
+        assert_eq!(price_at(&price_history(), 8453, "0x1", Some(175)), Some(1.0));
+        let mut file = std::fs::File::options().append(true).open(log).unwrap();
+        writeln!(file, "{}", sample(200, 2.0)).unwrap();
+        let prices = price_history();
+        assert_eq!(price_at(&prices, 8453, "0x1", Some(175)), Some(2.0));
+        assert_eq!(price_at(&prices, 8453, "0x1", Some(200)), Some(2.0));
+        drop(file);
+        std::fs::remove_dir_all(home).unwrap();
+    }
 
     fn ev(block: i64, kind: &str, l: f64, a0: f64, a1: f64) -> Ev {
         Ev { block, ts: block, kind: kind.into(), amount: format!("{l}"), amount0: format!("{a0}"), amount1: format!("{a1}"), tick_lower: -100, tick_upper: 100, ..Default::default() }

@@ -1,9 +1,9 @@
 // Positions & history (Pools tab, My pools): measured APR per position (positions.rs) and a timeline of what happened to them.
 // Uses the page's helpers: $, api, fmt, usd, esc, toast, COLORS, chainOf, cc.
 (function () {
-  // cache: the last answer per period, read in the background (preload) so opening the tab or
-  // switching the period shows data at once; a page with nothing yet shows a skeleton of itself
-  const P = {data: null, days: 7, closed: false, focus: null, kinds: null, cache: {}, at: {}, pending: {}, retry: null};
+  // Keep the last answer for each period opened in this wallet.
+  const P = {data: null, days: 7, closed: false, focus: null, kinds: null, cache: {}, at: {},
+    pending: {}, retry: null, feeAt: 0, feePending: false};
   const FRESH = 60000, BACKGROUND = 120000;
   const KINDS = {
     mint: ["Added", "var(--ok)", "+"], burn: ["Removed", "var(--bad)", "−"], claim: ["Claimed", "var(--warn)", "◆"],
@@ -55,8 +55,8 @@
   function fetchDays(days) {
     const g = GEN;
     if (!P.pending[days]) P.pending[days] = api("/api/positions/" + days)
-      .then(d => { if (g !== GEN) throw new Error("wallet switched"); P.cache[days] = d; P.at[days] = Date.now(); kpis(d); return d; })
-      .finally(() => { delete P.pending[days]; busy(); });
+      .then(d => { if (g !== GEN) throw new Error("wallet switched"); P.cache[days] = d; P.at[days] = Date.now(); return d; })
+      .finally(() => { if (g === GEN) { delete P.pending[days]; busy(); } });
     busy();
     return P.pending[days];
   }
@@ -70,6 +70,7 @@
 
   // the tab opened, the period changed or Refresh: what is cached shows at once, a newer answer replaces it
   async function load(force) {
+    if (!onTab() || document.hidden) return;
     const days = P.days, have = P.cache[days];
     clearTimeout(P.retry);
     readPrefs();
@@ -85,17 +86,11 @@
     }
   }
 
-  // in the background, from page load on: the shown period every 2 minutes, the others once
-  // each then and again when one is opened after going stale
-  async function preload() {
-    if (!document.hidden) {
-      const days = P.days;
-      try { const d = await fetchDays(days); if (P.days === days) put(d); } catch (e) {}
-      for (const n of [7, 1, 30, 90]) if (!P.cache[n]) { try { await fetchDays(n); } catch (e) { break; } }
-    }
-    setTimeout(preload, BACKGROUND);
+  function tick() {
+    if (document.hidden) return;
+    if (onTab() && !P.pending[P.days] && Date.now() - (P.at[P.days] || 0) > BACKGROUND) load(true);
+    if (tab === "overview" && !isAll()) refreshFees();
   }
-  setTimeout(preload, 1500);
 
   // a skeleton of the page itself: KPI cards, the chart, table rows and the timeline
   function skeleton() {
@@ -110,34 +105,37 @@
     $("posTop").innerHTML = `<div class="card"><div class="row" style="align-items:center;margin-bottom:10px"><h2 style="margin:0">Positions</h2><span class="sp"></span>${skl("132px", "28px")}</div><div class="scroll"><table><tbody>${skRows(8, 4)}</tbody></table></div></div>`;
   }
 
-  // the overview's fee cards: the fees of every position in each window, closed ones included (a
-  // ladder replaces its ranges every hour or so, so the open ones hold only the last few hours' fees).
-  // An answer lists the positions closed within its own period, so each window is summed from the
-  // widest period read so far, and one wider than that shows "–" until a wide enough answer is in.
+  // The overview's fee cards use the small fee summary, including positions closed in the window.
   function kpiSkeleton() {
     const box = $("ovFees");
     if (!box) return;
     box.innerHTML = [1, 0, 0, 0].map((m, i) => `<div class="card kpi${m ? " main" : ""}"><div class="l">${skl(["46%", "52%", "38%", "30%"][i])}</div>
       <div class="v">${skl(["58%", "44%", "50%", "36%"][i], "26px")}</div><div class="s">${skl(["82%", "60%", "72%", "54%"][i])}</div></div>`).join("");
   }
+  async function refreshFees() {
+    if (P.feePending || Date.now() - P.feeAt < FRESH) return;
+    const g = GEN;
+    P.feePending = true;
+    try {
+      const d = await api("/api/positions/fees");
+      if (g === GEN && d.totals) { P.feeAt = Date.now(); kpis(d); }
+    } catch (e) {} finally {
+      if (g === GEN) P.feePending = false;
+    }
+  }
   function kpis(d) {
     const box = $("ovFees");
-    if (!box || !d) return;
-    const span = Math.max(0, ...Object.keys(P.cache).map(Number).filter(n => P.cache[n]));
-    if (span && P.cache[span]) d = P.cache[span];
-    const all = (d.chains || []).flatMap(c => c.positions || []);
-    const live = all.filter(p => !p.closed);
-    const sum = (ps, k) => ps.reduce((s, p) => s + (p[k] || 0), 0);
-    const value = sum(live, "usd"), inR = live.filter(p => p.in_range);
-    const f24 = span >= 1 ? sum(all, "fees_24h") : null, f7 = span >= 7 ? sum(all, "fees_7d") : null, f30 = span >= 30 ? sum(all, "fees_30d") : null;
+    if (!box) return;
+    const {h24: f24, d7: f7, d30: f30} = d.totals;
+    const value = d.live_usd;
     box.innerHTML = `
         <div class="card kpi main"><div class="l">Fee APR · last 24 h</div><div class="v">${pct(value && f24 != null ? f24 / value * 365 * 100 : null)}</div>
-          <div class="s">on ${usd(value, 0)} in ${live.length} live position${live.length === 1 ? "" : "s"} · LP share of fees (80%)</div></div>
+          <div class="s">on ${usd(value, 0)} in ${d.live} live position${d.live === 1 ? "" : "s"} · LP share of fees (80%)</div></div>
         <div class="card kpi"><div class="l">Fee APR · last 7 days</div><div class="v">${pct(value && f7 != null ? f7 / value * 365 / 7 * 100 : null)}</div><div class="s">at today's position values</div></div>
         <div class="card kpi"><div class="l">Fees earned</div><div class="v">${usd(f24, 2)}</div>
           <div class="s"><span class=it>last 24 h</span><span class=it>7 d ${usd(f7, 2)}</span><span class=it>30 d ${usd(f30, 2)}</span></div></div>
-        <div class="card kpi"><div class="l">In range</div><div class="v">${inR.length} / ${live.length}</div>
-          <div class="s">${usd(inR.reduce((s, p) => s + (p.usd || 0), 0), 0)} earning now</div></div>`;
+        <div class="card kpi"><div class="l">In range</div><div class="v">${d.in_range} / ${d.live}</div>
+          <div class="s">${usd(d.in_range_usd, 0)} earning now</div></div>`;
   }
   kpiSkeleton();
 
@@ -334,9 +332,10 @@
     GEN++;
     clearTimeout(P.retry);
     P.cache = {}; P.at = {}; P.pending = {}; P.data = null; P.shown = null; P.focus = null;
+    P.feeAt = 0; P.feePending = false;
     kpiSkeleton();
     if (onTab() && $("posBody")) skeleton();
   }
 
-  window.POSITIONS = {load, reset};
+  window.POSITIONS = {load, reset, tick};
 })();

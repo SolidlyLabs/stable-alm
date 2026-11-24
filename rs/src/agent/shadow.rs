@@ -131,9 +131,7 @@ pub fn build() -> Value {
     let mut rule_edges = vec![];
     for p in f["pools"].as_array().into_iter().flatten() {
         let addr = p["pool"].as_str().unwrap_or("");
-        let samples = super::perf::samples(addr);
-        let flows = super::perf::flows(from - 3600).remove(addr).unwrap_or_default();
-        let actual = super::perf::window(&samples, &flows, from, now);
+        let actual = super::perf::pool_since(addr, from, now);
         let cap = p["capital_usd"].as_f64().unwrap_or(1000.0).max(10.0);
         let bt_days = days.ceil().clamp(1.0, 730.0) as i64;
         let bt = backtest(json!({"chain_id": p["chain_id"], "pool": addr, "days": bt_days, "capital_usd": cap, "strategy": p["strategy"],

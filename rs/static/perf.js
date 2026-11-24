@@ -14,30 +14,36 @@
   const onTab = () => typeof tab !== "undefined" && tab === "performance";
 
   function load(force) {
-    if (isAll()) { $("perfBody").innerHTML = `<div class="card empty">Choose a wallet above: performance is per wallet.</div>`; return; }
+    if (document.hidden) return;
+    if (isAll()) {
+      $("perfInfo").textContent = "";
+      $("perfBody").innerHTML = '<div class="card empty">Choose a wallet to view its performance.</div>';
+      return;
+    }
     if (F.busy || (!force && F.data && Date.now() - F.at < 60000 && F.data.days === F.days)) { if (F.data) render(); return; }
     F.busy = true;
     const g = F.gen, days = F.days;
     if (!F.data) $("perfBody").innerHTML = `<div class="card"><span class="skl" style="--w:40%"></span></div>`;
     $("perfInfo").textContent = "loading…";
     // fees earned by the positions (Solidly's figures), 24 h / 7 d / 30 d, beside what was claimed
-    const fees = api("/api/positions/30").then(d => {
-      const by = {};
-      for (const c of d.chains || []) for (const p of c.positions || []) {
-        const k = (p.pool || "").toLowerCase(), o = by[k] || (by[k] = {h24: 0, d7: 0, d30: 0});
-        o.h24 += p.fees_24h || 0; o.d7 += p.fees_7d || 0; o.d30 += p.fees_30d || 0;
-      }
-      return by;
-    }).catch(() => null);
+    const fees = api("/api/positions/fees").then(d => d.by_pool).catch(() => null);
     Promise.all([api("/api/pool_stats/" + days), fees]).then(([d, f]) => {
       if (g !== F.gen) return;
       F.data = d; F.fees = f; F.at = Date.now();
       render();
-    }).catch(e => { $("perfInfo").textContent = ""; $("perfBody").innerHTML = `<div class="card bad">Performance not loaded: ${esc(e.message)}</div>`; })
-      .finally(() => { F.busy = false; });
+    }).catch(e => {
+      if (g !== F.gen) return;
+      $("perfInfo").textContent = "";
+      $("perfBody").innerHTML = `<div class="card bad">Performance not loaded: ${esc(e.message)}</div>`;
+    }).finally(() => { if (g === F.gen) F.busy = false; });
   }
 
-  function setDays(d) { F.days = d; F.data = null; load(true); renderSeg(); }
+  function reset() { F.gen++; F.data = null; F.fees = null; F.busy = false; F.at = 0; }
+
+  function setDays(d) {
+    if (F.days === d) return;
+    F.days = d; reset(); load(true); renderSeg();
+  }
   function renderSeg() {
     $("perfSeg").innerHTML = PERIODS.map(([d, l]) => `<button class="${F.days === d ? "on" : ""}" data-pd="${d}">${l}</button>`).join("");
     $("perfSeg").querySelectorAll("button").forEach(b => b.onclick = () => setDays(+b.dataset.pd));
@@ -46,15 +52,16 @@
   function render() {
     renderSeg();
     const d = F.data, pools = (d.pools || []).filter(p => p.series && p.series.length > 1);
-    $("perfInfo").textContent = d.days ? `last ${d.days} days` : "everything recorded";
+    const period = d.days ? `last ${d.days} days` : "everything recorded";
+    $("perfInfo").textContent = d.history_mode ? `${period} · ${d.history_mode === "live" ? "live" : "dry-run"} history` : period;
     if (!pools.length) {
-      $("perfBody").innerHTML = `<div class="card empty">No history yet: it builds up as the worker runs (one point per cycle).</div>`;
+      $("perfBody").innerHTML = '<div class="card empty">Too few capital samples in this period to calculate performance.</div>';
       return;
     }
     // all pools together: the sums of each pool's window
     const W = pools.map(p => p.window || {});
     const s = k => W.reduce((a, w) => a + (w[k] || 0), 0);
-    const pnl = s("pnl_usd"), base = W.reduce((a, w) => a + (w.pnl_usd != null && w.return ? w.pnl_usd / w.return : 0), 0);
+    const pnl = s("pnl_usd"), base = s("return_base_usd");
     const vs = W.some(w => w.vs_hold_usd != null) ? s("vs_hold_usd") : null;
     const costs = s("gas_usd") + s("swap_cost_usd");
     $("perfBody").innerHTML = `
@@ -84,7 +91,7 @@
       <div class="row" style="gap:10px;flex-wrap:wrap"><h2 style="margin:0">${esc(p.name)}</h2>${ctag(p.chain_id)}
         ${p.enabled ? "" : `<span class="chip">off</span>`}
         ${w.parked_share > 0.005 ? `<span class="chip" title="share of the period its money was parked in another pool's strategy">parked ${fmt(w.parked_share * 100, 0)}% of the time</span>` : ""}
-        <span class="sp"></span><span class="mute small">capital now</span> <b class="mono">${usd(p.capital_usd, 2)}</b></div>
+        <span class="sp"></span><span class="mute small"${p.last_ts ? ` title="Recorded ${esc(when(p.last_ts))}"` : ""}>last recorded capital</span> <b class="mono">${usd(p.capital_usd, 2)}</b></div>
       <div class="pstats">
         <div><div>Profit</div><b>${w.complete ? sgn(w.pnl_usd, 2) : "–"}</b><span>${w.complete ? pct(w.return) + (w.return_yearly != null ? ` · ${pct(w.return_yearly, 1)}/yr` : "") : esc(w.reason || "")}</span></div>
         <div><div>Against holding</div><b>${w.vs_hold_usd != null ? sgn(w.vs_hold_usd, 2) : "–"}</b><span>${w.vs_hold != null ? pct(w.vs_hold) : ""}</span></div>
@@ -161,8 +168,8 @@
 
   window.PERF = {
     load: () => load(false),
-    reset: () => { F.gen++; F.data = null; F.fees = null; },
+    reset,
     // the status refresh: reload in the background while the tab is open
-    tick: () => { if (onTab() && !F.busy && Date.now() - F.at > 120000) load(true); },
+    tick: () => { if (!document.hidden && onTab() && !F.busy && Date.now() - F.at > 120000) load(true); },
   };
 })();

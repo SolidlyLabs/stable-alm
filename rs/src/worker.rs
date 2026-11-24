@@ -311,7 +311,7 @@ impl Worker {
             if !execute {
                 let moved = capital::move_in_book(book, cid, &cfg.pool, usd, to.as_deref());
                 report.push(format!("  withdrawal (dry run): ${} of idle tokens moved to {dest} as they are (live, positions would be burned and sold to USDC as needed)", engine::commas(moved)));
-                engine::log(json!({"chain_id": cid, "pool": cfg.pool.to_lowercase(), "kind": "capital", "what": "release", "usd": moved, "asked_usd": usd, "to": to, "dry": true}));
+                engine::log(json!({"chain_id": cid, "pool": cfg.pool.to_lowercase(), "kind": "capital", "what": "release", "live": false, "usd": moved, "asked_usd": usd, "to": to, "dry": true}));
                 capital::remove(&id);
                 capital::save(execute, book);
                 continue;
@@ -353,7 +353,7 @@ impl Worker {
             let moved_usd = moved as f64 * capital::px_raw(cid, &usdc).unwrap_or(0.0);
             report.push(format!("  withdrawal: ${} USDC moved to {dest} (asked ${}){}", engine::commas(moved_usd), engine::commas(usd),
                                 res.as_ref().err().map(|e| format!("; stopped early: {e}")).unwrap_or_default()));
-            engine::log(json!({"chain_id": cid, "pool": cfg.pool, "kind": "capital", "what": "withdraw", "usd": moved_usd, "asked_usd": usd, "to": to,
+            engine::log(json!({"chain_id": cid, "pool": cfg.pool, "kind": "capital", "what": "withdraw", "live": true, "usd": moved_usd, "asked_usd": usd, "to": to,
                                "asset": usdc, "plan": r["plan"], "emergency": r["emergency"]}));
             match capital::after_release(&r, usd, moved_usd, res.is_err()) {
                 Some(rest) => {
@@ -643,7 +643,7 @@ impl Worker {
                     // (a live wallet's requests wait for a cycle that can sign: they are the live book's)
                     for r in capital::releases(*cid, &cfg.pool).into_iter().filter(|_| execute || !Self::live_intended(&s)) {
                         let moved = capital::move_in_book(&mut book, *cid, &cfg.pool, r["usd"].as_f64().unwrap_or(0.0), r["to"].as_str());
-                        engine::log(json!({"chain_id": cid, "pool": cfg.pool.to_lowercase(), "kind": "capital", "what": "release", "usd": moved, "to": r["to"], "reason": "pool off"}));
+                        engine::log(json!({"chain_id": cid, "pool": cfg.pool.to_lowercase(), "kind": "capital", "what": "release", "live": execute, "usd": moved, "to": r["to"], "reason": "pool off"}));
                         capital::remove(r["id"].as_str().unwrap_or(""));
                     }
                     let left = book.pool(*cid, &cfg.pool);
@@ -651,7 +651,7 @@ impl Worker {
                         crate::info!("capital", "[{}] is off: its idle tokens are Unallocated now", cfg.name);
                         let usd = capital::value(*cid, &left);
                         if usd > 0.005 {
-                            engine::log(json!({"chain_id": cid, "pool": cfg.pool.to_lowercase(), "kind": "capital", "what": "release", "usd": usd, "reason": "pool off"}));
+                            engine::log(json!({"chain_id": cid, "pool": cfg.pool.to_lowercase(), "kind": "capital", "what": "release", "live": execute, "usd": usd, "reason": "pool off"}));
                         }
                         book.set_pool(*cid, &cfg.pool, capital::Tokens::new());
                     }
@@ -678,10 +678,9 @@ impl Worker {
         flvr_chains.extend(by_chain.keys().filter(|c| !flvr_chains.contains(c)).copied().collect::<Vec<_>>());
         crate::market_flvr::refresh_in_background(flvr_chains, wallet.clone());
 
-        // Earned, costs and profit per chain, from the app's own transactions.
-        let ledger_chains: Vec<u64> = by_chain.keys().copied().collect();
-        self.set("ledger", crate::ledger::summary(&wallet, &ledger_chains));
-        tr.stage("ledger");
+        // Record receipts for the history. Totals are calculated on demand by the dashboard and agent.
+        crate::ledger::record_receipts(&wallet);
+        tr.stage("receipts");
 
         // a perp portfolio's daily plan (dry run), in the background when due
         crate::perps::maybe_run();

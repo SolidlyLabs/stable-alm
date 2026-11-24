@@ -648,23 +648,29 @@ fn givable(idle: &Tokens, own: &[String], hosted: &[(String, i128)]) -> Tokens {
 /// An Add of chosen tokens into `pool`: what comes from Unallocated (`free`, source None), and what
 /// another pool gives of its idle as it is (source Some), at most what `rooms` says that pool may
 /// give (givable; a pool not in it gives nothing), taken out of its book. What `pool` gets, one
-/// entry per token (not yet added: the caller adds it).
-fn add_chosen(book: &mut Book, cid: u64, pool: &str, free: &Tokens, want: &[(Option<String>, String, Option<i128>)], rooms: &BTreeMap<String, Tokens>) -> Vec<(String, i128)> {
+/// entry per token (the caller adds it), and where it came from for performance reporting.
+fn add_chosen(book: &mut Book, cid: u64, pool: &str, free: &Tokens, want: &[(Option<String>, String, Option<i128>)], rooms: &BTreeMap<String, Tokens>) -> ChosenAdd {
     let of = |src: &Option<String>| want.iter().filter(|w| w.0 == *src).map(|w| (w.1.clone(), w.2)).collect::<Vec<_>>();
     let mut got = take_tokens(free, &of(&None));
+    let from_unallocated = got.iter().cloned().collect();
+    let mut from_pools = BTreeMap::new();
     let mut sources: Vec<String> = want.iter().filter_map(|w| w.0.clone()).filter(|s| !s.eq_ignore_ascii_case(pool)).collect();
     sources.sort();
     sources.dedup();
-    for src in &sources {
-        let Some(room) = rooms.get(src) else { continue };
-        let mut theirs = book.pool(cid, src);
+    for src in sources {
+        let Some(room) = rooms.get(&src) else { continue };
         let part = take_tokens(room, &of(&Some(src.clone())));
+        if part.is_empty() {
+            continue;
+        }
+        let mut theirs = book.pool(cid, &src);
         for (t, a) in &part {
             *theirs.entry(t.clone()).or_default() -= a;
         }
-        book.set_pool(cid, src, theirs);
+        book.set_pool(cid, &src, theirs);
         crate::info!("capital", "{} gives {} token(s) of its idle, as they are", &src[..10.min(src.len())], part.len());
-        got.extend(part);
+        got.extend(part.iter().cloned());
+        from_pools.insert(src, part.into_iter().collect());
     }
     // one entry per token: the same token from Unallocated and from a pool is one amount (valued once)
     let mut merged: Vec<(String, i128)> = vec![];
@@ -674,7 +680,13 @@ fn add_chosen(book: &mut Book, cid: u64, pool: &str, free: &Tokens, want: &[(Opt
             None => merged.push((t, a)),
         }
     }
-    merged
+    ChosenAdd { tokens: merged, from_unallocated, from_pools }
+}
+
+struct ChosenAdd {
+    tokens: Vec<(String, i128)>,
+    from_unallocated: Tokens,
+    from_pools: BTreeMap<String, Tokens>,
 }
 
 /// Funds the enabled pools from Unallocated up to their allocation % of the chain's value (what they
@@ -699,7 +711,7 @@ fn fill_from_allocations(book: &mut Book, cid: u64, pools: &[&PoolConfig], acct:
         crate::info!("capital", "[{}] given {} (${}) from Unallocated, to reach its {}%", cfg.name, describe(cid, &got), crate::engine::commas(usd), cfg.allocation_pct);
         // money into the pool: per-pool performance does not count it as profit (agent::perf)
         if usd > 0.0 {
-            crate::engine::log(json!({"chain_id": cid, "pool": cfg.pool.to_lowercase(), "kind": "capital", "what": "allocate", "usd": usd, "tokens": describe(cid, &got)}));
+            crate::engine::log(json!({"chain_id": cid, "pool": cfg.pool.to_lowercase(), "kind": "capital", "what": "allocate", "live": live, "usd": usd, "tokens": describe(cid, &got)}));
         }
         add_to(book, cid, &cfg.pool, &got);
     }
@@ -762,7 +774,7 @@ pub fn prepare(book: &mut Book, cid: u64, pools: &[&PoolConfig], acct: &Value, w
             let gone: Tokens = before.iter().map(|(t, a)| (t.clone(), a - after.get(t).copied().unwrap_or(0))).filter(|(_, a)| *a > 0).collect();
             let usd = value(cid, &gone);
             if usd > 0.005 {
-                crate::engine::log(json!({"chain_id": cid, "pool": pool, "kind": "capital", "what": "shrink", "usd": usd, "tokens": describe(cid, &gone.into_iter().collect::<Vec<_>>())}));
+                crate::engine::log(json!({"chain_id": cid, "pool": pool, "kind": "capital", "what": "shrink", "live": live, "usd": usd, "tokens": describe(cid, &gone.into_iter().collect::<Vec<_>>())}));
             }
         }
     }
@@ -801,10 +813,13 @@ pub fn prepare(book: &mut Book, cid: u64, pools: &[&PoolConfig], acct: &Value, w
                         Some((s, room))
                     })
                     .collect();
-                let got = add_chosen(book, cid, &pool, &free, &want, &rooms);
-                let moved = value(cid, &got.iter().cloned().collect());
+                let ChosenAdd { tokens: got, from_unallocated, from_pools } = add_chosen(book, cid, &pool, &free, &want, &rooms);
+                let from_unallocated_usd = value(cid, &from_unallocated);
+                let from_pools_usd: BTreeMap<_, _> = from_pools.into_iter().map(|(p, tokens)| (p, value(cid, &tokens))).collect();
+                let moved = from_unallocated_usd + from_pools_usd.values().sum::<f64>();
                 crate::info!("capital", "[{}] added {} (${}), as chosen", name_of(pools, &pool), describe(cid, &got), crate::engine::commas(moved));
-                crate::engine::log(json!({"chain_id": cid, "pool": pool, "kind": "capital", "what": "add", "usd": moved, "tokens": describe(cid, &got)}));
+                crate::engine::log(json!({"chain_id": cid, "pool": pool, "kind": "capital", "what": "add", "live": live, "usd": moved,
+                                         "tokens": describe(cid, &got), "from_unallocated_usd": from_unallocated_usd, "from_pools_usd": from_pools_usd}));
                 add_to(book, cid, &pool, &got);
                 remove(&id);
             }
@@ -823,7 +838,7 @@ pub fn prepare(book: &mut Book, cid: u64, pools: &[&PoolConfig], acct: &Value, w
                 let got = take(&ordered_only(cid, &free, &first), usd);
                 let moved = value(cid, &got.iter().cloned().collect());
                 crate::info!("capital", "[{}] added {} (${}) from Unallocated (asked ${})", name_of(pools, &pool), describe(cid, &got), crate::engine::commas(moved), crate::engine::commas(usd));
-                crate::engine::log(json!({"chain_id": cid, "pool": pool, "kind": "capital", "what": "add", "usd": moved, "asked_usd": usd}));
+                crate::engine::log(json!({"chain_id": cid, "pool": pool, "kind": "capital", "what": "add", "live": live, "usd": moved, "asked_usd": usd}));
                 add_to(book, cid, &pool, &got);
                 remove(&id);
             }
@@ -833,7 +848,7 @@ pub fn prepare(book: &mut Book, cid: u64, pools: &[&PoolConfig], acct: &Value, w
                 for (pool, toks) in book.chains.get(&cid).cloned().unwrap_or_default() {
                     let usd = value(cid, &toks);
                     if usd > 0.005 {
-                        crate::engine::log(json!({"chain_id": cid, "pool": pool, "kind": "capital", "what": "release", "usd": usd, "reason": "reset"}));
+                        crate::engine::log(json!({"chain_id": cid, "pool": pool, "kind": "capital", "what": "release", "live": live, "usd": usd, "reason": "reset"}));
                     }
                 }
                 if let Some(c) = book.chains.get_mut(&cid) {
@@ -841,7 +856,7 @@ pub fn prepare(book: &mut Book, cid: u64, pools: &[&PoolConfig], acct: &Value, w
                 }
                 fill_from_allocations(book, cid, pools, acct, wallet, live);
                 crate::info!("capital", "chain {cid}: capital reset to the allocation %");
-                crate::engine::log(json!({"chain_id": cid, "kind": "capital", "what": "reset"}));
+                crate::engine::log(json!({"chain_id": cid, "kind": "capital", "what": "reset", "live": live}));
                 remove(&id);
             }
             "withdraw" => {
@@ -898,7 +913,7 @@ pub fn credit_claim(book: &mut Book, cid: u64, pools: &[&PoolConfig], rewards: &
     // what each pool earned (income, not money put in: agent::perf shows it as fees claimed)
     for (p, usd) in credited {
         if usd > 0.0 {
-            crate::engine::log(json!({"chain_id": cid, "pool": p, "kind": "capital", "what": "fees", "usd": usd}));
+            crate::engine::log(json!({"chain_id": cid, "pool": p, "kind": "capital", "what": "fees", "live": true, "usd": usd}));
         }
     }
 }
@@ -1046,7 +1061,9 @@ mod tests {
                         (Some(stable.to_string()), "usdc".to_string(), None)];
         let r = rooms(&b);
         let got = super::add_chosen(&mut b, 8453, eth, &free, &want, &r);
-        assert_eq!(got, vec![("usdc".to_string(), 40), ("weth".to_string(), 38)]);
+        assert_eq!(got.tokens, vec![("usdc".to_string(), 40), ("weth".to_string(), 38)]);
+        assert_eq!(got.from_unallocated, toks(&[("usdc", 40)]));
+        assert_eq!(got.from_pools[stable], toks(&[("weth", 38)]));
         // the stable pool keeps its own USDC (asked for, refused); its WETH is gone from its book
         assert_eq!(b.pool(8453, stable), toks(&[("usdc", 500)]));
         // never more than the source holds, never from an unknown pool or from the pool itself
@@ -1055,7 +1072,7 @@ mod tests {
         let got = super::add_chosen(&mut b, 8453, eth, &Tokens::new(), &[(Some(stable.to_string()), "weth".to_string(), Some(99)),
                                                                           (Some("0xother".to_string()), "weth".to_string(), None),
                                                                           (Some(eth.to_string()), "weth".to_string(), None)], &r);
-        assert_eq!(got, vec![("weth".to_string(), 10)]);
+        assert_eq!(got.tokens, vec![("weth".to_string(), 10)]);
         assert!(b.pool(8453, stable).is_empty());
         // one source named twice, apart in the request: taken once, capped at what it holds
         b.set_pool(8453, stable, toks(&[("weth", 10), ("aero", 5)]));
@@ -1063,13 +1080,13 @@ mod tests {
         let got = super::add_chosen(&mut b, 8453, eth, &Tokens::new(), &[(Some(stable.to_string()), "weth".to_string(), Some(6)),
                                                                           (None, "usdc".to_string(), Some(1)),
                                                                           (Some(stable.to_string()), "weth".to_string(), Some(6))], &r);
-        assert_eq!(got, vec![("weth".to_string(), 10)]);
+        assert_eq!(got.tokens, vec![("weth".to_string(), 10)]);
         assert_eq!(b.pool(8453, stable), toks(&[("aero", 5)]));
         // the same token from Unallocated and from a pool: one entry, the sum
         b.set_pool(8453, stable, toks(&[("weth", 7)]));
         let r = rooms(&b);
         let got = super::add_chosen(&mut b, 8453, eth, &toks(&[("weth", 3)]), &[(None, "weth".to_string(), None), (Some(stable.to_string()), "weth".to_string(), None)], &r);
-        assert_eq!(got, vec![("weth".to_string(), 10)]);
+        assert_eq!(got.tokens, vec![("weth".to_string(), 10)]);
     }
 
     #[test]

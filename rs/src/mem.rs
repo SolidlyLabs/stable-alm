@@ -13,6 +13,22 @@ use std::sync::OnceLock;
 
 pub struct Counting;
 
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn release_free_pages(heap: usize) {
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else { return };
+    let kb = |name| status.lines().find_map(|line| {
+        line.strip_prefix(name)?.split_whitespace().next()?.parse::<usize>().ok()
+    }).unwrap_or(0);
+    let backed = kb("RssAnon:").saturating_add(kb("VmSwap:")).saturating_mul(1024);
+    if backed.saturating_sub(heap) >= 128 << 20 {
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> std::ffi::c_int;
+        }
+        // glibc releases whole free pages across its arenas while other threads keep running.
+        unsafe { malloc_trim(0) };
+    }
+}
+
 static CUR: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
 /// logs/memory.log, opened before anything can fail: writing to it does not allocate
@@ -166,12 +182,22 @@ pub fn start() {
     }
     std::thread::Builder::new().name("memory".into()).spawn(|| {
         let mut logged = 0;
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        let (mut last_check, mut previous) = (std::time::Instant::now(), 0usize);
         loop {
             std::thread::sleep(std::time::Duration::from_secs(1));
             let (cur, peak) = usage();
             if peak >= logged + (64 << 20) {
                 logged = peak;
                 crate::info!("memory", "heap peak {} MB (now {} MB)", MB(peak), MB(cur));
+            }
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            {
+                if last_check.elapsed().as_secs() >= 5 && cur <= previous.saturating_add(8 << 20) {
+                    release_free_pages(cur);
+                    last_check = std::time::Instant::now();
+                }
+                previous = cur;
             }
         }
     }).ok();

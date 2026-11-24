@@ -116,7 +116,7 @@ fn run_background(key: &str, ttl_s: u64, wait: Duration, wait_when_old: bool, se
     let stale = cur.as_ref().map(|(t, _)| t.elapsed() >= Duration::from_secs(ttl_s)).unwrap_or(true);
     if stale && BG_BUSY.lock().unwrap().get_or_insert_with(Default::default).insert(key.to_string()) {
         let k = key.to_string();
-        std::thread::spawn(move || {
+        crate::paths::spawn(move || {
             match fetch() {
                 Ok(v) => background_put(&k, v),
                 Err(e) => crate::warn!("cache", "{k}: refresh failed, keeping the old copy ({e})"),

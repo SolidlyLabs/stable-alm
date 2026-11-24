@@ -686,30 +686,37 @@ function show(t) {
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.t === t));
   document.querySelectorAll("main > section").forEach(s => s.classList.toggle("hide", s.dataset.tab !== t));
   try { localStorage.setItem("alm.tab", t); } catch (e) {}
-  if (t === "pools" && !MARKET) loadMarket();
+  if (t === "pools" && !MARKET && !document.hidden) loadMarket();
   if (t === "settings" && !TOKENS) loadTokens();
   if (t === "experimental") loadExperimental();
   if (t === "performance" && window.PERF) PERF.load();
   if (t === "pools" && POOLVIEW === "mine" && !isAll() && window.POSITIONS) POSITIONS.load();
   if (t === "activity" && isAll()) loadAllActivity();
+  if (S && (t === "overview" || t === "pools")) refresh();
   // the strategy library as the app has it now: strategies saved or edited outside this page show up
   if ((t === "pools" || t === "lab") && window.LABLIB && LABLIB.refresh) LABLIB.refresh();
 }
 document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => show(b.dataset.t));
 // ---------- status ----------
 // not behind the setup wizard: re-rendering every table under it stalls its animations
+let statusRequest = 0;
 async function refresh() {
-  if (document.getElementById("wz")) return;
+  if (document.hidden || document.getElementById("wz")) return;
+  const request = ++statusRequest;
   try {
     // the wallet list first: the wallet shown may have been removed (then the first listed is shown)
-    WALLETS = await api("/api/wallets").catch(() => WALLETS);
+    const wallets = await api(tab === "overview" && WID === "all" ? "/api/wallets" : "/api/wallets/brief").catch(() => WALLETS);
+    if (request !== statusRequest) return;
+    WALLETS = wallets;
     if (WID !== "all" && wlist().length && !wlist().some(x => x.id === WID)) return setWallet(wlist()[0].id);
     const w = curW();
-    const st = await api("/api/status");
-    if (w !== curW()) return; // the wallet was switched meanwhile: its own refresh follows
+    const history = !isAll() && (tab === "overview" || (tab === "pools" && POOLVIEW === "mine"));
+    const st = await api(history ? "/api/status" : "/api/status/brief");
+    if (request !== statusRequest || w !== curW()) return;
     S = st;
     render();
   } catch (e) {
+    if (request !== statusRequest) return;
     if (/no such wallet/.test(e.message) && wlist().length) return setWallet(wlist()[0].id);
     toast("status: " + e.message, true);
   }
@@ -767,6 +774,7 @@ function render() {
   renderUpdate();
   renderActivity();
   renderPoolView();
+  if (window.POSITIONS) POSITIONS.tick();
   if (window.PERF) PERF.tick();
   const exp = !!(S.settings.experimental || {}).enabled;
   $("expTab").classList.toggle("hide", !exp);
@@ -2136,7 +2144,7 @@ function setPoolView(v) {
   renderPoolView();
   renderPools();
   if (v === "find" && !MARKET) loadMarket();
-  if (v === "mine" && window.POSITIONS) POSITIONS.load();
+  if (v === "mine" && window.POSITIONS) { POSITIONS.load(); refresh(); }
 }
 // The Pools tab: My pools (the wallet's pools, their positions and history) or Find pools (the market
 // list to add from); with All wallets, the pools × wallets grid.
@@ -2290,7 +2298,7 @@ let ALLACT_AT = 0;
 async function loadAllActivity() {
   if (ALLACT && Date.now() - ALLACT_AT < 30000) return renderActivity();
   try {
-    const got = await Promise.all(wlist().map(w => api(`/api/status?wallet=${encodeURIComponent(w.id)}`)
+    const got = await Promise.all(wlist().map(w => api(`/api/status/brief?wallet=${encodeURIComponent(w.id)}`)
       .then(st => ({w, st})).catch(() => null)));
     if (!isAll()) return;
     ALLACT = got.filter(Boolean); ALLACT_AT = Date.now();
@@ -2721,9 +2729,13 @@ document.addEventListener("click", ev => {
 try { const s = JSON.parse(localStorage.getItem("alm.sort") || "null"); if (s && s.key) SORT = s; } catch (e) {}
 // after every script (the Strategy lab adds its tab) has run
 document.addEventListener("DOMContentLoaded", () => { try { const t = localStorage.getItem("alm.tab"); if (t) show(t === "discover" ? "pools" : t); } catch (e) {} });
-refresh(); setInterval(refresh, 10000);
-// the pool list in the background soon after the page opens, so the Pools tab has it when opened
-setTimeout(function pre() { if (MARKET) return; if (!S) return setTimeout(pre, 1500); loadMarket(); }, 2500);
+refresh();
+setInterval(() => { if (!document.hidden) refresh(); }, 10000);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  refresh();
+  if (tab === "pools" && !MARKET) loadMarket();
+});
 </script>
 <script src="/lab.js"></script>
 <script src="/positions.js"></script>

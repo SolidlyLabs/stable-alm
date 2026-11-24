@@ -14,9 +14,10 @@
 //! amounts scaled up to its whole capital.
 
 use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::io::{Read, Seek, SeekFrom};
-use std::sync::Mutex;
+use std::collections::{BTreeMap, HashMap};
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
 
 /// One pool at one snapshot.
 #[derive(Clone, Debug, Default)]
@@ -69,13 +70,77 @@ fn flow(ts: i64, usd: f64, kind: &str) -> Flow {
     Flow { ts, usd, kind: kind.into() }
 }
 
-struct Store {
-    offset: u64,
-    /// pool address → samples, oldest first
-    samples: HashMap<String, Vec<Sample>>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HistoryMode {
+    Live,
+    DryRun,
 }
 
-static STORE: Mutex<Option<Store>> = Mutex::new(None);
+impl HistoryMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::DryRun => "dry run",
+        }
+    }
+}
+
+type PoolSamples = HashMap<String, Vec<Sample>>;
+
+#[derive(Default)]
+struct Store {
+    offset: u64,
+    live: PoolSamples,
+    dry: PoolSamples,
+    /// Snapshot timestamps before thinning, for capital events written without a mode.
+    cycles: BTreeMap<i64, HistoryMode>,
+}
+
+impl Store {
+    fn mode(&self) -> HistoryMode {
+        if self.live.is_empty() { HistoryMode::DryRun } else { HistoryMode::Live }
+    }
+
+    fn samples(&self) -> &PoolSamples {
+        match self.mode() {
+            HistoryMode::Live => &self.live,
+            HistoryMode::DryRun => &self.dry,
+        }
+    }
+
+    fn record(&mut self, v: &Value, names: &HashMap<String, String>, dec: &mut dyn FnMut(u64, &str) -> Option<(i32, i32)>) {
+        let Some(ts) = v["ts"].as_i64() else { return };
+        let mode = match v["mode"].as_str() {
+            Some("dry run" | "paused" | "paused (STOP)") => HistoryMode::DryRun,
+            _ => HistoryMode::Live,
+        };
+        self.cycles.insert(ts, mode);
+        let by_pool = match mode {
+            HistoryMode::Live => &mut self.live,
+            HistoryMode::DryRun => &mut self.dry,
+        };
+        for (addr, sample) in parse_line(v, names, dec) {
+            push_sample(by_pool.entry(addr).or_default(), sample);
+        }
+    }
+
+    fn event_mode(&self, e: &Value, ts: i64) -> HistoryMode {
+        match e["live"].as_bool() {
+            Some(true) => HistoryMode::Live,
+            Some(false) => HistoryMode::DryRun,
+            None if e["dry"] == true => HistoryMode::DryRun,
+            // Withdrawals and fee credits were only logged by live execution.
+            None if matches!(e["what"].as_str(), Some("withdraw" | "fees")) => HistoryMode::Live,
+            // The worker writes its snapshot at the end of the cycle. Limit recovery to nearby
+            // snapshots so an unrelated cycle after a long shutdown cannot classify the event.
+            None => self.cycles.range(ts..=ts.saturating_add(30 * 60)).next()
+                .map(|(_, mode)| *mode).unwrap_or(HistoryMode::Live),
+        }
+    }
+}
+
+type WalletStores = HashMap<PathBuf, Arc<Mutex<Store>>>;
+static STORES: LazyLock<Mutex<WalletStores>> = LazyLock::new(Mutex::default);
 /// how far back samples are kept: the dashboard's "All" (a year); one sample per BUCKET_S per pool
 const KEEP_S: i64 = 400 * 86_400;
 const BUCKET_S: i64 = 300;
@@ -98,13 +163,12 @@ fn decimals(cid: u64, pool: &str) -> Option<(i32, i32)> {
 }
 
 /// Parse one snapshot line into per-pool samples.
-pub fn parse_line(v: &Value, names: &HashMap<String, String>, dec: &mut dyn FnMut(u64, &str) -> Option<(i32, i32)>) -> Vec<(String, Sample)> {
+fn parse_line(v: &Value, names: &HashMap<String, String>, dec: &mut dyn FnMut(u64, &str) -> Option<(i32, i32)>) -> Vec<(String, Sample)> {
     let ts = v["ts"].as_i64().unwrap_or(0);
     let mut out = vec![];
-    let caps = v["pool_capital"].as_object().cloned().unwrap_or_default();
     for (name, info) in v["pools"].as_object().into_iter().flatten() {
         let Some(addr) = names.get(name) else { continue };
-        let Some(cap) = caps.get(addr).and_then(|c| c.as_f64()) else { continue };
+        let Some(cap) = v["pool_capital"][addr.as_str()].as_f64() else { continue };
         let cid = info["chain_id"].as_u64().unwrap_or(crate::chains::BASE);
         let (mut a0, mut a1, mut usd) = (0.0, 0.0, 0.0);
         for p in info["positions"].as_array().into_iter().flatten() {
@@ -112,10 +176,10 @@ pub fn parse_line(v: &Value, names: &HashMap<String, String>, dec: &mut dyn FnMu
             a1 += p["amount1"].as_f64().unwrap_or(0.0);
             usd += p["usd"].as_f64().unwrap_or(0.0);
         }
-        let price = match (info["tick"].as_i64(), dec(cid, addr)) {
-            (Some(t), Some((d0, d1))) => 1.0001f64.powf(t as f64) * 10f64.powi(d0 - d1),
-            _ => 0.0,
-        };
+        let price = info["tick"].as_i64().and_then(|t| {
+            let (d0, d1) = dec(cid, addr)?;
+            Some(1.0001f64.powf(t as f64) * 10f64.powi(d0 - d1))
+        }).unwrap_or(0.0);
         let st = &v["pool_stats"][addr.as_str()];
         let f = |k: &str| st[k].as_f64().unwrap_or(0.0);
         out.push((addr.clone(), Sample { ts, capital_usd: cap, a0, a1, pos_usd: usd, price, owed: f("owed_usd"), px0: f("px0"), px1: f("px1") }));
@@ -125,72 +189,118 @@ pub fn parse_line(v: &Value, names: &HashMap<String, String>, dec: &mut dyn FnMu
 
 /// Adds a sample, one per BUCKET_S: a later one in the same bucket replaces it (the newest is kept).
 fn push_sample(v: &mut Vec<Sample>, s: Sample) {
-    match v.last_mut() {
-        Some(l) if l.ts.div_euclid(BUCKET_S) == s.ts.div_euclid(BUCKET_S) => *l = s,
-        Some(l) if l.ts > s.ts => {}
-        _ => v.push(s),
+    let bucket = s.ts.div_euclid(BUCKET_S);
+    if v.last().is_none_or(|last| last.ts.div_euclid(BUCKET_S) < bucket) {
+        v.push(s);
+        return;
     }
+    match v.binary_search_by_key(&bucket, |old| old.ts.div_euclid(BUCKET_S)) {
+        Ok(i) if s.ts >= v[i].ts => v[i] = s,
+        Ok(_) => {}
+        Err(i) => v.insert(i, s),
+    }
+}
+
+fn with_history<T>(now: i64, read: impl FnOnce(&Store) -> T) -> T {
+    let path = crate::paths::logs().join("snapshots.jsonl");
+    let store = Arc::clone(STORES.lock().unwrap().entry(path.clone()).or_default());
+    let mut store = store.lock().unwrap();
+    refresh(&mut store, &path, now);
+    read(&store)
 }
 
 /// Read what was appended to the snapshots since the last call.
-fn refresh() {
-    let path = crate::paths::logs().join("snapshots.jsonl");
-    let mut g = STORE.lock().unwrap();
-    let st = g.get_or_insert_with(|| Store { offset: 0, samples: HashMap::new() });
-    let Ok(mut f) = std::fs::File::open(&path) else { return };
-    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+fn refresh(st: &mut Store, path: &Path, now: i64) {
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            *st = Store::default();
+            return;
+        }
+        Err(_) => return,
+    };
+    let Ok(meta) = f.metadata() else { return };
+    let len = meta.len();
     if len < st.offset {
-        st.offset = 0;
-        st.samples.clear();
+        *st = Store::default();
     }
-    // on the first read, only the last 45 days matter: skip ahead roughly
-    if st.offset == 0 && len > 400 << 20 {
-        st.offset = len - (400 << 20);
-    }
-    let _ = f.seek(SeekFrom::Start(st.offset));
-    let mut text = String::new();
-    if f.read_to_string(&mut text).is_err() {
+    if len == st.offset {
         return;
     }
-    let complete = text.rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let cutoff = super::now() - KEEP_S;
+    // Bound the first read for large logs. A partial line at this offset is ignored.
+    let offset = if st.offset == 0 { len.saturating_sub(400 << 20) } else { st.offset };
+    if f.seek(SeekFrom::Start(offset)).is_err() {
+        return;
+    }
+    st.offset = offset;
+    let cutoff = now - KEEP_S;
     let names: HashMap<String, String> = crate::settings::load_pools().iter()
         .filter_map(|p| Some((p["name"].as_str()?.to_string(), p["pool"].as_str()?.to_lowercase()))).collect();
-    let mut known: HashMap<String, Option<(i32, i32)>> = HashMap::new();
-    let mut dec = |cid: u64, a: &str| *known.entry(a.to_string()).or_insert_with(|| decimals(cid, a));
-    for line in text[..complete].lines() {
-        // cheap check before parsing: only lines that carry pool capital are used
-        if !line.contains("\"pool_capital\"") {
-            continue;
+    let mut known = HashMap::new();
+    let mut dec = |cid: u64, a: &str| *known.entry((cid, a.to_string())).or_insert_with(|| decimals(cid, a));
+    let mut reader = BufReader::new(f);
+    let mut line = Vec::new();
+    while let Ok(n) = reader.read_until(b'\n', &mut line) {
+        if n == 0 || line.last() != Some(&b'\n') {
+            break;
         }
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
-        if v["ts"].as_i64().unwrap_or(0) < cutoff {
-            continue;
-        }
-        for (addr, s) in parse_line(&v, &names, &mut dec) {
-            push_sample(st.samples.entry(addr).or_default(), s);
+        st.offset += n as u64;
+        let snapshot = std::str::from_utf8(&line).ok()
+            .filter(|s| s.contains("\"pool_capital\""))
+            .and_then(|s| serde_json::from_str::<Value>(s).ok());
+        line.clear();
+        if let Some(v) = snapshot.filter(|v| v["ts"].as_i64().is_some_and(|ts| ts >= cutoff)) {
+            st.record(&v, &names, &mut dec);
         }
     }
-    st.offset += complete as u64;
-    for v in st.samples.values_mut() {
-        let first = v.partition_point(|s| s.ts < cutoff);
-        v.drain(..first);
+    st.cycles = st.cycles.split_off(&cutoff);
+    for by_pool in [&mut st.live, &mut st.dry] {
+        by_pool.retain(|_, samples| {
+            let first = samples.partition_point(|s| s.ts < cutoff);
+            samples.drain(..first);
+            !samples.is_empty()
+        });
     }
 }
 
-/// Money added to (positive) or taken from (negative) each pool, from the executor log.
-pub fn flows(since: i64) -> HashMap<String, Vec<Flow>> {
-    flows_from(&events(), since)
+/// Historical flows recorded by hand describe live activity.
+fn append_extra(events: &mut Vec<Value>, dir: &Path) {
+    if let Ok(t) = std::fs::read_to_string(dir.join("flows_extra.jsonl")) {
+        events.extend(t.lines().filter_map(|l| {
+            let mut e = serde_json::from_str::<Value>(l).ok()?;
+            e.as_object_mut()?.entry("live").or_insert(json!(true));
+            Some(e)
+        }));
+    }
 }
 
-/// The executor log's events, and logs/flows_extra.jsonl: flows from before the app logged every kind
-/// (tokens sent out of the wallet were a warning only), written once by hand in the same shape.
+/// The wallet's executor and manually recorded flows, in timestamp order.
 fn events() -> Vec<Value> {
-    let mut ev = crate::engine::log_tail(64 << 20);
-    if let Ok(t) = std::fs::read_to_string(crate::paths::logs().join("flows_extra.jsonl")) {
-        ev.extend(t.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()));
-        ev.sort_by_key(|e| e["ts"].as_i64().unwrap_or(0));
+    #[derive(Default)]
+    struct AccountingEvents {
+        entries: Vec<Value>,
+        cutoff: i64,
     }
+    static EVENTS: crate::jsonl::Index<AccountingEvents> = crate::jsonl::Index::new();
+    let cutoff = super::now().div_euclid(86_400) * 86_400 - KEEP_S - 86_400;
+    let mut ev = EVENTS.read(&crate::engine::log_path(), 64 << 20, |state, line| {
+        let Some(text) = std::str::from_utf8(line).ok() else { return };
+        if !text.contains("\"capital\"") && !text.contains("\"unpark\"") {
+            return;
+        }
+        let Ok(e) = serde_json::from_str::<Value>(text) else { return };
+        if e["ts"].as_i64().is_some_and(|ts| ts >= cutoff) && matches!(e["kind"].as_str(), Some("capital" | "unpark")) {
+            state.entries.push(e);
+        }
+    }, |state| {
+        if cutoff > state.cutoff {
+            state.entries.retain(|e| e["ts"].as_i64().is_some_and(|ts| ts >= cutoff));
+            state.cutoff = cutoff;
+        }
+        state.entries.clone()
+    });
+    append_extra(&mut ev, &crate::paths::logs());
+    ev.sort_by_key(|e| e["ts"].as_i64().unwrap_or(0));
     ev
 }
 
@@ -202,7 +312,7 @@ fn events() -> Vec<Value> {
 /// - "unpark": paying a parking claim back withdraws about 1% more of the host's positions than the
 ///   claim (and any token whose swap back failed): that surplus moves from the host to the pool that
 ///   parked, so it is a transfer, not the host's loss or the other pool's profit.
-pub fn flows_from(events: &[Value], since: i64) -> HashMap<String, Vec<Flow>> {
+fn flows_from(st: &Store, mode: HistoryMode, events: &[Value], since: i64) -> HashMap<String, Vec<Flow>> {
     let mut out: HashMap<String, Vec<Flow>> = HashMap::new();
     let mut add = |pool: &str, ts: i64, usd: f64, kind: &str| {
         if usd.is_finite() && usd != 0.0 && !pool.is_empty() {
@@ -216,8 +326,20 @@ pub fn flows_from(events: &[Value], since: i64) -> HashMap<String, Vec<Flow>> {
         }
         let usd = e["usd"].as_f64().unwrap_or(0.0);
         let pool = e["pool"].as_str().unwrap_or("");
-        match (e["kind"].as_str().unwrap_or(""), e["what"].as_str().unwrap_or("")) {
-            ("capital", "add" | "allocate") => add(pool, ts, usd, "deposit"),
+        let kind = e["kind"].as_str().unwrap_or("");
+        if kind == "capital" && st.event_mode(e, ts) != mode {
+            continue;
+        }
+        match (kind, e["what"].as_str().unwrap_or("")) {
+            ("capital", "allocate") => add(pool, ts, usd, "deposit"),
+            ("capital", "add") => {
+                add(pool, ts, e["from_unallocated_usd"].as_f64().unwrap_or(usd), "deposit");
+                for (source, amount) in e["from_pools_usd"].as_object().into_iter().flatten() {
+                    let amount = amount.as_f64().unwrap_or(0.0);
+                    add(source, ts, -amount, "transfer out");
+                    add(pool, ts, amount, "transfer in");
+                }
+            }
             ("capital", "withdraw" | "release") => match e["to"].as_str() {
                 Some(to) => {
                     add(pool, ts, -usd, "transfer out");
@@ -227,7 +349,7 @@ pub fn flows_from(events: &[Value], since: i64) -> HashMap<String, Vec<Flow>> {
             },
             ("capital", "shrink") => add(pool, ts, -usd, "sent out"),
             ("capital", "reset") => add(pool, ts, usd, "reset"),
-            ("unpark", _) if e["live"] == true && e["partial"] != true => {
+            ("unpark", _) if mode == HistoryMode::Live && e["live"] == true && e["partial"] != true => {
                 let lot = &e["lot"];
                 let amount = lot["amount"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
                 let back = e["back"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
@@ -245,11 +367,11 @@ pub fn flows_from(events: &[Value], since: i64) -> HashMap<String, Vec<Flow>> {
 }
 
 /// Claimed fees credited to each pool (capital "fees" events), USD by pool, oldest first.
-pub fn fees_from(events: &[Value], since: i64) -> HashMap<String, Vec<(i64, f64)>> {
+fn fees_from(st: &Store, mode: HistoryMode, events: &[Value], since: i64) -> HashMap<String, Vec<(i64, f64)>> {
     let mut out: HashMap<String, Vec<(i64, f64)>> = HashMap::new();
     for e in events.iter().filter(|e| e["kind"] == "capital" && e["what"] == "fees") {
         let ts = e["ts"].as_i64().unwrap_or(0);
-        if ts >= since {
+        if ts >= since && st.event_mode(e, ts) == mode {
             out.entry(e["pool"].as_str().unwrap_or("").to_lowercase()).or_default().push((ts, e["usd"].as_f64().unwrap_or(0.0)));
         }
     }
@@ -313,7 +435,8 @@ pub fn window(samples: &[Sample], flows: &[Flow], from: i64, to: i64) -> Value {
     })();
     json!({
         "complete": true, "from": a.ts, "to": b.ts, "start_usd": cap_a, "end_usd": cap_b, "net_flows_usd": net,
-        "pnl_usd": pnl, "return": ret, "vs_hold_usd": vs.map(|x| x.0), "vs_hold": vs.map(|x| x.1), "samples": inside.len(),
+        "pnl_usd": pnl, "return": ret, "return_base_usd": (base > 0.0).then_some(base),
+        "vs_hold_usd": vs.map(|x| x.0), "vs_hold": vs.map(|x| x.1), "samples": inside.len(),
     })
 }
 
@@ -420,80 +543,88 @@ pub fn pool_report(samples: &[Sample], flows: &[Flow], fees: &[(i64, f64)], cost
 /// 24 h / 7 d / 30 d figures. `costs`: pool → per day (day start, gas USD, swap cost USD), the
 /// ledger's.
 pub fn report(days: i64, costs: &HashMap<String, Vec<(i64, f64, f64)>>) -> Value {
-    refresh();
     let now = super::now();
+    let pools = crate::settings::load_pools();
+    with_history(now, |st| report_at(st, &events(), &pools, costs, days, now))
+}
+
+fn report_at(st: &Store, events: &[Value], configured: &[Value], costs: &HashMap<String, Vec<(i64, f64, f64)>>, days: i64, now: i64) -> Value {
     let from = if days > 0 { now - days * 86_400 } else { now - KEEP_S };
-    let events = events();
-    let fl = flows_from(&events, from.min(now - 31 * 86_400) - 3600);
-    let fe = fees_from(&events, from.min(now - 31 * 86_400) - 3600);
-    let g = STORE.lock().unwrap();
-    let empty = vec![];
+    let since = from.min(now - 31 * 86_400) - 3600;
+    let mode = st.mode();
+    let fl = flows_from(st, mode, events, since);
+    let fe = fees_from(st, mode, events, since);
+    let samples = st.samples();
     let mut pools = vec![];
-    for p in crate::settings::load_pools() {
+    for p in configured {
         let addr = p["pool"].as_str().unwrap_or("").to_lowercase();
-        let s = g.as_ref().and_then(|st| st.samples.get(&addr)).unwrap_or(&empty);
+        let s = samples.get(&addr).map(Vec::as_slice).unwrap_or_default();
         // a pool that is off and held nothing in the period is left out
         if p["enabled"] != true && !s.iter().any(|x| x.ts >= from && x.capital_usd >= 1.0) {
             continue;
         }
-        let f = fl.get(&addr).cloned().unwrap_or_default();
-        let fz = fe.get(&addr).cloned().unwrap_or_default();
-        let c = costs.get(&addr).cloned().unwrap_or_default();
-        let mut r = pool_report(s, &f, &fz, &c, from, now, 360);
-        let short = |secs: i64| pool_report(s, &f, &fz, &c, now - secs, now, 2)["window"].clone();
+        let f = fl.get(&addr).map(Vec::as_slice).unwrap_or_default();
+        let fz = fe.get(&addr).map(Vec::as_slice).unwrap_or_default();
+        let c = if mode == HistoryMode::Live { costs.get(&addr).map(Vec::as_slice).unwrap_or_default() } else { &[] };
+        let mut r = pool_report(s, f, fz, c, from, now, 360);
+        let short = |secs: i64| pool_report(s, f, fz, c, now - secs, now, 2)["window"].clone();
         r["pool"] = json!(addr);
         r["name"] = p["name"].clone();
-        r["chain_id"] = json!(crate::worker::pool_chain(&p));
+        r["chain_id"] = json!(crate::worker::pool_chain(p));
         r["enabled"] = p["enabled"].clone();
         r["capital_usd"] = json!(s.last().map(|x| x.capital_usd));
         r["first_ts"] = json!(s.first().map(|x| x.ts));
+        r["last_ts"] = json!(s.last().map(|x| x.ts));
         r["h24"] = short(86_400);
         r["d7"] = short(7 * 86_400);
         r["d30"] = short(30 * 86_400);
         pools.push(r);
     }
-    json!({"now": now, "days": days, "from": from, "pools": pools})
+    json!({"now": now, "days": days, "from": from, "history_mode": (!samples.is_empty()).then(|| mode.label()), "pools": pools})
 }
 
 /// Every configured pool's figures over 24 h, 7 d and 30 d.
 pub fn all() -> Value {
-    refresh();
     let now = super::now();
-    let fl = flows(now - 31 * 86_400);
-    let g = STORE.lock().unwrap();
-    let Some(st) = g.as_ref() else { return json!({}) };
-    let mut out = serde_json::Map::new();
-    for p in crate::settings::load_pools() {
-        let addr = p["pool"].as_str().unwrap_or("").to_lowercase();
-        let empty = vec![];
-        let s = st.samples.get(&addr).unwrap_or(&empty);
-        let f = fl.get(&addr).cloned().unwrap_or_default();
-        out.insert(addr.clone(), json!({
-            "name": p["name"],
-            "h24": window(s, &f, now - 86_400, now),
-            "d7": window(s, &f, now - 7 * 86_400, now),
-            "d30": window(s, &f, now - 30 * 86_400, now),
-            "capital_usd": s.last().map(|x| x.capital_usd),
-        }));
-    }
-    Value::Object(out)
+    let configured = crate::settings::load_pools();
+    with_history(now, |st| {
+        let fl = flows_from(st, st.mode(), &events(), now - 31 * 86_400);
+        let mut out = serde_json::Map::new();
+        for p in configured {
+            let addr = p["pool"].as_str().unwrap_or("").to_lowercase();
+            let s = st.samples().get(&addr).map(Vec::as_slice).unwrap_or_default();
+            let f = fl.get(&addr).map(Vec::as_slice).unwrap_or_default();
+            out.insert(addr, json!({
+                "name": p["name"],
+                "h24": window(s, f, now - 86_400, now),
+                "d7": window(s, f, now - 7 * 86_400, now),
+                "d30": window(s, f, now - 30 * 86_400, now),
+                "capital_usd": s.last().map(|x| x.capital_usd),
+            }));
+        }
+        Value::Object(out)
+    })
 }
 
 /// One pool's figures for a window ending now.
 pub fn pool(addr: &str, seconds: i64) -> Value {
-    refresh();
     let now = super::now();
+    pool_since(addr, now - seconds, now)
+}
+
+/// One pool's figures for the given window.
+pub fn pool_since(addr: &str, from: i64, to: i64) -> Value {
     let addr = addr.to_lowercase();
-    let fl = flows(now - seconds - 3600).remove(&addr).unwrap_or_default();
-    let g = STORE.lock().unwrap();
-    let s = g.as_ref().and_then(|st| st.samples.get(&addr).cloned()).unwrap_or_default();
-    window(&s, &fl, now - seconds, now)
+    with_history(to, |st| {
+        let Some(s) = st.samples().get(&addr) else { return window(&[], &[], from, to) };
+        let fl = flows_from(st, st.mode(), &events(), from - 3600);
+        window(s, fl.get(&addr).map(Vec::as_slice).unwrap_or_default(), from, to)
+    })
 }
 
 /// The pool's samples (for the shadow books and the snapshot).
 pub fn samples(addr: &str) -> Vec<Sample> {
-    refresh();
-    STORE.lock().unwrap().as_ref().and_then(|st| st.samples.get(&addr.to_lowercase()).cloned()).unwrap_or_default()
+    with_history(super::now(), |st| st.samples().get(&addr.to_lowercase()).cloned().unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -545,13 +676,80 @@ mod tests {
             json!({"ts": 50, "kind": "unpark", "live": true, "pool": "0xa", "back": "1010000000",
                    "lot": {"kind": "claim", "pool": "0xb", "amount": "1000000000", "usd": 1000.0}}),
             json!({"ts": 60, "kind": "capital", "what": "fees", "pool": "0xa", "usd": 3.0}),
+            json!({"ts": 70, "kind": "capital", "what": "add", "live": true, "pool": "0xb", "usd": 50.0,
+                   "from_unallocated_usd": 20.0, "from_pools_usd": {"0xa": 30.0}}),
         ];
-        let f = flows_from(&ev, 0);
+        let st = Store::default();
+        let f = flows_from(&st, HistoryMode::Live, &ev, 0);
         let a: Vec<(f64, &str)> = f["0xa"].iter().map(|x| ((x.usd * 1e6).round() / 1e6, x.kind.as_str())).collect();
-        assert_eq!(a, vec![(100.0, "deposit"), (-40.0, "withdrawal"), (-10.0, "transfer out"), (10.0, "transfer in")]);
-        let b: Vec<f64> = f["0xb"].iter().map(|x| (x.usd * 1e6).round() / 1e6).collect();
-        assert_eq!(b, vec![10.0, -5.0, -10.0]);
-        assert_eq!(fees_from(&ev, 0)["0xa"], vec![(60, 3.0)]);
+        assert_eq!(a, vec![(100.0, "deposit"), (-40.0, "withdrawal"), (-10.0, "transfer out"), (10.0, "transfer in"), (-30.0, "transfer out")]);
+        let b: Vec<(f64, &str)> = f["0xb"].iter().map(|x| ((x.usd * 1e6).round() / 1e6, x.kind.as_str())).collect();
+        assert_eq!(b, vec![(10.0, "transfer in"), (-5.0, "sent out"), (-10.0, "transfer out"), (20.0, "deposit"), (30.0, "transfer in")]);
+        assert_eq!(fees_from(&st, HistoryMode::Live, &ev, 0)["0xa"], vec![(60, 3.0)]);
+    }
+
+    fn snapshot(ts: i64, mode: &str, capital: f64) -> Value {
+        json!({"ts": ts, "mode": mode, "pool_capital": {"0xa": capital}, "pools": {"Pool A": {}}})
+    }
+
+    #[test]
+    fn report_uses_live_capital_and_excludes_legacy_dry_run_flows() {
+        let pools = [json!({"pool": "0xa", "name": "Pool A", "enabled": true})];
+        let names = HashMap::from([("Pool A".to_string(), "0xa".to_string())]);
+        let costs = HashMap::from([("0xa".to_string(), vec![(0, 2.0, 1.0)])]);
+        let mut st = Store::default();
+        let mut dec = |_: u64, _: &str| None;
+        let ev = [
+            json!({"ts": 330, "kind": "capital", "what": "shrink", "pool": "0xa", "usd": 10.0}),
+            json!({"ts": 3900, "kind": "capital", "what": "release", "pool": "0xa", "usd": 20.0, "dry": true}),
+            json!({"ts": 3900, "kind": "capital", "what": "withdraw", "pool": "0xa", "usd": 200.0}),
+            json!({"ts": 4050, "kind": "capital", "what": "fees", "pool": "0xa", "usd": 5.0}),
+            json!({"ts": 4060, "kind": "capital", "what": "release", "pool": "0xa", "usd": 4.0, "live": false}),
+        ];
+        for (ts, mode, capital) in [(10, "dry run", 700.0), (420, "dry run", 690.0), (4000, "paused", 670.0)] {
+            st.record(&snapshot(ts, mode, capital), &names, &mut dec);
+        }
+        let dry = report_at(&st, &ev, &pools, &costs, 1, 9000);
+        assert_eq!(dry["history_mode"], "dry run");
+        let w = &dry["pools"][0]["h24"];
+        assert_eq!(w["pnl_usd"], 0.0);
+        assert_eq!(w["withdrawals_usd"], 30.0);
+        assert_eq!(w["fees_claimed_usd"], 0.0);
+        assert_eq!(w["gas_usd"], 0.0);
+        for (ts, capital) in [(100, 1000.0), (310, 1000.0), (4010, 800.0), (8000, 805.0)] {
+            st.record(&snapshot(ts, "LIVE", capital), &names, &mut dec);
+        }
+        let live = report_at(&st, &ev, &pools, &costs, 1, 9000);
+        assert_eq!(live["history_mode"], "live");
+        let p = &live["pools"][0];
+        assert_eq!(p["last_ts"], 8000);
+        let w = &p["h24"];
+        assert_eq!(w["samples"], 4);
+        assert_eq!(w["pnl_usd"], 5.0);
+        assert_eq!(w["withdrawals_usd"], 200.0);
+        assert_eq!(w["fees_claimed_usd"], 5.0);
+        assert_eq!(w["gas_usd"], 2.0);
+    }
+
+    #[test]
+    fn switching_wallets_keeps_separate_snapshot_offsets_and_samples() {
+        let home = crate::wallets::tests::temp_home("performance-wallets");
+        let ts = super::super::now() - 5;
+        let write = |mode, capital| {
+            std::fs::create_dir_all(crate::paths::config()).unwrap();
+            std::fs::create_dir_all(crate::paths::logs()).unwrap();
+            let p = json!([{"name": "Pool A", "pool": "0xa", "enabled": true}]);
+            std::fs::write(crate::paths::config().join("pools.json"), p.to_string()).unwrap();
+            std::fs::write(crate::paths::logs().join("snapshots.jsonl"), format!("{}\n", snapshot(ts, mode, capital))).unwrap();
+        };
+        write("LIVE", 111.0);
+        crate::paths::scope("watch", || write("dry run", 876.0));
+        let latest = || samples("0xa").last().unwrap().capital_usd;
+        assert_eq!(latest(), 111.0);
+        assert_eq!(crate::paths::scope("watch", latest), 876.0);
+        assert!(crate::paths::scope("empty", || samples("0xa")).is_empty());
+        assert_eq!(latest(), 111.0);
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
@@ -602,9 +800,11 @@ mod tests {
         }).collect();
         let w = window(&v, &[], 0, 200_000);
         assert!(w["pnl_usd"].as_f64().unwrap().abs() < 1e-9, "{w}");
+        assert_eq!(w["return_base_usd"], 1000.0);
     }
 
     /// The report on real logs: PERF_LOGS=<a logs folder> PERF_POOLS=<pools.json>, read only.
+    /// PERF_AT can pin the end of the report to a Unix timestamp.
     #[test]
     #[ignore]
     fn report_on_real_logs() {
@@ -612,27 +812,25 @@ mod tests {
         let pools: Value = serde_json::from_str(&std::fs::read_to_string(pools).unwrap()).unwrap();
         let pools = pools.as_array().cloned().or_else(|| pools["pools"].as_array().cloned()).unwrap();
         let names: HashMap<String, String> = pools.iter().filter_map(|p| Some((p["name"].as_str()?.to_string(), p["pool"].as_str()?.to_lowercase()))).collect();
-        let mut samples: HashMap<String, Vec<Sample>> = HashMap::new();
+        let mut st = Store::default();
+        let as_of: Option<i64> = std::env::var("PERF_AT").ok().and_then(|v| v.parse().ok());
         let text = std::fs::read_to_string(format!("{dir}/snapshots.jsonl")).unwrap();
         let mut dec = |_: u64, _: &str| Some((18, 18));
         for line in text.lines().filter(|l| l.contains("\"pool_capital\"")) {
-            if let Ok(v) = serde_json::from_str::<Value>(line) {
-                for (a, s) in parse_line(&v, &names, &mut dec) {
-                    push_sample(samples.entry(a).or_default(), s);
-                }
+            if let Some(v) = serde_json::from_str::<Value>(line).ok().filter(|v| v["ts"].as_i64().is_some_and(|ts| as_of.is_none_or(|to| ts <= to))) {
+                st.record(&v, &names, &mut dec);
             }
         }
         let mut events: Vec<Value> = std::fs::read_to_string(format!("{dir}/executor.jsonl")).unwrap().lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
-        events.extend(std::fs::read_to_string(format!("{dir}/flows_extra.jsonl")).unwrap_or_default().lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()));
+        append_extra(&mut events, Path::new(&dir));
         events.sort_by_key(|e| e["ts"].as_i64().unwrap_or(0));
-        let fl = flows_from(&events, 0);
-        let fe = fees_from(&events, 0);
-        let to = samples.values().filter_map(|v| v.last()).map(|s| s.ts).max().unwrap();
-        for days in [7i64, 14, 30, 400] {
-            for (name, addr) in &names {
-                let Some(s) = samples.get(addr) else { continue };
-                let r = pool_report(s, fl.get(addr).map(|v| v.as_slice()).unwrap_or(&[]), fe.get(addr).map(|v| v.as_slice()).unwrap_or(&[]), &[], to - days * 86_400, to, 10);
+        let to = as_of.unwrap_or_else(|| st.samples().values().filter_map(|v| v.last()).map(|s| s.ts).max().unwrap());
+        let costs = HashMap::new();
+        for days in [1i64, 7, 14, 30, 400] {
+            let results = report_at(&st, &events, &pools, &costs, days, to);
+            for r in results["pools"].as_array().unwrap() {
                 let w = &r["window"];
+                let name = r["name"].as_str().unwrap_or("");
                 println!("{days:>3}d {name:<11} start {:>9.2} end {:>9.2} flows {:>9.2} (dep {:.2} wd {:.2} tr {:.2}) pnl {:>8.2} ret {:>6.2}% vs_hold {:>8.2} parked {:.0}% days {:.1}",
                     w["start_usd"].as_f64().unwrap_or(0.0), w["end_usd"].as_f64().unwrap_or(0.0), w["net_flows_usd"].as_f64().unwrap_or(0.0),
                     w["deposits_usd"].as_f64().unwrap_or(0.0), w["withdrawals_usd"].as_f64().unwrap_or(0.0), w["transfers_usd"].as_f64().unwrap_or(0.0),
@@ -640,35 +838,16 @@ mod tests {
                     w["parked_share"].as_f64().unwrap_or(0.0) * 100.0, w["days"].as_f64().unwrap_or(0.0));
             }
         }
-        for (addr, v) in &fl {
+        for (addr, v) in flows_from(&st, st.mode(), &events, 0) {
             for f in v {
-                println!("flow {} {} {:>9.2} {}", &addr[..8], f.ts, f.usd, f.kind);
+                println!("flow {} {} {:>9.2} {}", &addr[..addr.len().min(8)], f.ts, f.usd, f.kind);
             }
         }
         // the /api/pool_stats/<days> answer, for a page preview
         if let Ok(out) = std::env::var("PERF_OUT") {
             let mut all = serde_json::Map::new();
             for days in [7i64, 30, 90, 0] {
-                let from = if days > 0 { to - days * 86_400 } else { to - KEEP_S };
-                let mut ps = vec![];
-                for p in &pools {
-                    let addr = p["pool"].as_str().unwrap_or("").to_lowercase();
-                    let Some(s) = samples.get(&addr) else { continue };
-                    let f = fl.get(&addr).cloned().unwrap_or_default();
-                    let fz = fe.get(&addr).cloned().unwrap_or_default();
-                    let mut r = pool_report(s, &f, &fz, &[], from, to, 360);
-                    let short = |secs: i64| pool_report(s, &f, &fz, &[], to - secs, to, 2)["window"].clone();
-                    r["pool"] = json!(addr);
-                    r["name"] = p["name"].clone();
-                    r["chain_id"] = json!(8453);
-                    r["enabled"] = p["enabled"].clone();
-                    r["capital_usd"] = json!(s.last().map(|x| x.capital_usd));
-                    r["h24"] = short(86_400);
-                    r["d7"] = short(7 * 86_400);
-                    r["d30"] = short(30 * 86_400);
-                    ps.push(r);
-                }
-                all.insert(days.to_string(), json!({"now": to, "days": days, "from": from, "pools": ps}));
+                all.insert(days.to_string(), report_at(&st, &events, &pools, &costs, days, to));
             }
             std::fs::write(out, Value::Object(all).to_string()).unwrap();
         }
@@ -677,9 +856,9 @@ mod tests {
     #[test]
     fn one_sample_per_bucket_keeps_the_newest() {
         let mut v = vec![];
-        for t in [0, 100, 299, 300, 650] {
+        for t in [0, 299, 100, 650, 300, 325] {
             push_sample(&mut v, Sample { ts: t, capital_usd: t as f64, ..Default::default() });
         }
-        assert_eq!(v.iter().map(|x| x.ts).collect::<Vec<_>>(), vec![299, 300, 650]);
+        assert_eq!(v.iter().map(|x| x.ts).collect::<Vec<_>>(), vec![299, 325, 650]);
     }
 }
